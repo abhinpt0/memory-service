@@ -433,7 +433,7 @@ func DefaultConfig() Config {
 		DeveloperFrontendDir:      "",
 		DeveloperFrontendClientID: "developer-frontend",
 		DeveloperFrontendAuthMode: DeveloperFrontendAuthOIDC,
-		CognitiveAPIURL:           "",
+		CognitiveAPIURL:           "http://localhost:8090",
 	}
 }
 
