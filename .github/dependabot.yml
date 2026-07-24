@@ -9,7 +9,7 @@ updates:
       time: "06:00"
       timezone: "America/New_York"
     cooldown:
-      default-days: 7
+      default-days: 10
     groups:
       github-actions-dependencies:
         patterns: ["*"]
@@ -26,7 +26,7 @@ updates:
       time: "06:15"
       timezone: "America/New_York"
     cooldown:
-      default-days: 7
+      default-days: 10
     groups:
       go-dependencies:
         patterns: ["*"]
@@ -44,7 +44,7 @@ updates:
       time: "06:30"
       timezone: "America/New_York"
     cooldown:
-      default-days: 7
+      default-days: 10
     groups:
       maven-dependencies:
         patterns: ["*"]
@@ -74,7 +74,7 @@ updates:
       time: "06:45"
       timezone: "America/New_York"
     cooldown:
-      default-days: 7
+      default-days: 10
     groups:
       npm-dependencies:
         patterns: ["*"]
@@ -111,7 +111,7 @@ updates:
       time: "07:00"
       timezone: "America/New_York"
     cooldown:
-      default-days: 7
+      default-days: 10
     groups:
       python-dependencies:
         patterns: ["*"]
@@ -131,7 +131,7 @@ updates:
       time: "07:15"
       timezone: "America/New_York"
     cooldown:
-      default-days: 7
+      default-days: 10
     groups:
       docker-dependencies:
         patterns: ["*"]
@@ -149,7 +149,7 @@ updates:
       time: "07:30"
       timezone: "America/New_York"
     cooldown:
-      default-days: 7
+      default-days: 10
     groups:
       compose-dependencies:
         patterns: ["*"]
@@ -165,7 +165,7 @@ updates:
       time: "07:45"
       timezone: "America/New_York"
     cooldown:
-      default-days: 7
+      default-days: 10
     groups:
       devcontainer-dependencies:
         patterns: ["*"]
