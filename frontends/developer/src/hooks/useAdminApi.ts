@@ -78,12 +78,13 @@ export function useAdminConversationEntries(conversationId: string, params?: {
   );
 }
 
-export function useAdminEntry(entryId: string) {
-  return useQuery(
-    adminGetEntryOptions({
+export function useAdminEntry(entryId: string, options?: { enabled?: boolean }) {
+  return useQuery({
+    ...adminGetEntryOptions({
       path: { id: entryId },
-    })
-  );
+    }),
+    ...options,
+  });
 }
 
 export function useArchiveConversation() {

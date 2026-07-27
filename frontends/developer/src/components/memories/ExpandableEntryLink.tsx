@@ -9,7 +9,7 @@ interface ExpandableEntryLinkProps {
 
 export function ExpandableEntryLink({ entryId }: ExpandableEntryLinkProps) {
   const [isExpanded, setIsExpanded] = useState(false);
-  const { data: entry, isLoading, error } = useAdminEntry(entryId);
+  const { data: entry, isLoading, error } = useAdminEntry(entryId, { enabled: isExpanded });
 
   const toggleExpand = () => {
     setIsExpanded(!isExpanded);
