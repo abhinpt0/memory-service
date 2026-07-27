@@ -1,5 +1,6 @@
 {
   "apiUrl": "http://localhost:8082",
+  "cognitiveApiUrl": "http://localhost:8090",
   "auth": {
     "mode": "oidc",
     "authority": "http://localhost:8081/realms/memory-service",

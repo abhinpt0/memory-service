@@ -4,8 +4,6 @@ WORKDIR /build
 COPY frontends/developer/package*.json ./
 RUN npm ci
 COPY frontends/developer/ ./
-ARG VITE_COGNITION_BASE_URL=""
-ENV VITE_COGNITION_BASE_URL=${VITE_COGNITION_BASE_URL}
 RUN npm run build
 
 # Build Go binary
