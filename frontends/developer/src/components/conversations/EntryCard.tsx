@@ -6,6 +6,7 @@ import { TimestampPopover } from "@/components/ui/timestamp-popover";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { Entry } from "@/api/client";
+import type { ChannelFilter } from "@/lib/entry-render-items";
 
 export interface ForkOption {
   conversationId: string;
@@ -23,7 +24,7 @@ interface EntryCardProps {
   formatDate?: (date: string) => string;
   isHighlighted?: boolean;
   onClick?: () => void;
-  channelFilter?: string;
+  channelFilter?: ChannelFilter;
   entryIdLabel?: string;
   entryIdTitle?: string;
 }
