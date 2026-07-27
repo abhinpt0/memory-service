@@ -28,10 +28,8 @@ function SearchConversationsPage() {
     fetchNextPage,
   } = useAdminSearchConversations({
     query: debouncedQuery,
-    searchType: "fulltext",
     limit: 20,
     includeEntry: true,
-    groupByConversation: true,
   });
 
   const results = (data?.pages.flatMap((page) => page.data || []) || [])

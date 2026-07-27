@@ -157,10 +157,8 @@ export function useAdminMemory(memoryId: string) {
 // Search
 export function useAdminSearchConversations(params: {
   query: string;
-  searchType?: "auto" | "semantic" | "fulltext" | string[];
   limit?: number;
   includeEntry?: boolean;
-  groupByConversation?: boolean;
 }) {
   const limit = params.limit ?? 20;
   return useInfiniteQuery({
