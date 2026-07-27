@@ -7,6 +7,8 @@ import { ChevronDown, ChevronRight } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { Entry } from "@/api/client";
 import type { ChannelFilter } from "@/lib/entry-render-items";
+import { ContentRenderer } from "@/components/content-renderers/ContentRenderer";
+import type { ViewMode } from "@/components/content-renderers/useContentViewMode";
 
 export interface ForkOption {
   conversationId: string;
@@ -27,6 +29,10 @@ interface EntryCardProps {
   channelFilter?: ChannelFilter;
   entryIdLabel?: string;
   entryIdTitle?: string;
+  /** When provided, overrides the default ContentRenderer for the entry body */
+  children?: React.ReactNode;
+  /** Controls rendered vs raw JSON toggle for history entries */
+  viewMode?: ViewMode;
 }
 
 const MAX_PREVIEW_LENGTH = 200;
@@ -98,6 +104,8 @@ export const EntryCard = React.forwardRef<HTMLDivElement, EntryCardProps>(
       channelFilter,
       entryIdLabel,
       entryIdTitle,
+      children,
+      viewMode,
     },
     ref,
   ) => {
@@ -206,9 +214,13 @@ export const EntryCard = React.forwardRef<HTMLDivElement, EntryCardProps>(
             {entry.indexedContent && (
               <ExpandableField label="Indexed Content" value={entry.indexedContent} />
             )}
-            {entry.content && (
-              <ExpandableField label="Raw Content" value={entry.content} />
-            )}
+            {children ?? (entry.content && (
+              <ContentRenderer
+                content={entry.content as unknown[]}
+                contentType={entry.contentType || ""}
+                viewMode={viewMode}
+              />
+            ))}
           </div>
         </div>
       );

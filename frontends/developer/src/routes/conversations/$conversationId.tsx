@@ -587,9 +587,10 @@ const EntryCard = React.forwardRef<
   }
 >(
   (
-    { entry, formatDate, isHighlighted, onClick, channelFilter, entryIdLabel, entryIdTitle },
+    { entry, formatDate, isHighlighted, onClick, channelFilter, historyViewMode, entryIdLabel, entryIdTitle, children },
     ref,
   ) => {
+    const viewMode = entry.channel === "history" ? historyViewMode : "rendered";
     return (
       <SharedEntryCard
         ref={ref}
@@ -600,7 +601,10 @@ const EntryCard = React.forwardRef<
         channelFilter={channelFilter}
         entryIdLabel={entryIdLabel}
         entryIdTitle={entryIdTitle}
-      />
+        viewMode={viewMode}
+      >
+        {children}
+      </SharedEntryCard>
     );
   },
 );
