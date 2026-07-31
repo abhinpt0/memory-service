@@ -18,7 +18,7 @@ Use `scripts/dependabot_batch.py` for discovery, isolated validation, caching, a
 2. Inspect every selected PR before executing dependency code:
    - Confirm it is authored by Dependabot and targets the default branch.
    - Review its manifest and lockfile changes.
-   - Enforce the 14-day release cooldown for direct and changed transitive versions using authoritative registry or release metadata.
+   - Enforce the 7-day release cooldown for direct and changed transitive versions using authoritative registry or release metadata.
    - Defer a PR if any changed version is too new or its publication time cannot be verified.
    - Record the checked PR number, exact head SHA, versions, publication dates, and conclusion in a JSON cooldown report. Use this shape:
 
@@ -29,7 +29,7 @@ Use `scripts/dependabot_batch.py` for discovery, isolated validation, caching, a
          "344": {
            "headSha": "full commit SHA",
            "status": "eligible",
-           "summary": "All changed versions were published at least 14 days ago."
+           "summary": "All changed versions were published at least 7 days ago."
          }
        }
      }
@@ -69,7 +69,7 @@ Use `scripts/dependabot_batch.py` for discovery, isolated validation, caching, a
      --publish
    ```
 
-   Publication pushes the exact validated batch commit to a new `chore/dependabot-batch-*` branch and opens one draft PR. The PR body records the source PRs and SHAs, their CI states, the cooldown evidence, and all local gates. Do not edit, close, approve, or merge the original Dependabot PRs.
+   Publication pushes the exact validated batch commit to a new `chore/dependabot-batch-*` branch and opens one draft PR. Batch merge commits must use the caller's normal Git author and committer identity; do not override `user.name`, `user.email`, or the corresponding `GIT_*` environment variables. The PR body records the source PRs and SHAs, their CI states, the cooldown evidence, and all local gates. Do not edit, close, approve, or merge the original Dependabot PRs.
 
 ## Result handling
 
