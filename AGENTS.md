@@ -113,20 +113,6 @@ task test:go > test.log 2>&1
 # Then search for errors using Grep tool on test.log
 ```
 
-**Skills** live in `.skills/` — open the matching file before starting that kind of work:
-- `./.skills/build-test/SKILL.md` — build, test, and dev commands across Go, Java, frontend, and Python modules.
-- `./.skills/testing/SKILL.md` — writing/debugging tests; Cucumber BDD patterns and failure reporting.
-- `./.skills/cucumber-features/skill.md` — editing or creating `*.feature` files; API documentation guidelines.
-- `./.skills/site-tests/skill.md` — documentation tests (`internal/sitebdd/`); generation pipeline, fixtures, assertions.
-- `./.skills/gorm-query-patterns/SKILL.md` — any GORM query work; choosing `Take`/`First`/`Find` and avoiding noisy `record not found` logs.
-- `./.skills/operationevent-logging/SKILL.md` — REST/gRPC boundaries, provider errors, error wrapping, workers, indexers, streams, `internal/operationevent`.
-- `./.skills/openapi-workflow/SKILL.md` — changing the OpenAPI contract and regenerating clients.
-- `./.skills/chat-frontend/SKILL.md` — the React chat frontend; architecture, components, styling, state.
-- `./.skills/enhancement-docs/SKILL.md` — writing/editing docs in `docs/enhancements/`; format, conventions, numbering.
-- `./.skills/checkpoint-maintenance.md` — modifying tutorials (`site/src/pages/docs/`), doc checkpoints, or memory-service APIs.
-- `./.skills/prepare-pull-request/SKILL.md` — creating/readying any PR; requires `task generate` before the final commit.
-- `./.skills/verify-dependabot-prs/SKILL.md` — inspecting, verifying, or consolidating the Dependabot PR queue.
-
 **Module-specific knowledge** lives in `FACTS.md` files within each module directory:
 - `./frontends/chat-frontend/FACTS.md`
 - `./frontends/developer/FACTS.md`
