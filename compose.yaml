@@ -213,6 +213,8 @@ services:
       MEMORY_SERVICE_DEVELOPER_FRONTEND_AUTH_MODE: api-key
       MEMORY_SERVICE_DEVELOPER_FRONTEND_API_KEY: developer-frontend-api-key
       MEMORY_SERVICE_BASE_URL: "http://localhost:8082"
+      # Uncomment when runing with cognition.
+      # MEMORY_SERVICE_COGNITIVE_API_URL: "http://localhost:8090"
 
       # ── Observability ──────────────────────────────────────────
       MEMORY_SERVICE_PROMETHEUS_URL: http://prometheus:9090
