@@ -7,7 +7,6 @@ import argparse
 import datetime as dt
 import hashlib
 import json
-import os
 from pathlib import Path
 import shlex
 import subprocess
@@ -270,10 +269,6 @@ def prepare_worktree(
         raise BatchError(f"worktree path already exists: {path}")
     command(["wt", "add", name], cwd=root, capture=False)
     command(["git", "switch", "-c", branch, base_ref], cwd=path)
-    command(["git", "config", "user.name", "Dependabot Batch Verifier"], cwd=path)
-    command(
-        ["git", "config", "user.email", "dependabot-batch@users.noreply.github.com"], cwd=path
-    )
     for pr in prs:
         ref = f"refs/dependabot-batch/{namespace}/pr-{pr['number']}"
         result = command(

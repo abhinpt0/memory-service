@@ -69,7 +69,7 @@ Use `scripts/dependabot_batch.py` for discovery, isolated validation, caching, a
      --publish
    ```
 
-   Publication pushes the exact validated batch commit to a new `chore/dependabot-batch-*` branch and opens one draft PR. The PR body records the source PRs and SHAs, their CI states, the cooldown evidence, and all local gates. Do not edit, close, approve, or merge the original Dependabot PRs.
+   Publication pushes the exact validated batch commit to a new `chore/dependabot-batch-*` branch and opens one draft PR. Batch merge commits must use the caller's normal Git author and committer identity; do not override `user.name`, `user.email`, or the corresponding `GIT_*` environment variables. The PR body records the source PRs and SHAs, their CI states, the cooldown evidence, and all local gates. Do not edit, close, approve, or merge the original Dependabot PRs.
 
 ## Result handling
 
