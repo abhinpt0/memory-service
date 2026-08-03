@@ -427,7 +427,7 @@ services:
 
   clickhouse:
     profiles: ["langfuse"]
-    image: clickhouse/clickhouse-server:26.6.1.1193
+    image: clickhouse/clickhouse-server:26.7.1.1315
     environment:
       CLICKHOUSE_DB: default
       CLICKHOUSE_USER: clickhouse
