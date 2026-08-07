@@ -184,6 +184,11 @@ message ListConversationsRequest {
   PageRequest page = 3;
   ConversationAncestryFilter ancestry = 4;
   ArchiveFilter archived = 5;
+  // Optional metadata key-value filter. Only one metadata filter is accepted per request.
+  // The key may only contain alphanumeric characters, underscores, and hyphens (dots are rejected).
+  // The comparison is an exact string match — numeric or boolean metadata values do not match a string query value.
+  optional string metadata_filter_key = 6;
+  optional string metadata_filter_value = 7;
 }
 
 message ListConversationsResponse {
@@ -277,6 +282,11 @@ message SyncEntriesRequest {
   // The content array holds all messages; comparison is done against
   // the flattened content of existing entries in the latest epoch.
   CreateEntryRequest entry = 2;
+  // Optional conversation patch applied with the sync. PostgreSQL and SQLite commit
+  // both changes atomically; MongoDB currently applies them as separate operations.
+  // Supports title, metadata merge-patch, and archived. Setting archived=false
+  // unarchives before syncing; plain syncs are blocked on archived conversations.
+  optional UpdateConversationRequest conversation_patch = 3;
 }
 
 message SyncEntriesResponse {
@@ -292,6 +302,11 @@ message AppendEntryRequest {
   string conversation_id = 1;
   CreateEntryRequest entry = 2;
   optional int64 epoch = 3;
+  // Optional conversation patch applied with the append. PostgreSQL and SQLite commit
+  // both changes atomically; MongoDB currently applies them as separate operations.
+  // Supports title, metadata merge-patch, and archived. Setting archived=false
+  // unarchives before appending; plain appends are blocked on archived conversations.
+  optional UpdateConversationRequest conversation_patch = 4;
 }
 
 message AppendEntriesRequest {
@@ -299,6 +314,11 @@ message AppendEntriesRequest {
   string conversation_id = 1;
   repeated CreateEntryRequest entries = 2;
   optional int64 epoch = 3;
+  // Optional conversation patch applied once for all entries. PostgreSQL and SQLite
+  // commit the entries and patch atomically; MongoDB currently applies them as separate
+  // operations. Supports title, metadata merge-patch, and
+  // archived. Setting archived=false unarchives before appending.
+  optional UpdateConversationRequest conversation_patch = 4;
 }
 
 message AppendEntriesResponse {
@@ -388,6 +408,11 @@ message AdminListConversationsRequest {
   optional google.protobuf.Timestamp archived_before = 9;
   // Optional: admin/auditor justification, logged for admin access.
   optional string justification = 10;
+  // Optional metadata key-value filter. Only one metadata filter is accepted per request.
+  // The key may only contain alphanumeric characters, underscores, and hyphens (dots are rejected).
+  // The comparison is an exact string match — numeric or boolean metadata values do not match a string query value.
+  optional string metadata_filter_key = 11;
+  optional string metadata_filter_value = 12;
 }
 
 message AdminListConversationsResponse {
@@ -402,6 +427,11 @@ message AdminUpdateConversationRequest {
   optional bool archived = 2;
   // Optional: admin justification, logged for admin access.
   optional string justification = 3;
+  // Optional: new title for the conversation (empty string clears it).
+  optional string title = 4;
+  // Optional: metadata merge-patch. Keys present are set, absent are left unchanged,
+  // keys set to null are removed.
+  optional google.protobuf.Struct metadata = 5;
 }
 
 message AdminListMembershipsRequest {
@@ -451,6 +481,7 @@ message AdminConversationSummary {
   bool archived = 10;
   string client_id = 11;
   optional string agent_id = 12;
+  google.protobuf.Struct metadata = 13;
 }
 
 message AdminChildConversationSummary {

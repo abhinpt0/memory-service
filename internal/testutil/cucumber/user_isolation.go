@@ -67,14 +67,47 @@ func (s *TestScenario) RewriteRequestPath(path string) string {
 	}
 	parsed.Path = strings.Join(segments, "/")
 
-	values := parsed.Query()
-	for key, vals := range values {
-		for i, val := range vals {
-			vals[i] = s.IsolatedUser(val)
-		}
-		values[key] = vals
+	if parsed.RawQuery == "" {
+		return parsed.String()
 	}
-	parsed.RawQuery = values.Encode()
+
+	fragments := strings.Split(parsed.RawQuery, "&")
+	rewritten := make([]string, 0, len(fragments))
+	for _, fragment := range fragments {
+		if fragment == "" {
+			rewritten = append(rewritten, "")
+			continue
+		}
+
+		encodedName := fragment
+		encodedValue := ""
+		hasEquals := false
+		if index := strings.IndexByte(fragment, '='); index >= 0 {
+			encodedName = fragment[:index]
+			encodedValue = fragment[index+1:]
+			hasEquals = true
+		}
+
+		name, err := url.QueryUnescape(encodedName)
+		if err != nil {
+			name = encodedName
+		}
+		value := ""
+		if hasEquals {
+			value, err = url.QueryUnescape(encodedValue)
+			if err != nil {
+				value = encodedValue
+			}
+		}
+
+		encodedName = url.QueryEscape(name)
+		if hasEquals {
+			rewritten = append(rewritten, encodedName+"="+url.QueryEscape(s.IsolatedUser(value)))
+		} else {
+			rewritten = append(rewritten, encodedName)
+		}
+	}
+	parsed.RawQuery = strings.Join(rewritten, "&")
 	return parsed.String()
 }
 

@@ -1086,8 +1086,8 @@ export const getRequestRateInfiniteQueryKey = (
  * **Requires Prometheus**: This endpoint queries Prometheus for metrics.
  * If Prometheus is not configured, returns 501 Not Implemented.
  */
-export const getRequestRateInfiniteOptions = (options?: Options<GetRequestRateData>) =>
-  infiniteQueryOptions<
+export const getRequestRateInfiniteOptions = (options?: Options<GetRequestRateData>) => {
+  const opts = infiniteQueryOptions<
     GetRequestRateResponse,
     GetRequestRateError,
     InfiniteData<GetRequestRateResponse>,
@@ -1118,6 +1118,8 @@ export const getRequestRateInfiniteOptions = (options?: Options<GetRequestRateDa
       queryKey: getRequestRateInfiniteQueryKey(options),
     },
   );
+  return opts as Omit<typeof opts, "initialData">;
+};
 
 export const getErrorRateQueryKey = (options?: Options<GetErrorRateData>) => createQueryKey("getErrorRate", options);
 
@@ -1157,8 +1159,8 @@ export const getErrorRateInfiniteQueryKey = (
  * **Requires Prometheus**: This endpoint queries Prometheus for metrics.
  * If Prometheus is not configured, returns 501 Not Implemented.
  */
-export const getErrorRateInfiniteOptions = (options?: Options<GetErrorRateData>) =>
-  infiniteQueryOptions<
+export const getErrorRateInfiniteOptions = (options?: Options<GetErrorRateData>) => {
+  const opts = infiniteQueryOptions<
     GetErrorRateResponse,
     GetErrorRateError,
     InfiniteData<GetErrorRateResponse>,
@@ -1189,6 +1191,8 @@ export const getErrorRateInfiniteOptions = (options?: Options<GetErrorRateData>)
       queryKey: getErrorRateInfiniteQueryKey(options),
     },
   );
+  return opts as Omit<typeof opts, "initialData">;
+};
 
 export const getLatencyP95QueryKey = (options?: Options<GetLatencyP95Data>) => createQueryKey("getLatencyP95", options);
 
@@ -1233,8 +1237,8 @@ export const getLatencyP95InfiniteQueryKey = (
  * **Requires Prometheus**: This endpoint queries Prometheus for metrics.
  * If Prometheus is not configured, returns 501 Not Implemented.
  */
-export const getLatencyP95InfiniteOptions = (options?: Options<GetLatencyP95Data>) =>
-  infiniteQueryOptions<
+export const getLatencyP95InfiniteOptions = (options?: Options<GetLatencyP95Data>) => {
+  const opts = infiniteQueryOptions<
     GetLatencyP95Response,
     GetLatencyP95Error,
     InfiniteData<GetLatencyP95Response>,
@@ -1265,6 +1269,8 @@ export const getLatencyP95InfiniteOptions = (options?: Options<GetLatencyP95Data
       queryKey: getLatencyP95InfiniteQueryKey(options),
     },
   );
+  return opts as Omit<typeof opts, "initialData">;
+};
 
 export const getCacheHitRateQueryKey = (options?: Options<GetCacheHitRateData>) =>
   createQueryKey("getCacheHitRate", options);
@@ -1310,8 +1316,8 @@ export const getCacheHitRateInfiniteQueryKey = (
  * **Requires Prometheus**: This endpoint queries Prometheus for metrics.
  * If Prometheus is not configured, returns 501 Not Implemented.
  */
-export const getCacheHitRateInfiniteOptions = (options?: Options<GetCacheHitRateData>) =>
-  infiniteQueryOptions<
+export const getCacheHitRateInfiniteOptions = (options?: Options<GetCacheHitRateData>) => {
+  const opts = infiniteQueryOptions<
     GetCacheHitRateResponse,
     GetCacheHitRateError,
     InfiniteData<GetCacheHitRateResponse>,
@@ -1342,6 +1348,8 @@ export const getCacheHitRateInfiniteOptions = (options?: Options<GetCacheHitRate
       queryKey: getCacheHitRateInfiniteQueryKey(options),
     },
   );
+  return opts as Omit<typeof opts, "initialData">;
+};
 
 export const getDbPoolUtilizationQueryKey = (options?: Options<GetDbPoolUtilizationData>) =>
   createQueryKey("getDbPoolUtilization", options);
@@ -1389,8 +1397,8 @@ export const getDbPoolUtilizationInfiniteQueryKey = (
  * **Requires Prometheus**: This endpoint queries Prometheus for metrics.
  * If Prometheus is not configured, returns 501 Not Implemented.
  */
-export const getDbPoolUtilizationInfiniteOptions = (options?: Options<GetDbPoolUtilizationData>) =>
-  infiniteQueryOptions<
+export const getDbPoolUtilizationInfiniteOptions = (options?: Options<GetDbPoolUtilizationData>) => {
+  const opts = infiniteQueryOptions<
     GetDbPoolUtilizationResponse,
     GetDbPoolUtilizationError,
     InfiniteData<GetDbPoolUtilizationResponse>,
@@ -1421,6 +1429,8 @@ export const getDbPoolUtilizationInfiniteOptions = (options?: Options<GetDbPoolU
       queryKey: getDbPoolUtilizationInfiniteQueryKey(options),
     },
   );
+  return opts as Omit<typeof opts, "initialData">;
+};
 
 export const getStatsSummaryQueryKey = (options?: Options<GetStatsSummaryData>) =>
   createQueryKey("getStatsSummary", options);
@@ -1507,8 +1517,8 @@ export const getStoreLatencyP95InfiniteQueryKey = (
  * MeteredMemoryStore. If the store is not instrumented, the response
  * will be empty.
  */
-export const getStoreLatencyP95InfiniteOptions = (options?: Options<GetStoreLatencyP95Data>) =>
-  infiniteQueryOptions<
+export const getStoreLatencyP95InfiniteOptions = (options?: Options<GetStoreLatencyP95Data>) => {
+  const opts = infiniteQueryOptions<
     GetStoreLatencyP95Response,
     GetStoreLatencyP95Error,
     InfiniteData<GetStoreLatencyP95Response>,
@@ -1539,6 +1549,8 @@ export const getStoreLatencyP95InfiniteOptions = (options?: Options<GetStoreLate
       queryKey: getStoreLatencyP95InfiniteQueryKey(options),
     },
   );
+  return opts as Omit<typeof opts, "initialData">;
+};
 
 export const getStoreThroughputQueryKey = (options?: Options<GetStoreThroughputData>) =>
   createQueryKey("getStoreThroughput", options);
@@ -1594,8 +1606,8 @@ export const getStoreThroughputInfiniteQueryKey = (
  * MeteredMemoryStore. If the store is not instrumented, the response
  * will be empty.
  */
-export const getStoreThroughputInfiniteOptions = (options?: Options<GetStoreThroughputData>) =>
-  infiniteQueryOptions<
+export const getStoreThroughputInfiniteOptions = (options?: Options<GetStoreThroughputData>) => {
+  const opts = infiniteQueryOptions<
     GetStoreThroughputResponse,
     GetStoreThroughputError,
     InfiniteData<GetStoreThroughputResponse>,
@@ -1626,3 +1638,5 @@ export const getStoreThroughputInfiniteOptions = (options?: Options<GetStoreThro
       queryKey: getStoreThroughputInfiniteQueryKey(options),
     },
   );
+  return opts as Omit<typeof opts, "initialData">;
+};

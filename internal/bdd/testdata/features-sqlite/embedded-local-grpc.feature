@@ -1,3 +1,4 @@
+@requires-embedded
 Feature: Embedded local memory-service compatibility
   Applications can embed memory-service with production security checks, SQLite, plain encryption,
   and local Unix-socket authentication.

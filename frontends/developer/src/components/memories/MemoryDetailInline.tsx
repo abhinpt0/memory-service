@@ -6,6 +6,7 @@ import { CopyButton } from "@/components/ui/copy-button";
 import { TimestampPopover } from "@/components/ui/timestamp-popover";
 import { JsonHighlight, formatJson } from "@/components/content-renderers/JsonHighlight";
 import { useAdminMemory } from "@/hooks/useAdminApi";
+import { getErrorMessage } from "@/lib/errors";
 import { cn } from "@/lib/utils";
 import {
   COGNITION_KIND_LABELS,
@@ -34,7 +35,7 @@ export function MemoryDetailInline({ memoryId }: MemoryDetailInlineProps) {
   if (error) {
     return (
       <div className="py-4 text-center text-sm text-destructive">
-        {(error as Error).message || "Failed to load memory details"}
+        {getErrorMessage(error, "Failed to load memory details")}
       </div>
     );
   }

@@ -609,7 +609,10 @@ type Conversation struct {
 	// Id Unique identifier for the conversation.
 	Id                 *string `json:"id,omitempty"`
 	LastMessagePreview *string `json:"lastMessagePreview,omitempty"`
-	OwnerUserId        *string `json:"ownerUserId,omitempty"`
+
+	// Metadata Arbitrary key-value metadata stored on the conversation.
+	Metadata    *map[string]interface{} `json:"metadata,omitempty"`
+	OwnerUserId *string                 `json:"ownerUserId,omitempty"`
 
 	// StartedByConversationId Parent conversation that started this child conversation.
 	StartedByConversationId *string `json:"startedByConversationId,omitempty"`
@@ -679,13 +682,16 @@ type ConversationSummary struct {
 	CreatedAt *time.Time `json:"createdAt,omitempty"`
 
 	// Id Unique identifier for the conversation.
-	Id                      *string             `json:"id,omitempty"`
-	LastMessagePreview      *string             `json:"lastMessagePreview,omitempty"`
-	OwnerUserId             *string             `json:"ownerUserId,omitempty"`
-	StartedByConversationId *string             `json:"startedByConversationId,omitempty"`
-	StartedByEntryId        *openapi_types.UUID `json:"startedByEntryId,omitempty"`
-	Title                   *string             `json:"title,omitempty"`
-	UpdatedAt               *time.Time          `json:"updatedAt,omitempty"`
+	Id                 *string `json:"id,omitempty"`
+	LastMessagePreview *string `json:"lastMessagePreview,omitempty"`
+
+	// Metadata Arbitrary key-value metadata stored on the conversation.
+	Metadata                *map[string]interface{} `json:"metadata,omitempty"`
+	OwnerUserId             *string                 `json:"ownerUserId,omitempty"`
+	StartedByConversationId *string                 `json:"startedByConversationId,omitempty"`
+	StartedByEntryId        *openapi_types.UUID     `json:"startedByEntryId,omitempty"`
+	Title                   *string                 `json:"title,omitempty"`
+	UpdatedAt               *time.Time              `json:"updatedAt,omitempty"`
 }
 
 // CreateConversationRequest defines model for CreateConversationRequest.
@@ -733,6 +739,9 @@ type CreateEntryRequest struct {
 	// Other contentTypes (e.g., `"LC4J"`, `"SpringAI"`) may be used for
 	// agent context entries.
 	ContentType string `json:"contentType"`
+
+	// ConversationPatch Optional inline conversation patch applied with the entry. PostgreSQL and SQLite commit both changes atomically in one transaction. MongoDB currently applies the entry and patch as separate operations. Supports `title`, `metadata` merge-patch (keys present are set, keys absent are left unchanged, keys explicitly set to `null` are removed), and `archived`. Setting `archived: false` unarchives the conversation before appending the entry; setting `archived: true` archives it after. Plain appends without this field are blocked on archived conversations — use `archived: false` here (or `PATCH /v1/conversations/{id}`) to unarchive first. Requires writer or higher access on the conversation (owner access for archive/unarchive). For batch requests (`entries[]`), this field is at the top level and applies once to the conversation, not per-entry.
+	ConversationPatch *UpdateConversationRequest `json:"conversationPatch,omitempty"`
 
 	// ForkedAtConversationId If the target conversation doesn't exist yet, auto-create it as a fork of this conversation. Ignored when the conversation already exists.
 	ForkedAtConversationId *string `json:"forkedAtConversationId,omitempty"`
@@ -1146,8 +1155,11 @@ type UnindexedEntry struct {
 // UpdateConversationRequest defines model for UpdateConversationRequest.
 type UpdateConversationRequest struct {
 	// Archived Set to `true` to archive the conversation and its fork tree.
-	Archived *bool   `json:"archived,omitempty"`
-	Title    *string `json:"title,omitempty"`
+	Archived *bool `json:"archived,omitempty"`
+
+	// Metadata Arbitrary key-value metadata merge-patch. Keys present in the request are set, keys absent are left unchanged, and keys explicitly set to `null` are removed. A top-level `null` or empty object is a no-op.
+	Metadata *map[string]interface{} `json:"metadata,omitempty"`
+	Title    *string                 `json:"title,omitempty"`
 }
 
 // UpdateMemoryRequest defines model for UpdateMemoryRequest.
@@ -1281,6 +1293,9 @@ type ListConversationsParams struct {
 
 	// Archived Controls whether archived conversations are excluded, included, or returned exclusively.
 	Archived *ListConversationsParamsArchived `form:"archived,omitempty" json:"archived,omitempty"`
+
+	// Metadata Filter conversations by a metadata key-value pair using the form `metadata[key]=value`. Only one metadata filter is accepted per request. The key may only contain alphanumeric characters, underscores, and hyphens (dots are rejected). The comparison is an exact string match — numeric or boolean metadata values do not match a string query value. Example: `metadata[status]=waiting`.
+	Metadata *map[string]string `json:"metadata,omitempty"`
 }
 
 // ListConversationsParamsMode defines parameters for ListConversations.
@@ -2909,6 +2924,18 @@ func NewListConversationsRequest(server string, params *ListConversationsParams)
 		if params.Archived != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "archived", *params.Archived, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.Metadata != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("deepObject", true, "metadata", *params.Metadata, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "object", Format: ""}); err != nil {
 				return nil, err
 			} else {
 				for _, qp := range strings.Split(queryFrag, "&") {

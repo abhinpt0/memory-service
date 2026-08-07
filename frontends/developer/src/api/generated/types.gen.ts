@@ -5,8 +5,21 @@ export type ClientOptions = {
 };
 
 export type ErrorResponse = {
-  error?: string;
-  code?: string;
+  /**
+   * Stable machine-readable error code.
+   */
+  code: string;
+  /**
+   * Safe human-readable error message.
+   */
+  error: string;
+  /**
+   * Request correlation identifier, also returned in the X-Request-ID header.
+   */
+  requestId: string;
+  /**
+   * Structured non-sensitive error details.
+   */
   details?: {
     [key: string]: unknown;
   };
@@ -184,6 +197,12 @@ export type AdminConversationSummary = {
   accessLevel?: AccessLevel;
   clientId?: string;
   agentId?: string;
+  /**
+   * Arbitrary key-value metadata stored on the conversation.
+   */
+  metadata?: {
+    [key: string]: unknown;
+  };
   startedByConversationId?: string;
   startedByEntryId?: string;
 };
@@ -231,6 +250,16 @@ export type AdminUpdateConversationRequest = AdminActionRequest & {
    * Set to `true` to archive or `false` to unarchive the conversation fork tree.
    */
   archived?: boolean;
+  /**
+   * Optional new title for the conversation. Set to null to clear.
+   */
+  title?: string;
+  /**
+   * Arbitrary key-value metadata merge-patch. Keys present are set, keys absent are left unchanged, and keys explicitly set to `null` are removed. A top-level `null` or empty object is a no-op.
+   */
+  metadata?: {
+    [key: string]: unknown;
+  };
 };
 
 /**
@@ -1102,6 +1131,12 @@ export type AdminListConversationsData = {
      * Maximum number of conversations to return.
      */
     limit?: number;
+    /**
+     * Filter conversations by a metadata key-value pair using the form `metadata[key]=value`. Only one metadata filter is accepted per request. The key may only contain alphanumeric characters, underscores, and hyphens (dots are rejected). The comparison is an exact string match — numeric or boolean metadata values do not match a string query value. Example: `metadata[status]=waiting`.
+     */
+    metadata?: {
+      [key: string]: string;
+    };
     /**
      * Reason for this admin action (for audit log).
      */

@@ -111,6 +111,12 @@ export type ConversationSummary = {
    * Synthetic archive flag derived from the internal archived timestamp.
    */
   archived?: boolean;
+  /**
+   * Arbitrary key-value metadata stored on the conversation.
+   */
+  metadata?: {
+    [key: string]: unknown;
+  };
 };
 
 export type ChildConversationSummary = {
@@ -175,6 +181,12 @@ export type UpdateConversationRequest = {
    * Set to `true` to archive the conversation and its fork tree.
    */
   archived?: boolean;
+  /**
+   * Arbitrary key-value metadata merge-patch. Keys present in the request are set, keys absent are left unchanged, and keys explicitly set to `null` are removed. A top-level `null` or empty object is a no-op.
+   */
+  metadata?: {
+    [key: string]: unknown;
+  };
 };
 
 export type ConversationMembership = {
@@ -632,6 +644,10 @@ export type CreateEntryRequest = {
    * 4294967295.
    */
   seq?: number;
+  /**
+   * Optional inline conversation patch applied with the entry. PostgreSQL and SQLite commit both changes atomically in one transaction. MongoDB currently applies the entry and patch as separate operations. Supports `title`, `metadata` merge-patch (keys present are set, keys absent are left unchanged, keys explicitly set to `null` are removed), and `archived`. Setting `archived: false` unarchives the conversation before appending the entry; setting `archived: true` archives it after. Plain appends without this field are blocked on archived conversations — use `archived: false` here (or `PATCH /v1/conversations/{id}`) to unarchive first. Requires writer or higher access on the conversation (owner access for archive/unarchive). For batch requests (`entries[]`), this field is at the top level and applies once to the conversation, not per-entry.
+   */
+  conversationPatch?: UpdateConversationRequest;
 };
 
 export type SyncEntryResponse = {
@@ -876,6 +892,12 @@ export type ListConversationsData = {
      * Controls whether archived conversations are excluded, included, or returned exclusively.
      */
     archived?: "exclude" | "include" | "only";
+    /**
+     * Filter conversations by a metadata key-value pair using the form `metadata[key]=value`. Only one metadata filter is accepted per request. The key may only contain alphanumeric characters, underscores, and hyphens (dots are rejected). The comparison is an exact string match — numeric or boolean metadata values do not match a string query value. Example: `metadata[status]=waiting`.
+     */
+    metadata?: {
+      [key: string]: string;
+    };
   };
   url: "/v1/conversations";
 };

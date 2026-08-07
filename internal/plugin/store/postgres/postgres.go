@@ -167,10 +167,11 @@ func postgresRequireCurrentSchemaOrEmpty(ctx context.Context, db *sql.DB) error 
 
 // PostgresStore implements MemoryStore using GORM + PostgreSQL.
 type PostgresStore struct {
-	db           *gorm.DB
-	cfg          *config.Config
-	enc          *dataencryption.Service
-	entriesCache registrycache.MemoryEntriesCache
+	db                        *gorm.DB
+	cfg                       *config.Config
+	enc                       *dataencryption.Service
+	entriesCache              registrycache.MemoryEntriesCache
+	metadataPatchBeforeUpdate func() // test-only synchronization hook; nil in production
 }
 
 func (s *PostgresStore) OutboxEnabled() bool {
@@ -483,66 +484,14 @@ func (s *PostgresStore) createConversationWithID(ctx context.Context, userID str
 	}, nil
 }
 
-func (s *PostgresStore) ListConversations(ctx context.Context, userID string, query *string, afterCursor *string, limit int, mode model.ConversationListMode, ancestry model.ConversationAncestryFilter, archived registrystore.ArchiveFilter) ([]registrystore.ConversationSummary, *string, error) {
+func (s *PostgresStore) ListConversations(ctx context.Context, userID string, query *string, afterCursor *string, limit int, mode model.ConversationListMode, ancestry model.ConversationAncestryFilter, archived registrystore.ArchiveFilter, metadataFilter *registrystore.MetadataKeyFilter) ([]registrystore.ConversationSummary, *string, error) {
 	requestedLimit := limit
 	queryStr := ""
 	if query != nil {
 		queryStr = strings.TrimSpace(*query)
 	}
 
-	tx := s.db.WithContext(ctx).
-		Table("conversations c").
-		Select(conversationSelectColumns+", cm.access_level").
-		Joins("JOIN conversation_memberships cm ON cm.conversation_group_id = c.conversation_group_id AND cm.user_id = ?", userID).
-		Joins("JOIN conversation_groups cg ON cg.id = c.conversation_group_id")
-	tx = joinDirectConversationAncestry(tx)
-
-	switch archived {
-	case registrystore.ArchiveFilterInclude:
-	case registrystore.ArchiveFilterOnly:
-		tx = tx.Where("c.archived_at IS NOT NULL")
-	default:
-		tx = tx.Where("c.archived_at IS NULL")
-	}
-
-	switch mode {
-	case model.ListModeRoots:
-		tx = tx.Where("ca_direct.ancestor_conversation_id IS NULL")
-	case model.ListModeLatestFork:
-		subquery := "SELECT MAX(c2.updated_at) FROM conversations c2 WHERE c2.conversation_group_id = c.conversation_group_id"
-		if archived == registrystore.ArchiveFilterOnly {
-			subquery += " AND c2.archived_at IS NOT NULL"
-		} else if archived != registrystore.ArchiveFilterInclude {
-			subquery += " AND c2.archived_at IS NULL"
-		}
-		tx = tx.Where("c.updated_at = (" + subquery + ")")
-	}
-	switch ancestry {
-	case model.ConversationAncestryChildren:
-		tx = tx.Where("c.started_by_conversation_id IS NOT NULL")
-	case model.ConversationAncestryAll:
-	default:
-		tx = tx.Where("c.started_by_conversation_id IS NULL")
-	}
-
-	if afterCursor != nil {
-		tx = tx.Where("c.created_at < (SELECT created_at FROM conversations WHERE id = ?)", *afterCursor)
-	}
-
-	queryLimit := requestedLimit + 1
-	if queryStr != "" {
-		// Titles are encrypted at rest, so text filtering must happen post-decryption.
-		// Over-fetch a bounded window to keep pagination reasonably useful.
-		queryLimit = requestedLimit * 5
-		if queryLimit < requestedLimit+1 {
-			queryLimit = requestedLimit + 1
-		}
-		if queryLimit > 1000 {
-			queryLimit = 1000
-		}
-	}
-
-	tx = tx.Order("c.created_at DESC").Limit(queryLimit)
+	const selectColumns = conversationSelectColumns + ", cm.access_level"
 
 	type row struct {
 		ID                      string                 `gorm:"column:id"`
@@ -561,6 +510,72 @@ func (s *PostgresStore) ListConversations(ctx context.Context, userID string, qu
 		ArchivedAt              *time.Time             `gorm:"column:archived_at"`
 		AccessLevel             model.AccessLevel      `gorm:"column:access_level"`
 	}
+
+	base := s.dbFor(ctx).
+		Table("conversations c").
+		Joins("JOIN conversation_memberships cm ON cm.conversation_group_id = c.conversation_group_id AND cm.user_id = ?", userID).
+		Joins("JOIN conversation_groups cg ON cg.id = c.conversation_group_id")
+	base = joinDirectConversationAncestry(base)
+
+	switch archived {
+	case registrystore.ArchiveFilterInclude:
+	case registrystore.ArchiveFilterOnly:
+		base = base.Where("c.archived_at IS NOT NULL")
+	default:
+		base = base.Where("c.archived_at IS NULL")
+	}
+
+	switch ancestry {
+	case model.ConversationAncestryChildren:
+		base = base.Where("c.started_by_conversation_id IS NOT NULL")
+	case model.ConversationAncestryAll:
+	default:
+		base = base.Where("c.started_by_conversation_id IS NULL")
+	}
+
+	if metadataFilter != nil {
+		filterJSON, err := json.Marshal(map[string]string{metadataFilter.Key: metadataFilter.Value})
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to marshal metadata filter: %w", err)
+		}
+		base = base.Where("jsonb_typeof(c.metadata -> ?) = 'string' AND c.metadata @> ?::jsonb", metadataFilter.Key, string(filterJSON))
+	}
+
+	createdAtColumn := "c.created_at"
+	var tx *gorm.DB
+	switch mode {
+	case model.ListModeRoots:
+		tx = base.
+			Where("ca_direct.ancestor_conversation_id IS NULL").
+			Select(selectColumns)
+	case model.ListModeLatestFork:
+		ranked := base.Select(selectColumns + ", ROW_NUMBER() OVER (PARTITION BY c.conversation_group_id ORDER BY c.updated_at DESC, c.created_at DESC, c.id DESC) AS group_rank")
+		tx = s.dbFor(ctx).
+			Table("(?) AS ranked", ranked).
+			Select("id, title, owner_user_id, client_id, agent_id, metadata, conversation_group_id, forked_at_entry_id, forked_at_conversation_id, started_by_conversation_id, started_by_entry_id, created_at, updated_at, archived_at, access_level").
+			Where("group_rank = 1")
+		createdAtColumn = "ranked.created_at"
+	default:
+		tx = base.Select(selectColumns)
+	}
+
+	if afterCursor != nil {
+		tx = tx.Where(createdAtColumn+" < (SELECT created_at FROM conversations WHERE id = ?)", *afterCursor)
+	}
+
+	queryLimit := requestedLimit + 1
+	if queryStr != "" {
+		queryLimit = requestedLimit * 5
+		if queryLimit < requestedLimit+1 {
+			queryLimit = requestedLimit + 1
+		}
+		if queryLimit > 1000 {
+			queryLimit = 1000
+		}
+	}
+
+	tx = tx.Order(createdAtColumn + " DESC").Limit(queryLimit)
+
 	var rows []row
 	if err := tx.Scan(&rows).Error; err != nil {
 		return nil, nil, fmt.Errorf("failed to list conversations: %w", err)
@@ -658,8 +673,8 @@ func (s *PostgresStore) GetConversation(ctx context.Context, userID string, conv
 	}, nil
 }
 
-func (s *PostgresStore) UpdateConversation(ctx context.Context, userID string, conversationID string, title *string, metadata map[string]interface{}) (*registrystore.ConversationDetail, error) {
-	conv, found, err := s.lookupConversation(ctx, "id = ? AND archived_at IS NULL", conversationID)
+func (s *PostgresStore) UpdateConversation(ctx context.Context, userID string, conversationID string, title *string, metadata registrystore.MetadataPatch) (*registrystore.ConversationDetail, error) {
+	conv, found, err := s.lookupConversation(ctx, "id = ?", conversationID)
 	if err != nil {
 		return nil, err
 	}
@@ -669,7 +684,20 @@ func (s *PostgresStore) UpdateConversation(ctx context.Context, userID string, c
 	if _, err := s.requireAccess(ctx, userID, conv.ConversationGroupID, model.AccessLevelWriter); err != nil {
 		return nil, err
 	}
+	if title == nil && len(metadata) == 0 {
+		return s.GetConversation(ctx, userID, conversationID)
+	}
+	if len(metadata) > 0 && s.metadataPatchBeforeUpdate != nil {
+		s.metadataPatchBeforeUpdate()
+	}
 
+	db, err := s.writeDBFor(ctx, "update conversation")
+	if err != nil {
+		return nil, err
+	}
+
+	// Build UPDATE with atomic metadata merge-patch at SQL level.
+	// metadata parameter is a top-level merge patch: non-nil values replace the entire top-level value, explicit nil deletes, absent keys unchanged.
 	updates := map[string]interface{}{"updated_at": time.Now()}
 	if title != nil {
 		encTitle, err := s.encryptConversationTitle(string(conversationID), *title)
@@ -678,13 +706,41 @@ func (s *PostgresStore) UpdateConversation(ctx context.Context, userID string, c
 		}
 		updates["title"] = encTitle
 	}
+
 	if metadata != nil {
-		updates["metadata"] = metadata
+		// Separate keys to set/update from keys to delete (explicit nil).
+		toSet := make(map[string]interface{})
+		toDelete := []string{}
+		for k, v := range metadata {
+			if v == nil {
+				toDelete = append(toDelete, k)
+			} else {
+				toSet[k] = v
+			}
+		}
+
+		// Build SQL expression for atomic merge-patch:
+		// Start with COALESCE(metadata, '{}'), merge non-null keys, then delete explicit-null keys.
+		expr := "COALESCE(metadata, '{}'::jsonb)"
+		args := []interface{}{}
+
+		if len(toSet) > 0 {
+			setJSON, err := json.Marshal(toSet)
+			if err != nil {
+				return nil, fmt.Errorf("failed to marshal metadata patch: %w", err)
+			}
+			expr = expr + " || ?::jsonb"
+			args = append(args, string(setJSON))
+		}
+
+		for _, key := range toDelete {
+			expr = expr + " - ?"
+			args = append(args, key)
+		}
+
+		updates["metadata"] = gorm.Expr(expr, args...)
 	}
-	db, err := s.writeDBFor(ctx, "update conversation")
-	if err != nil {
-		return nil, err
-	}
+
 	if err := db.Model(&conv).Updates(updates).Error; err != nil {
 		return nil, fmt.Errorf("failed to update conversation: %w", err)
 	}
@@ -704,19 +760,19 @@ func (s *PostgresStore) ArchiveConversation(ctx context.Context, userID string, 
 	}
 
 	now := time.Now()
-	db, err := s.writeDBFor(ctx, "delete conversation")
-	if err != nil {
-		return err
-	}
-	return db.Transaction(func(tx *gorm.DB) error {
-		// Soft-delete the conversation group and all conversations in the fork tree.
-		if err := tx.Model(&model.ConversationGroup{}).
-			Where("id = ?", conv.ConversationGroupID).
+	groupID := conv.ConversationGroupID
+	return s.InWriteTx(ctx, func(txCtx context.Context) error {
+		db, err := s.writeDBFor(txCtx, "archive conversation")
+		if err != nil {
+			return err
+		}
+		if err := db.Model(&model.ConversationGroup{}).
+			Where("id = ?", groupID).
 			Update("archived_at", now).Error; err != nil {
 			return fmt.Errorf("failed to archive group: %w", err)
 		}
-		if err := tx.Model(&model.Conversation{}).
-			Where("conversation_group_id = ? AND archived_at IS NULL", conv.ConversationGroupID).
+		if err := db.Model(&model.Conversation{}).
+			Where("conversation_group_id = ? AND archived_at IS NULL", groupID).
 			Update("archived_at", now).Error; err != nil {
 			return fmt.Errorf("failed to archive conversations: %w", err)
 		}
@@ -736,18 +792,19 @@ func (s *PostgresStore) UnarchiveConversation(ctx context.Context, userID string
 		return err
 	}
 
-	db, err := s.writeDBFor(ctx, "unarchive conversation")
-	if err != nil {
-		return err
-	}
-	return db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Model(&model.ConversationGroup{}).
-			Where("id = ?", conv.ConversationGroupID).
+	groupID := conv.ConversationGroupID
+	return s.InWriteTx(ctx, func(txCtx context.Context) error {
+		db, err := s.writeDBFor(txCtx, "unarchive conversation")
+		if err != nil {
+			return err
+		}
+		if err := db.Model(&model.ConversationGroup{}).
+			Where("id = ?", groupID).
 			Update("archived_at", nil).Error; err != nil {
 			return fmt.Errorf("failed to unarchive group: %w", err)
 		}
-		if err := tx.Model(&model.Conversation{}).
-			Where("conversation_group_id = ? AND archived_at IS NOT NULL", conv.ConversationGroupID).
+		if err := db.Model(&model.Conversation{}).
+			Where("conversation_group_id = ? AND archived_at IS NOT NULL", groupID).
 			Update("archived_at", nil).Error; err != nil {
 			return fmt.Errorf("failed to unarchive conversations: %w", err)
 		}
@@ -1550,12 +1607,13 @@ func (s *PostgresStore) AppendEntries(ctx context.Context, userID string, conver
 		return nil, err
 	}
 	var conv model.Conversation
-	convResult := db.Where("id = ? AND archived_at IS NULL", conversationID).Limit(1).Find(&conv)
+	convResult := db.Where("id = ?", conversationID).Limit(1).Find(&conv)
 	if convResult.Error != nil {
 		return nil, convResult.Error
 	}
 	if convResult.RowsAffected == 0 {
 		// Auto-create conversation if it doesn't exist (Java parity).
+		// Note: auto-create is only valid for non-archived (new) conversations.
 		// Check first entry for fork metadata.
 		var forkedAtConvID *string
 		var forkedAtEntryID *uuid.UUID
@@ -1592,7 +1650,7 @@ func (s *PostgresStore) AppendEntries(ctx context.Context, userID string, conver
 			loaded := false
 			for attempt := 0; attempt < 10; attempt++ {
 				convResult = db.
-					Where("id = ? AND archived_at IS NULL", conversationID).
+					Where("id = ?", conversationID).
 					Limit(1).
 					Find(&conv)
 				if convResult.Error != nil {
@@ -1621,6 +1679,10 @@ func (s *PostgresStore) AppendEntries(ctx context.Context, userID string, conver
 				UpdatedAt:           detail.UpdatedAt,
 			}
 		}
+	}
+	// Block appending to archived conversations. Use explicit unarchive via conversationPatch.archived=false first.
+	if conv.ArchivedAt != nil {
+		return nil, &registrystore.NotFoundError{Resource: "conversation", ID: conversationID}
 	}
 	if _, err := s.requireAccess(ctx, userID, conv.ConversationGroupID, model.AccessLevelWriter); err != nil {
 		return nil, err
@@ -1747,7 +1809,7 @@ func (s *PostgresStore) SyncAgentEntry(ctx context.Context, userID string, conve
 
 	autoCreated := false
 	var conv model.Conversation
-	result := db.Where("id = ? AND archived_at IS NULL", conversationID).Limit(1).Find(&conv)
+	result := db.Where("id = ?", conversationID).Limit(1).Find(&conv)
 	if result.Error != nil {
 		return nil, result.Error
 	}
@@ -1761,6 +1823,10 @@ func (s *PostgresStore) SyncAgentEntry(ctx context.Context, userID string, conve
 			return nil, err
 		}
 		autoCreated = true
+	}
+	// Block syncing to archived conversations. Use explicit unarchive via conversationPatch.archived=false first.
+	if !autoCreated && conv.ArchivedAt != nil {
+		return nil, &registrystore.NotFoundError{Resource: "conversation", ID: conversationID}
 	}
 	if _, err := s.requireAccess(ctx, userID, conv.ConversationGroupID, model.AccessLevelWriter); err != nil {
 		return nil, err
@@ -2276,7 +2342,15 @@ func (s *PostgresStore) AdminListConversations(ctx context.Context, query regist
 	default:
 		base = base.Where("c.started_by_conversation_id IS NULL")
 	}
+	if query.MetadataFilter != nil {
+		filterJSON, err := json.Marshal(map[string]string{query.MetadataFilter.Key: query.MetadataFilter.Value})
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to marshal metadata filter: %w", err)
+		}
+		base = base.Where("jsonb_typeof(c.metadata -> ?) = 'string' AND c.metadata @> ?::jsonb", query.MetadataFilter.Key, string(filterJSON))
+	}
 
+	createdAtColumn := "c.created_at"
 	var tx *gorm.DB
 	switch query.Mode {
 	case model.ListModeRoots:
@@ -2289,14 +2363,15 @@ func (s *PostgresStore) AdminListConversations(ctx context.Context, query regist
 			Table("(?) AS ranked", ranked).
 			Select("id, title, owner_user_id, client_id, agent_id, metadata, conversation_group_id, forked_at_entry_id, forked_at_conversation_id, started_by_conversation_id, started_by_entry_id, created_at, updated_at, archived_at, access_level").
 			Where("group_rank = 1")
+		createdAtColumn = "ranked.created_at"
 	default:
 		tx = base.Select(selectColumns)
 	}
 
 	if query.AfterCursor != nil {
-		tx = tx.Where("created_at < (SELECT created_at FROM conversations WHERE id = ?)", *query.AfterCursor)
+		tx = tx.Where(createdAtColumn+" < (SELECT created_at FROM conversations WHERE id = ?)", *query.AfterCursor)
 	}
-	tx = tx.Order("created_at DESC").Limit(query.Limit + 1)
+	tx = tx.Order(createdAtColumn + " DESC").Limit(query.Limit + 1)
 
 	var rows []row
 	if err := tx.Scan(&rows).Error; err != nil {

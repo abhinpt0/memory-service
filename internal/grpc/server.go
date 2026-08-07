@@ -470,13 +470,18 @@ func (s *ConversationsServer) ListConversations(ctx context.Context, req *pb.Lis
 		query = &q
 	}
 
+	metadataFilter, err := registrystore.MetadataFilterFromOptionalPair(req.MetadataFilterKey, req.MetadataFilterValue)
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+
 	summaries, cursor, err := func() ([]registrystore.ConversationSummary, *string, error) {
 		type result struct {
 			summaries []registrystore.ConversationSummary
 			cursor    *string
 		}
 		out, err := withMemoryRead(ctx, s.Store, func(txCtx context.Context) (result, error) {
-			summaries, cursor, err := s.Store.ListConversations(txCtx, userID, query, afterCursor, limit, mode, ancestry, archived)
+			summaries, cursor, err := s.Store.ListConversations(txCtx, userID, query, afterCursor, limit, mode, ancestry, archived, metadataFilter)
 			return result{summaries: summaries, cursor: cursor}, err
 		})
 		return out.summaries, out.cursor, err
@@ -656,17 +661,26 @@ func (s *ConversationsServer) UpdateConversation(ctx context.Context, req *pb.Up
 	if req.Archived != nil {
 		archived = req.Archived
 	}
-	var metadata map[string]any
+	var metadataPatch registrystore.MetadataPatch
 	if req.GetMetadata() != nil {
-		metadata = req.GetMetadata().AsMap()
+		b, err := req.GetMetadata().MarshalJSON()
+		if err != nil {
+			return nil, status.Error(codes.InvalidArgument, "metadata encoding failed")
+		}
+		metadataPatch, err = registrystore.DecodeMetadataPatch(b)
+		if err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "metadata patch decode failed: %v", err)
+		}
 	}
 
 	var eventsToPublish []registryeventbus.Event
 	conv, err := withMemoryWrite(ctx, s.Store, func(txCtx context.Context) (*registrystore.ConversationDetail, error) {
 		var conv *registrystore.ConversationDetail
 		var err error
-		eventData := map[string]any{}
+		var eventData map[string]any
 		var memberUserIDs []string
+
+		// Apply archive/unarchive first if requested.
 		if archived != nil {
 			conv, err = s.Store.GetConversation(txCtx, userID, convID)
 			if err != nil {
@@ -691,17 +705,30 @@ func (s *ConversationsServer) UpdateConversation(ctx context.Context, req *pb.Up
 				"members":            memberUserIDs,
 				"archived":           *archived,
 			}
-		} else {
-			conv, err = s.Store.UpdateConversation(txCtx, userID, convID, title, metadata)
+		}
+
+		// Apply title and/or metadata merge-patch if provided (independent of archived).
+		if title != nil || len(metadataPatch) > 0 {
+			conv, err = s.Store.UpdateConversation(txCtx, userID, convID, title, metadataPatch)
 			if err != nil {
 				return nil, err
 			}
-			eventData = map[string]any{
-				"conversation":       conv.ID,
-				"conversation_group": conv.ConversationGroupID,
+			// Only overwrite eventData if we didn't also archive (archive event takes precedence).
+			if archived == nil {
+				eventData = map[string]any{
+					"conversation":       conv.ID,
+					"conversation_group": conv.ConversationGroupID,
+				}
 			}
 		}
-		if s.EventBus != nil && conv != nil {
+		if conv == nil {
+			// Nothing was changed — fetch for the response.
+			conv, err = s.Store.GetConversation(txCtx, userID, convID)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if s.EventBus != nil && conv != nil && eventData != nil {
 			events := []registryeventbus.Event{{
 				Event:               "updated",
 				Kind:                "conversation",
@@ -879,6 +906,11 @@ func adminConversationSummaryToProto(cs *registrystore.ConversationSummary) *pb.
 	}
 	if cs.StartedByEntryID != nil {
 		item.StartedByEntryId = uuidToBytes(*cs.StartedByEntryID)
+	}
+	if cs.Metadata != nil {
+		if metadata, err := structpb.NewStruct(cs.Metadata); err == nil {
+			item.Metadata = metadata
+		}
 	}
 	return item
 }
@@ -1345,6 +1377,11 @@ func (s *AdminConversationsServer) ListConversations(ctx context.Context, req *p
 		archivedBefore = &t
 	}
 
+	metadataFilter, err := registrystore.MetadataFilterFromOptionalPair(req.MetadataFilterKey, req.MetadataFilterValue)
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+
 	query := registrystore.AdminConversationQuery{
 		Mode:           mode,
 		Ancestry:       ancestry,
@@ -1352,6 +1389,7 @@ func (s *AdminConversationsServer) ListConversations(ctx context.Context, req *p
 		Archived:       archived,
 		ArchivedAfter:  archivedAfter,
 		ArchivedBefore: archivedBefore,
+		MetadataFilter: metadataFilter,
 		AfterCursor:    afterCursor,
 		Limit:          limit,
 	}
@@ -1393,9 +1431,47 @@ func (s *AdminConversationsServer) UpdateConversation(ctx context.Context, req *
 		return nil, status.Error(codes.InvalidArgument, "invalid conversation_id")
 	}
 
+	// Validate that at least one field is present.
+	if req.Archived == nil && req.Title == nil && req.GetMetadata() == nil {
+		return nil, status.Error(codes.InvalidArgument, "at least one of archived, title, or metadata must be provided")
+	}
+
+	// Validate and decode title and metadata BEFORE any datastore mutations.
+	var title *string
+	if req.Title != nil {
+		if len(req.GetTitle()) > 500 {
+			return nil, status.Error(codes.InvalidArgument, "title exceeds maximum length")
+		}
+		title = req.Title
+	}
+	var metadataPatchMap registrystore.MetadataPatch
+	if req.GetMetadata() != nil {
+		patchBytes, marshalErr := req.GetMetadata().MarshalJSON()
+		if marshalErr != nil {
+			return nil, status.Error(codes.InvalidArgument, "metadata encoding failed")
+		}
+		var err error
+		metadataPatchMap, err = registrystore.DecodeMetadataPatch(patchBytes)
+		if err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "metadata patch decode failed: %v", err)
+		}
+	}
+
 	conv, err := withMemoryWrite(ctx, s.Store, func(txCtx context.Context) (*registrystore.ConversationDetail, error) {
+		// Now apply archive/unarchive if requested.
 		if req.Archived != nil {
 			if err := s.Store.AdminSetConversationArchived(txCtx, convID, *req.Archived); err != nil {
+				return nil, err
+			}
+		}
+
+		// Apply title and/or metadata merge-patch if provided.
+		if title != nil || len(metadataPatchMap) > 0 {
+			existing, err := s.Store.AdminGetConversation(txCtx, convID)
+			if err != nil {
+				return nil, err
+			}
+			if _, err := s.Store.UpdateConversation(txCtx, existing.OwnerUserID, convID, title, metadataPatchMap); err != nil {
 				return nil, err
 			}
 		}
@@ -1548,7 +1624,7 @@ func (s *EntriesServer) AppendEntry(ctx context.Context, req *pb.AppendEntryRequ
 	if req.GetEntry() == nil {
 		return nil, status.Error(codes.InvalidArgument, "entry is required")
 	}
-	entries, err := s.appendEntries(ctx, req.GetConversationId(), []*pb.CreateEntryRequest{req.GetEntry()}, req.Epoch)
+	entries, err := s.appendEntries(ctx, req.GetConversationId(), []*pb.CreateEntryRequest{req.GetEntry()}, req.Epoch, req.ConversationPatch)
 	if err != nil {
 		return nil, err
 	}
@@ -1562,7 +1638,7 @@ func (s *EntriesServer) AppendEntries(ctx context.Context, req *pb.AppendEntries
 	if len(req.GetEntries()) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "at least one entry is required")
 	}
-	entries, err := s.appendEntries(ctx, req.GetConversationId(), req.GetEntries(), req.Epoch)
+	entries, err := s.appendEntries(ctx, req.GetConversationId(), req.GetEntries(), req.Epoch, req.ConversationPatch)
 	if err != nil {
 		return nil, err
 	}
@@ -1583,7 +1659,7 @@ type grpcPendingAttachmentLink struct {
 	entryIndex   int
 }
 
-func (s *EntriesServer) appendEntries(ctx context.Context, conversationID string, reqEntries []*pb.CreateEntryRequest, epoch *int64) ([]model.Entry, error) {
+func (s *EntriesServer) appendEntries(ctx context.Context, conversationID string, reqEntries []*pb.CreateEntryRequest, epoch *int64, patch *pb.UpdateConversationRequest) ([]model.Entry, error) {
 	userID := getUserID(ctx)
 	if userID == "" {
 		return nil, status.Error(codes.Unauthenticated, "missing authorization")
@@ -1594,6 +1670,12 @@ func (s *EntriesServer) appendEntries(ctx context.Context, conversationID string
 	convID, err := requiredConversationID(conversationID)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, "invalid conversation_id")
+	}
+
+	// Validate conversationPatch before any datastore mutations.
+	validatedPatch, err := validateGRPCConversationPatch(patch)
+	if err != nil {
+		return nil, err
 	}
 
 	clientID := getClientID(ctx)
@@ -1700,6 +1782,27 @@ func (s *EntriesServer) appendEntries(ctx context.Context, conversationID string
 		existing, _ := s.Store.GetConversation(txCtx, userID, convID)
 		convExistedBefore := existing != nil
 
+		// If the patch includes archived changes and the conversation exists, verify owner authorization
+		// before any writes so MongoDB doesn't persist an entry before the authorization check fails.
+		if validatedPatch != nil && validatedPatch.archived != nil && convExistedBefore {
+			hasOwnerAccess := existing != nil && existing.AccessLevel == model.AccessLevelOwner
+			if err := validateGRPCConversationPatchForOwnerOnly(validatedPatch, hasOwnerAccess); err != nil {
+				return nil, err
+			}
+		}
+
+		// If conversationPatch requests unarchive (archived=false), set preHandledArchived=true.
+		// If conversation exists, call UnarchiveConversation; if auto-created, skip (already unarchived).
+		preHandledArchived := false
+		if validatedPatch != nil && validatedPatch.needsUnarchiveBeforeWrite() {
+			preHandledArchived = true
+			if convExistedBefore {
+				if err := s.Store.UnarchiveConversation(txCtx, userID, convID); err != nil {
+					return nil, err
+				}
+			}
+		}
+
 		storeEntries := make([]registrystore.CreateEntryRequest, 0, len(appendEntries))
 		var pendingLinks []grpcPendingAttachmentLink
 		for i, appendEntry := range appendEntries {
@@ -1725,8 +1828,16 @@ func (s *EntriesServer) appendEntries(ctx context.Context, conversationID string
 		if err := linkGRPCAttachmentLinks(txCtx, s.Store, userID, entries, pendingLinks); err != nil {
 			return nil, err
 		}
+		var patchRes grpcPatchResult
+		if validatedPatch != nil {
+			var patchErr error
+			patchRes, patchErr = applyValidatedGRPCConversationPatch(txCtx, s.Store, userID, convID, validatedPatch, preHandledArchived)
+			if patchErr != nil {
+				return nil, patchErr
+			}
+		}
 		if s.EventBus != nil && len(entries) > 0 {
-			eventsToPublish, err = s.entryEventsForCreatedEntries(txCtx, convID, entries, !convExistedBefore)
+			eventsToPublish, err = s.entryEventsForCreatedEntries(txCtx, convID, entries, !convExistedBefore, patchRes, convExistedBefore)
 			if err != nil {
 				return nil, err
 			}
@@ -1754,6 +1865,12 @@ func (s *EntriesServer) SyncEntries(ctx context.Context, req *pb.SyncEntriesRequ
 		return nil, status.Error(codes.InvalidArgument, "invalid conversation_id")
 	}
 
+	// Validate conversationPatch before any datastore mutations.
+	validatedPatch, err := validateGRPCConversationPatch(req.ConversationPatch)
+	if err != nil {
+		return nil, err
+	}
+
 	clientID := getClientID(ctx)
 	if clientID == "" {
 		return nil, status.Error(codes.InvalidArgument, "x-client-id metadata required")
@@ -1774,6 +1891,28 @@ func (s *EntriesServer) SyncEntries(ctx context.Context, req *pb.SyncEntriesRequ
 	result, err := withMemoryWrite(ctx, s.Store, func(txCtx context.Context) (*registrystore.SyncResult, error) {
 		existing, _ := s.Store.GetConversation(txCtx, userID, convID)
 		convExistedBefore := existing != nil
+
+		// If the patch includes archived changes and the conversation exists, verify owner authorization
+		// before any writes so MongoDB doesn't persist an entry before the authorization check fails.
+		if validatedPatch != nil && validatedPatch.archived != nil && convExistedBefore {
+			hasOwnerAccess := existing != nil && existing.AccessLevel == model.AccessLevelOwner
+			if err := validateGRPCConversationPatchForOwnerOnly(validatedPatch, hasOwnerAccess); err != nil {
+				return nil, err
+			}
+		}
+
+		// If conversationPatch requests unarchive (archived=false), set preHandledArchived=true.
+		// If conversation exists, call UnarchiveConversation; if auto-created, skip (already unarchived).
+		preHandledArchived := false
+		if validatedPatch != nil && validatedPatch.needsUnarchiveBeforeWrite() {
+			preHandledArchived = true
+			if convExistedBefore {
+				if err := s.Store.UnarchiveConversation(txCtx, userID, convID); err != nil {
+					return nil, err
+				}
+			}
+		}
+
 		result, err := s.Store.SyncAgentEntry(txCtx, userID, convID, registrystore.CreateEntryRequest{
 			Content:     syncContent,
 			ContentType: entry.GetContentType(),
@@ -1784,10 +1923,30 @@ func (s *EntriesServer) SyncEntries(ctx context.Context, req *pb.SyncEntriesRequ
 		if err != nil {
 			return nil, err
 		}
-		if s.EventBus != nil && result.Entry != nil {
-			eventsToPublish, err = s.entryEventsForCreatedEntries(txCtx, convID, []model.Entry{*result.Entry}, !convExistedBefore)
-			if err != nil {
-				return nil, err
+		var patchRes grpcPatchResult
+		if validatedPatch != nil {
+			var patchErr error
+			patchRes, patchErr = applyValidatedGRPCConversationPatch(txCtx, s.Store, userID, convID, validatedPatch, preHandledArchived)
+			if patchErr != nil {
+				return nil, patchErr
+			}
+		}
+		if s.EventBus != nil {
+			if result.Entry != nil {
+				eventsToPublish, err = s.entryEventsForCreatedEntries(txCtx, convID, []model.Entry{*result.Entry}, !convExistedBefore, patchRes, convExistedBefore)
+				if err != nil {
+					return nil, err
+				}
+			} else if patchRes.changed && convExistedBefore {
+				// No-op sync with a conversation patch: emit conversation/updated.
+				conv, convErr := s.Store.GetConversation(txCtx, userID, convID)
+				if convErr != nil {
+					return nil, convErr
+				}
+				eventsToPublish, err = s.conversationPatchEvents(txCtx, convID, conv.ConversationGroupID, patchRes)
+				if err != nil {
+					return nil, err
+				}
 			}
 		}
 		return result, nil
@@ -1810,12 +1969,75 @@ func (s *EntriesServer) SyncEntries(ctx context.Context, req *pb.SyncEntriesRequ
 	return resp, nil
 }
 
-func (s *EntriesServer) entryEventsForCreatedEntries(ctx context.Context, convID string, entries []model.Entry, includeConversationCreated bool) ([]registryeventbus.Event, error) {
+// grpcPatchResult carries the outcome of applyValidatedGRPCConversationPatch.
+type grpcPatchResult struct {
+	changed  bool
+	archived *bool
+}
+
+// applyValidatedGRPCConversationPatch applies a pre-validated gRPC conversationPatch to the
+// conversation inside the current write transaction. It supports title, metadata, and
+// the archived field. Because ArchiveConversation/UnarchiveConversation use InWriteTx
+// internally they safely compose with the caller's existing write scope.
+//
+// If archivedAlreadyHandled is true, the archived field in the patch is skipped (it was
+// already applied before the entry write, e.g. to unarchive before AppendEntries).
+func applyValidatedGRPCConversationPatch(ctx context.Context, store registrystore.MemoryStore, userID, convID string, patch *validatedGRPCConversationPatch, archivedAlreadyHandled bool) (grpcPatchResult, error) {
+	if patch == nil {
+		return grpcPatchResult{}, nil
+	}
+
+	// Handle archive/unarchive if requested (and not already handled by the caller).
+	if patch.archived != nil && !archivedAlreadyHandled {
+		if *patch.archived {
+			if err := store.ArchiveConversation(ctx, userID, convID); err != nil {
+				return grpcPatchResult{}, err
+			}
+		} else {
+			if err := store.UnarchiveConversation(ctx, userID, convID); err != nil {
+				return grpcPatchResult{}, err
+			}
+		}
+		// If only archived was set, return now.
+		if patch.title == nil && !patch.metadataPresent {
+			return grpcPatchResult{changed: true, archived: patch.archived}, nil
+		}
+	}
+	// If archived was already handled before this call, account for it in the result.
+	if patch.archived != nil && archivedAlreadyHandled {
+		if patch.title == nil && !patch.metadataPresent {
+			return grpcPatchResult{changed: true, archived: patch.archived}, nil
+		}
+	}
+
+	// Apply title and/or metadata merge-patch if provided.
+	if patch.title != nil || patch.metadataPresent {
+		if _, err := store.UpdateConversation(ctx, userID, convID, patch.title, patch.metadataPatch); err != nil {
+			return grpcPatchResult{}, err
+		}
+	}
+
+	// Return the archived value if archive was also part of this patch, otherwise signal updated.
+	if patch.archived != nil {
+		return grpcPatchResult{changed: true, archived: patch.archived}, nil
+	}
+	if patch.title != nil || patch.metadataPresent {
+		return grpcPatchResult{changed: true}, nil
+	}
+	return grpcPatchResult{}, nil
+}
+
+func (s *EntriesServer) entryEventsForCreatedEntries(ctx context.Context, convID string, entries []model.Entry, includeConversationCreated bool, patch grpcPatchResult, convExistedBefore bool) ([]registryeventbus.Event, error) {
 	groupID, err := s.Store.GetEntryGroupID(ctx, entries[0].ID)
 	if err != nil {
 		return nil, err
 	}
-	events := make([]registryeventbus.Event, 0, len(entries)+1)
+	includeConversationUpdated := patch.changed && convExistedBefore
+	capacity := len(entries) + 1
+	if includeConversationUpdated {
+		capacity++
+	}
+	events := make([]registryeventbus.Event, 0, capacity)
 	if includeConversationCreated {
 		events = append(events, registryeventbus.Event{
 			Event: "created",
@@ -1832,6 +2054,72 @@ func (s *EntriesServer) entryEventsForCreatedEntries(ctx context.Context, convID
 			Event:               "created",
 			Kind:                "entry",
 			Data:                eventstream.EntryEventData(entry, groupID),
+			ConversationGroupID: groupID,
+		})
+	}
+	if includeConversationUpdated {
+		if patch.archived != nil {
+			memberIDs, _ := s.Store.GetGroupMemberUserIDs(ctx, groupID)
+			events = append(events, registryeventbus.Event{
+				Event: "updated",
+				Kind:  "conversation",
+				Data: map[string]any{
+					"conversation":       convID,
+					"conversation_group": groupID,
+					"members":            memberIDs,
+					"archived":           *patch.archived,
+				},
+				ConversationGroupID: groupID,
+				UserIDs:             memberIDs,
+			})
+		} else {
+			events = append(events, registryeventbus.Event{
+				Event: "updated",
+				Kind:  "conversation",
+				Data: map[string]any{
+					"conversation":       convID,
+					"conversation_group": groupID,
+				},
+				ConversationGroupID: groupID,
+			})
+		}
+	}
+	appended, used, err := eventstream.AppendOutboxEvents(ctx, s.Store, events...)
+	if err != nil {
+		return nil, err
+	}
+	if used {
+		return appended, nil
+	}
+	return events, nil
+}
+
+// conversationPatchEvents builds the events for a conversation-patch that resulted in no new entry
+// (e.g. a no-op sync that still had a conversationPatch with metadata/title/archived changes).
+func (s *EntriesServer) conversationPatchEvents(ctx context.Context, convID string, groupID uuid.UUID, patch grpcPatchResult) ([]registryeventbus.Event, error) {
+	events := make([]registryeventbus.Event, 0, 1)
+	if patch.archived != nil {
+		memberIDs, _ := s.Store.GetGroupMemberUserIDs(ctx, groupID)
+		events = append(events, registryeventbus.Event{
+			Event: "updated",
+			Kind:  "conversation",
+			Data: map[string]any{
+				"conversation":       convID,
+				"conversation_group": groupID,
+				"members":            memberIDs,
+				"archived":           *patch.archived,
+			},
+			ConversationGroupID: groupID,
+			UserIDs:             memberIDs,
+		})
+	} else {
+		events = append(events, registryeventbus.Event{
+			Event: "updated",
+			Kind:  "conversation",
+			Data: map[string]any{
+				"conversation":       convID,
+				"conversation_group": groupID,
+			},
 			ConversationGroupID: groupID,
 		})
 	}

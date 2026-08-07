@@ -172,6 +172,7 @@ type AdminConversationQuery struct {
 	Archived       ArchiveFilter
 	ArchivedAfter  *time.Time
 	ArchivedBefore *time.Time
+	MetadataFilter *MetadataKeyFilter
 	AfterCursor    *string
 	Limit          int
 }
@@ -296,6 +297,31 @@ type OwnershipTransferDto struct {
 	CreatedAt           time.Time `json:"createdAt"`
 }
 
+// MetadataKeyFilter is a server-side filter that matches conversations whose
+// metadata map contains exactly the given key with the given string value.
+type MetadataKeyFilter struct {
+	Key   string
+	Value string
+}
+
+// IsValidMetadataKey returns true if key contains only safe characters for use as
+// a JSON object key in metadata filter paths (alphanumeric, underscore, hyphen).
+// Dots are intentionally rejected because Postgres, SQLite, and MongoDB interpret
+// dots differently in filter paths (Postgres: literal; SQLite/MongoDB: path separator),
+// which would produce inconsistent cross-store behavior. Keys with other characters
+// are rejected to prevent unexpected query behaviour.
+func IsValidMetadataKey(key string) bool {
+	if key == "" {
+		return false
+	}
+	for _, r := range key {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-') {
+			return false
+		}
+	}
+	return true
+}
+
 // MemoryStore defines the primary data access interface for the memory service.
 type MemoryStore interface {
 	// InReadTx runs fn in a read transaction scope.
@@ -307,9 +333,9 @@ type MemoryStore interface {
 	CreateConversation(ctx context.Context, userID string, clientID string, title string, metadata map[string]interface{}, agentID *string, forkedAtConversationID *string, forkedAtEntryID *uuid.UUID) (*ConversationDetail, error)
 	// CreateConversationWithID creates a conversation with the given ID. Used by gRPC AppendEntry for fork-on-append.
 	CreateConversationWithID(ctx context.Context, userID string, clientID string, convID string, title string, metadata map[string]interface{}, agentID *string, forkedAtConversationID *string, forkedAtEntryID *uuid.UUID) (*ConversationDetail, error)
-	ListConversations(ctx context.Context, userID string, query *string, afterCursor *string, limit int, mode model.ConversationListMode, ancestry model.ConversationAncestryFilter, archived ArchiveFilter) ([]ConversationSummary, *string, error)
+	ListConversations(ctx context.Context, userID string, query *string, afterCursor *string, limit int, mode model.ConversationListMode, ancestry model.ConversationAncestryFilter, archived ArchiveFilter, metadataFilter *MetadataKeyFilter) ([]ConversationSummary, *string, error)
 	GetConversation(ctx context.Context, userID string, conversationID string) (*ConversationDetail, error)
-	UpdateConversation(ctx context.Context, userID string, conversationID string, title *string, metadata map[string]interface{}) (*ConversationDetail, error)
+	UpdateConversation(ctx context.Context, userID string, conversationID string, title *string, metadataPatch MetadataPatch) (*ConversationDetail, error)
 	ArchiveConversation(ctx context.Context, userID string, conversationID string) error
 	UnarchiveConversation(ctx context.Context, userID string, conversationID string) error
 

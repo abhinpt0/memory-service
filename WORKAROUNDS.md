@@ -23,3 +23,10 @@
 - What: The chat frontend casts the nullable conversation-title update to the generated string type when clearing a title.
 - Why: The OpenAPI document declares version 3.1 but expresses nullability with the OpenAPI 3.0-only `nullable: true` keyword. `@hey-api/openapi-ts` 0.97.3 ignores that keyword for 3.1 input and generates `title?: string`, although the server contract and behavior accept `null`.
 - Proper fix: Convert nullable schemas in the OpenAPI contract to valid 3.1 unions that include `null`, regenerate every client, and remove the cast.
+
+## MongoDB InWriteTx is intent-only (non-transactional)
+
+- What: `MongoStore.InWriteTx` sets a txscope intent flag on the context but does NOT open a MongoDB multi-document session transaction. Multiple store writes inside a single `InWriteTx` call are not wrapped in a real atomic transaction.
+- Why: Implementing real MongoDB session transactions would require refactoring the store to thread a `mongo.Session` through all write paths, including `AppendEntries`, `SyncAgentEntry`, attachment linking, and outbox event appends. This was deferred to avoid scope creep in the initial port.
+- Impact: The inline `conversationPatch` on `AppendEntries`/`SyncAgentEntry` is **not** truly atomic on MongoDB — the entry write and the subsequent conversation patch (title/metadata/archive) are separate operations. A failure between them will leave the database in a partially-updated state. Postgres and SQLite are genuinely atomic (GORM transactions). Mongo outbox appends are also best-effort (see the `Mongo outbox staging rule` in `internal/FACTS.md`).
+- Proper fix: Upgrade `MongoStore.InWriteTx` to use `mongo.Client.StartSession` + `session.WithTransaction`, threading the session context through all write operations. Then verify that all collections used in a single transaction are within the same replica set shard to avoid cross-shard transaction limitations.

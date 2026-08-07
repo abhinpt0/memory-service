@@ -1,7 +1,9 @@
 package admin
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -250,6 +252,12 @@ func adminListConversations(c *gin.Context, store registrystore.MemoryStore) {
 			query.ArchivedBefore = &t
 		}
 	}
+	metadataFilter, err := registrystore.ParseMetadataFilterQuery(c.Request.URL.RawQuery)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	query.MetadataFilter = metadataFilter
 
 	if err := routetx.MemoryRead(c, store, func(ctx context.Context) error {
 		summaries, cursor, err := store.AdminListConversations(ctx, query)
@@ -289,24 +297,81 @@ func adminUpdateConversation(c *gin.Context, store registrystore.MemoryStore) {
 		return
 	}
 	conversationID := string(id)
-	var req struct {
-		Archived *bool `json:"archived"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
+	var raw map[string]json.RawMessage
+	if err := c.ShouldBindJSON(&raw); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if req.Archived == nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "archived is required"})
+	archivedRaw, archivedPresent := raw["archived"]
+	titleRaw, titlePresent := raw["title"]
+	metadataRaw, metadataPresent := raw["metadata"]
+	if !archivedPresent && !titlePresent && !metadataPresent {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "at least one of archived, title, or metadata is required"})
 		return
 	}
+
+	// Validate and decode every field before opening a datastore write scope.
+	var archived *bool
+	if archivedPresent {
+		trimmed := bytes.TrimSpace(archivedRaw)
+		if bytes.Equal(trimmed, []byte("null")) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid archived"})
+			return
+		}
+		var value bool
+		if err := json.Unmarshal(trimmed, &value); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid archived"})
+			return
+		}
+		archived = &value
+	}
+
+	var title *string
+	if titlePresent {
+		trimmed := bytes.TrimSpace(titleRaw)
+		if bytes.Equal(trimmed, []byte("null")) {
+			empty := ""
+			title = &empty
+		} else {
+			var value string
+			if err := json.Unmarshal(trimmed, &value); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid title"})
+				return
+			}
+			if len(value) > 500 {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "title exceeds maximum length"})
+				return
+			}
+			title = &value
+		}
+	}
+
+	var metadataPatch registrystore.MetadataPatch
+	if metadataPresent && !bytes.Equal(bytes.TrimSpace(metadataRaw), []byte("null")) {
+		var err error
+		metadataPatch, err = registrystore.DecodeMetadataPatch(metadataRaw)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+	}
+
 	if err := routetx.MemoryWrite(c, store, func(ctx context.Context) error {
-		if *req.Archived {
-			if err := store.AdminSetConversationArchived(ctx, conversationID, true); err != nil {
+		if archived != nil {
+			if err := store.AdminSetConversationArchived(ctx, conversationID, *archived); err != nil {
 				return err
 			}
-		} else {
-			if err := store.AdminSetConversationArchived(ctx, conversationID, false); err != nil {
+		}
+
+		// Apply title and/or metadata merge-patch if provided.
+		needsUpdate := title != nil || len(metadataPatch) > 0
+		if needsUpdate {
+			// Fetch once for owner user ID.
+			existing, err := store.AdminGetConversation(ctx, conversationID)
+			if err != nil {
+				return err
+			}
+			if _, err := store.UpdateConversation(ctx, existing.OwnerUserID, conversationID, title, metadataPatch); err != nil {
 				return err
 			}
 		}
@@ -565,17 +630,18 @@ func toAdminChildConversationSummaries(items []registrystore.ConversationSummary
 }
 
 type adminConversationSummaryResponse struct {
-	ID                      string            `json:"id"`
-	Title                   string            `json:"title"`
-	OwnerUserID             string            `json:"ownerUserId"`
-	ClientID                string            `json:"clientId,omitempty"`
-	AgentID                 *string           `json:"agentId,omitempty"`
-	CreatedAt               time.Time         `json:"createdAt"`
-	UpdatedAt               time.Time         `json:"updatedAt"`
-	Archived                bool              `json:"archived"`
-	AccessLevel             model.AccessLevel `json:"accessLevel"`
-	StartedByConversationID *string           `json:"startedByConversationId,omitempty"`
-	StartedByEntryID        *uuid.UUID        `json:"startedByEntryId,omitempty"`
+	ID                      string                 `json:"id"`
+	Title                   string                 `json:"title"`
+	OwnerUserID             string                 `json:"ownerUserId"`
+	ClientID                string                 `json:"clientId,omitempty"`
+	AgentID                 *string                `json:"agentId,omitempty"`
+	Metadata                map[string]interface{} `json:"metadata,omitempty"`
+	CreatedAt               time.Time              `json:"createdAt"`
+	UpdatedAt               time.Time              `json:"updatedAt"`
+	Archived                bool                   `json:"archived"`
+	AccessLevel             model.AccessLevel      `json:"accessLevel"`
+	StartedByConversationID *string                `json:"startedByConversationId,omitempty"`
+	StartedByEntryID        *uuid.UUID             `json:"startedByEntryId,omitempty"`
 }
 
 func toAdminConversationSummaries(items []registrystore.ConversationSummary) []adminConversationSummaryResponse {
@@ -587,6 +653,7 @@ func toAdminConversationSummaries(items []registrystore.ConversationSummary) []a
 			OwnerUserID:             item.OwnerUserID,
 			ClientID:                item.ClientID,
 			AgentID:                 item.AgentID,
+			Metadata:                item.Metadata,
 			CreatedAt:               item.CreatedAt,
 			UpdatedAt:               item.UpdatedAt,
 			Archived:                item.ArchivedAt != nil,

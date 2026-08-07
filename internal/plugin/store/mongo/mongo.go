@@ -99,6 +99,11 @@ func (m *mongoMigrator) Migrate(ctx context.Context) error {
 			{Keys: bson.D{{Key: "owner_user_id", Value: 1}}},
 			{Keys: bson.D{{Key: "archived_at", Value: 1}}},
 			{Keys: bson.D{{Key: "conversation_group_id", Value: 1}, {Key: "created_at", Value: 1}}},
+			// Wildcard index on metadata fields enables efficient key-value filter lookups (metadata.key = value).
+			{
+				Keys:    bson.D{{Key: "metadata.$**", Value: 1}},
+				Options: options.Index().SetName("conversations_metadata_wildcard"),
+			},
 		},
 		"conversation_memberships": {
 			{
@@ -321,6 +326,7 @@ type MongoStore struct {
 	enc                         *dataencryption.Service
 	entriesCache                registrycache.MemoryEntriesCache
 	maxBSONDocumentSizeOverride int
+	metadataPatchBeforeUpdate   func() // test-only synchronization hook; nil in production
 }
 
 func (s *MongoStore) OutboxEnabled() bool {
@@ -1051,7 +1057,7 @@ func (s *MongoStore) createConversation(ctx context.Context, userID string, clie
 	}, nil
 }
 
-func (s *MongoStore) ListConversations(ctx context.Context, userID string, query *string, afterCursor *string, limit int, mode model.ConversationListMode, ancestry model.ConversationAncestryFilter, archived registrystore.ArchiveFilter) ([]registrystore.ConversationSummary, *string, error) {
+func (s *MongoStore) ListConversations(ctx context.Context, userID string, query *string, afterCursor *string, limit int, mode model.ConversationListMode, ancestry model.ConversationAncestryFilter, archived registrystore.ArchiveFilter, metadataFilter *registrystore.MetadataKeyFilter) ([]registrystore.ConversationSummary, *string, error) {
 	// Find all groups the user has membership in
 	cursor, err := s.memberships().Find(ctx, bson.M{"user_id": userID})
 	if err != nil {
@@ -1103,7 +1109,11 @@ func (s *MongoStore) ListConversations(ctx context.Context, userID string, query
 		}
 		filter["_id"] = bson.M{"$in": rootIDs}
 	case model.ListModeLatestFork:
-		return s.listConversationsLatestFork(ctx, filter, accessMap, afterCursor, limit)
+		return s.listConversationsLatestFork(ctx, filter, accessMap, afterCursor, limit, metadataFilter)
+	}
+
+	if metadataFilter != nil {
+		applyMetadataStringFilter(filter, metadataFilter)
 	}
 
 	if afterCursor != nil {
@@ -1145,6 +1155,19 @@ func (s *MongoStore) ListConversations(ctx context.Context, userID string, query
 		nextCursor = &c
 	}
 	return summaries, nextCursor, nil
+}
+
+func applyMetadataStringFilter(filter bson.M, metadataFilter *registrystore.MetadataKeyFilter) {
+	path := "metadata." + metadataFilter.Key
+	// Keep the equality predicate for the wildcard index, then reject MongoDB's
+	// array-element equality matches by requiring the stored value itself to be a string.
+	filter[path] = metadataFilter.Value
+	filter["$expr"] = bson.M{
+		"$eq": bson.A{
+			bson.M{"$type": "$" + path},
+			"string",
+		},
+	}
 }
 
 func (s *MongoStore) ListChildConversations(ctx context.Context, userID string, conversationID string, afterCursor *string, limit int) ([]registrystore.ConversationSummary, *string, error) {
@@ -1213,7 +1236,15 @@ func (s *MongoStore) ListChildConversations(ctx context.Context, userID string, 
 }
 
 // listConversationsLatestFork returns only the most recently updated conversation per group.
-func (s *MongoStore) listConversationsLatestFork(ctx context.Context, baseFilter bson.M, accessMap map[string]model.AccessLevel, afterCursor *string, limit int) ([]registrystore.ConversationSummary, *string, error) {
+func (s *MongoStore) listConversationsLatestFork(ctx context.Context, baseFilter bson.M, accessMap map[string]model.AccessLevel, afterCursor *string, limit int, metadataFilter *registrystore.MetadataKeyFilter) ([]registrystore.ConversationSummary, *string, error) {
+	// Apply metadata filter in the query so MongoDB narrows the set before we dedup by group.
+	// This keeps cursor semantics correct: the representative for each group that passes the
+	// filter is the most-recently-updated conversation that also matches — not the most-recently-
+	// updated in the group regardless of the filter.
+	if metadataFilter != nil {
+		applyMetadataStringFilter(baseFilter, metadataFilter)
+	}
+
 	// Load all candidates, then keep only the one with max updated_at per group.
 	opts := options.Find().SetSort(bson.D{{Key: "updated_at", Value: -1}, {Key: "created_at", Value: -1}, {Key: "_id", Value: -1}})
 	cur, err := s.conversations().Find(ctx, baseFilter, opts)
@@ -1302,11 +1333,11 @@ func (s *MongoStore) GetConversation(ctx context.Context, userID string, convers
 	return &registrystore.ConversationDetail{ConversationSummary: summary}, nil
 }
 
-func (s *MongoStore) UpdateConversation(ctx context.Context, userID string, conversationID string, title *string, metadata map[string]any) (*registrystore.ConversationDetail, error) {
+func (s *MongoStore) UpdateConversation(ctx context.Context, userID string, conversationID string, title *string, metadata registrystore.MetadataPatch) (*registrystore.ConversationDetail, error) {
+	// Initial read and access check
 	var doc convDoc
 	err := s.conversations().FindOne(ctx, bson.M{
-		"_id":         string(conversationID),
-		"archived_at": bson.M{"$exists": false},
+		"_id": string(conversationID),
 	}).Decode(&doc)
 	if err != nil {
 		return nil, &registrystore.NotFoundError{Resource: "conversation", ID: string(conversationID)}
@@ -1314,21 +1345,89 @@ func (s *MongoStore) UpdateConversation(ctx context.Context, userID string, conv
 	if _, err := s.requireAccess(ctx, userID, doc.ConversationGroupID, model.AccessLevelWriter); err != nil {
 		return nil, err
 	}
+	if title == nil && len(metadata) == 0 {
+		return s.GetConversation(ctx, userID, conversationID)
+	}
+	if len(metadata) > 0 && s.metadataPatchBeforeUpdate != nil {
+		s.metadataPatchBeforeUpdate()
+	}
 
-	update := bson.M{"$set": bson.M{"updated_at": time.Now()}}
-	sets := update["$set"].(bson.M)
+	// Build atomic aggregation pipeline update with constant-depth metadata expression.
+	now := time.Now().UTC()
+
+	// Build the $set stage
+	setStage := bson.M{
+		"updated_at": now,
+	}
+
 	if title != nil {
 		encTitle, err := s.encryptConversationTitle(string(conversationID), *title)
 		if err != nil {
 			return nil, fmt.Errorf("failed to encrypt title: %w", err)
 		}
-		sets["title"] = encTitle
-	}
-	if metadata != nil {
-		sets["metadata"] = metadata
+		setStage["title"] = encTitle
 	}
 
-	_, err = s.conversations().UpdateByID(ctx, string(conversationID), update)
+	// Build constant-depth metadata expression if metadata patch is provided
+	if metadata != nil {
+		// Sort keys for deterministic processing
+		keys := make([]string, 0, len(metadata))
+		for k := range metadata {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+
+		// Separate set and delete keys; build literal set document with deterministic ordering
+		deleteKeys := bson.A{}
+		setDoc := bson.D{}
+		for _, k := range keys {
+			v := metadata[k]
+			if v == nil {
+				deleteKeys = append(deleteKeys, k)
+			} else {
+				setDoc = append(setDoc, bson.E{Key: k, Value: v})
+			}
+		}
+
+		// Base: $ifNull with empty object fallback
+		base := bson.M{
+			"$ifNull": bson.A{"$metadata", bson.M{}},
+		}
+
+		// Merge base with literal set document
+		merged := bson.M{
+			"$mergeObjects": bson.A{base, bson.M{"$literal": setDoc}},
+		}
+
+		// If there are delete keys, remove them in constant depth
+		if len(deleteKeys) > 0 {
+			// Convert merged object to array of {k, v} pairs
+			asArray := bson.M{
+				"$objectToArray": merged,
+			}
+			// Filter out keys in deleteKeys list
+			filtered := bson.M{
+				"$filter": bson.M{
+					"input": asArray,
+					"cond": bson.M{
+						"$not": bson.A{bson.M{"$in": bson.A{"$$this.k", bson.M{"$literal": deleteKeys}}}},
+					},
+				},
+			}
+			// Convert back to object
+			setStage["metadata"] = bson.M{
+				"$arrayToObject": filtered,
+			}
+		} else {
+			setStage["metadata"] = merged
+		}
+	}
+
+	pipeline := mongo.Pipeline{
+		{{Key: "$set", Value: setStage}},
+	}
+
+	_, err = s.conversations().UpdateByID(ctx, string(conversationID), pipeline)
 	if err != nil {
 		return nil, fmt.Errorf("failed to update conversation: %w", err)
 	}
@@ -2121,8 +2220,7 @@ func (s *MongoStore) AppendEntries(ctx context.Context, userID string, conversat
 	}
 	var conv convDoc
 	err := s.conversations().FindOne(ctx, bson.M{
-		"_id":         string(conversationID),
-		"archived_at": bson.M{"$exists": false},
+		"_id": string(conversationID),
 	}).Decode(&conv)
 	if err != nil {
 		// Auto-create conversation if it doesn't exist (Java/Postgres parity).
@@ -2152,6 +2250,10 @@ func (s *MongoStore) AppendEntries(ctx context.Context, userID string, conversat
 			ConversationGroupID: uuidToStr(detail.ConversationGroupID),
 			OwnerUserID:         detail.OwnerUserID,
 		}
+	}
+	// Block appending to archived conversations. Use explicit unarchive via conversationPatch.archived=false first.
+	if conv.ArchivedAt != nil {
+		return nil, &registrystore.NotFoundError{Resource: "conversation", ID: conversationID}
 	}
 	if _, err := s.requireAccess(ctx, userID, conv.ConversationGroupID, model.AccessLevelWriter); err != nil {
 		return nil, err
@@ -2274,8 +2376,7 @@ func (s *MongoStore) SyncAgentEntry(ctx context.Context, userID string, conversa
 	autoCreated := false
 	var conv convDoc
 	err := s.conversations().FindOne(ctx, bson.M{
-		"_id":         string(conversationID),
-		"archived_at": bson.M{"$exists": false},
+		"_id": string(conversationID),
 	}).Decode(&conv)
 	if err != nil {
 		// Auto-create conversation if it does not exist and content is non-empty.
@@ -2287,6 +2388,10 @@ func (s *MongoStore) SyncAgentEntry(ctx context.Context, userID string, conversa
 			return nil, err
 		}
 		autoCreated = true
+	}
+	// Block syncing to archived conversations. Use explicit unarchive via conversationPatch.archived=false first.
+	if !autoCreated && conv.ArchivedAt != nil {
+		return nil, &registrystore.NotFoundError{Resource: "conversation", ID: conversationID}
 	}
 	if _, err := s.requireAccess(ctx, userID, conv.ConversationGroupID, model.AccessLevelWriter); err != nil {
 		return nil, err
@@ -2800,6 +2905,9 @@ func (s *MongoStore) AdminListConversations(ctx context.Context, query registrys
 		} else {
 			filter["archived_at"] = bson.M{"$lt": *query.ArchivedBefore}
 		}
+	}
+	if query.MetadataFilter != nil {
+		applyMetadataStringFilter(filter, query.MetadataFilter)
 	}
 
 	switch query.Mode {

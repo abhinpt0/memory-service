@@ -7,6 +7,7 @@ import { CopyButton } from "@/components/ui/copy-button";
 import { TimestampPopover } from "@/components/ui/timestamp-popover";
 import { JsonHighlight, formatJson } from "@/components/content-renderers/JsonHighlight";
 import { useAdminMemory } from "@/hooks/useAdminApi";
+import { getErrorMessage } from "@/lib/errors";
 import { cn } from "@/lib/utils";
 import {
   COGNITION_KIND_LABELS,
@@ -40,7 +41,7 @@ function MemoryDetailPage() {
       <div className="flex h-full items-center justify-center p-8">
         <div className="console-panel max-w-md rounded-2xl p-6 text-center">
           <p className="text-sm text-destructive mb-4">
-            {(error as Error).message || "Failed to load memory"}
+            {getErrorMessage(error, "Failed to load memory")}
           </p>
           <Link to="/memories">
             <Button variant="outline" size="sm">

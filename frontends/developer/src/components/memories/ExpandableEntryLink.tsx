@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { ChevronDown, ChevronRight, Loader2 } from "lucide-react";
 import { useAdminEntry } from "@/hooks/useAdminApi";
+import { getErrorMessage } from "@/lib/errors";
 import { EntryCard } from "@/components/conversations/EntryCard";
 
 interface ExpandableEntryLinkProps {
@@ -39,7 +40,7 @@ export function ExpandableEntryLink({ entryId }: ExpandableEntryLinkProps) {
 
           {error && (
             <div className="text-xs text-destructive">
-              Failed to load entry: {(error as Error).message}
+              Failed to load entry: {getErrorMessage(error, "Unknown error")}
             </div>
           )}
 
