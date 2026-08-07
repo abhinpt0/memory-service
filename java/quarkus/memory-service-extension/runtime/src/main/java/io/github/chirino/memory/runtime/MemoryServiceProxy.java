@@ -99,7 +99,7 @@ public class MemoryServiceProxy {
                 () ->
                         conversationsApi()
                                 .listConversations(
-                                        mode, ancestry, afterCursor, limit, query, archived),
+                                        mode, ancestry, afterCursor, limit, query, archived, null),
                 OK,
                 "Error listing conversations");
     }

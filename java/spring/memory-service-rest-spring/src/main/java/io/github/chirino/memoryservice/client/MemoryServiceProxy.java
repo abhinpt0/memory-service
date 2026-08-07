@@ -157,7 +157,7 @@ public class MemoryServiceProxy {
         return execute(
                 api ->
                         api.listConversationsWithHttpInfo(
-                                mode, "all", afterCursor, limit, query, archived),
+                                mode, "all", afterCursor, limit, query, archived, null),
                 HttpStatus.OK);
     }
 

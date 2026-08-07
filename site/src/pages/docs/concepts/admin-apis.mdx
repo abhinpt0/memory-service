@@ -92,9 +92,15 @@ curl "http://localhost:8080/v1/admin/conversations?archived=include" \
 # Show only archived conversations
 curl "http://localhost:8080/v1/admin/conversations?archived=only" \
   -H "Authorization: Bearer <admin-token>"
+
+# Filter by an exact string metadata value
+curl --globoff "http://localhost:8080/v1/admin/conversations?metadata[status]=waiting" \
+  -H "Authorization: Bearer <admin-token>"
 ```
 
-Similarly, entries, memberships, forks, attachments, episodic memories, and semantic search all have admin counterparts that bypass ownership checks. Admin conversation payloads expose an `archived` boolean so clients can distinguish archived records without depending on storage timestamps.
+Only one metadata filter is accepted per request. Metadata filter keys may contain alphanumeric characters, underscores, and hyphens; dots are rejected. Matching is exact and string-only, so numeric and boolean metadata values do not match the query value.
+
+Similarly, entries, memberships, forks, attachments, episodic memories, and semantic search all have admin counterparts that bypass ownership checks. Admin conversation payloads expose the `metadata` map and an `archived` boolean so clients can inspect conversation state without depending on storage timestamps.
 
 ### Getting Entries
 
@@ -131,9 +137,22 @@ Episodic memory admin routes use `/admin/v1/...` instead of `/v1/admin/...`. Rea
 
 See [Memories](/docs/concepts/memories/#admin-memory-exploration) for request parameters and examples.
 
-## Archiving And Unarchiving Conversations
+## Updating Conversations
 
-Admins archive and unarchive conversations by patching the conversation resource:
+Admins can update a conversation's title and metadata by patching the conversation resource. Metadata uses top-level merge-patch semantics: provided non-null values replace complete top-level values, omitted keys remain unchanged, and keys set to `null` are removed.
+
+```bash
+curl -X PATCH "http://localhost:8080/v1/admin/conversations/{id}" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <admin-token>" \
+  -d '{
+    "title": "Escalated support case",
+    "metadata": {"status": "reviewed", "queue": null},
+    "justification": "Support ticket #456"
+  }'
+```
+
+The same endpoint archives and unarchives the conversation fork tree:
 
 ```bash
 curl -X PATCH "http://localhost:8080/v1/admin/conversations/{id}" \
@@ -142,7 +161,7 @@ curl -X PATCH "http://localhost:8080/v1/admin/conversations/{id}" \
   -d '{"archived": false, "justification": "User accidentally archived the conversation — support ticket #456"}'
 ```
 
-Set `archived` to `true` to archive the fork tree or `false` to unarchive it. The response is the updated conversation object.
+Set `archived` to `true` to archive the fork tree or `false` to unarchive it. All updates require the `admin` role, and the response is the updated conversation object.
 
 ## Eviction: Permanently Removing Archived Data
 

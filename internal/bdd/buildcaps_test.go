@@ -16,8 +16,10 @@ func requireCapabilities(t *testing.T, missing ...string) {
 }
 
 func sqliteTagFilter() string {
-	if buildcaps.SQLiteFTS5 {
-		return ""
+	var filters []string
+	if !buildcaps.SQLiteFTS5 {
+		filters = append(filters, "~@requires-sqlite-fts5")
 	}
-	return "~@requires-sqlite-fts5"
+	filters = append(filters, "~@requires-embedded")
+	return strings.Join(filters, " && ")
 }

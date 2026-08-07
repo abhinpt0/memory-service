@@ -78,7 +78,7 @@ func TestListConversations(t *testing.T) {
 	require.NoError(t, err)
 
 	// List conversations
-	summaries, cursor, err := store.ListConversations(ctx, "user2", nil, nil, 10, model.ListModeAll, model.ConversationAncestryAll, registrystore.ArchiveFilterExclude)
+	summaries, cursor, err := store.ListConversations(ctx, "user2", nil, nil, 10, model.ListModeAll, model.ConversationAncestryAll, registrystore.ArchiveFilterExclude, nil)
 	require.NoError(t, err)
 	assert.GreaterOrEqual(t, len(summaries), 2)
 	_ = cursor
@@ -99,12 +99,12 @@ func TestArchiveConversation(t *testing.T) {
 	require.NotNil(t, archived.ArchivedAt)
 
 	// Default listing excludes archived conversations.
-	summaries, _, err := store.ListConversations(ctx, "user3", nil, nil, 10, model.ListModeAll, model.ConversationAncestryAll, registrystore.ArchiveFilterExclude)
+	summaries, _, err := store.ListConversations(ctx, "user3", nil, nil, 10, model.ListModeAll, model.ConversationAncestryAll, registrystore.ArchiveFilterExclude, nil)
 	require.NoError(t, err)
 	assert.Empty(t, summaries)
 
 	// Archived-only listing returns the archived conversation.
-	summaries, _, err = store.ListConversations(ctx, "user3", nil, nil, 10, model.ListModeAll, model.ConversationAncestryAll, registrystore.ArchiveFilterOnly)
+	summaries, _, err = store.ListConversations(ctx, "user3", nil, nil, 10, model.ListModeAll, model.ConversationAncestryAll, registrystore.ArchiveFilterOnly, nil)
 	require.NoError(t, err)
 	require.Len(t, summaries, 1)
 	assert.Equal(t, conv.ID, summaries[0].ID)

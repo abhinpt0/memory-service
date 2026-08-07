@@ -34,6 +34,7 @@ func TestFeaturesSQLiteEmbedded(t *testing.T) {
 
 	featureFiles := []string{
 		filepath.Join("testdata", "features-sqlite", "embedded-local-grpc.feature"),
+		filepath.Join("testdata", "features-sqlite", "sse-uds-rest.feature"),
 	}
 	runBDDFeaturesWithScenarioSetup(t, "sqlite-embedded-local", featureFiles, "", "", &cfg, nil, nil, newSQLiteEmbeddedScenarioSetup(t, cfg), 1)
 }
@@ -62,7 +63,8 @@ func newSQLiteEmbeddedScenarioSetup(t *testing.T, baseCfg config.Config) cucumbe
 
 		s.DB = &SQLiteTestDB{DBURL: cfg.DBURL}
 		s.Extra = cucumberCloneExtras(s.Extra, map[string]interface{}{
-			"grpcAddr": "unix://" + cfg.Listener.UnixSocket,
+			"grpcAddr":      "unix://" + cfg.Listener.UnixSocket,
+			"udsSocketPath": cfg.Listener.UnixSocket,
 		})
 
 		return func(context.Context) error {

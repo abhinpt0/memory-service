@@ -147,11 +147,12 @@ func sqliteRequireCurrentSchemaOrEmpty(ctx context.Context, db *sql.DB) error {
 
 // SQLiteStore implements MemoryStore using GORM + SQLite.
 type SQLiteStore struct {
-	handle       *sharedHandle
-	db           *gorm.DB
-	cfg          *config.Config
-	enc          *dataencryption.Service
-	entriesCache registrycache.MemoryEntriesCache
+	handle                    *sharedHandle
+	db                        *gorm.DB
+	cfg                       *config.Config
+	enc                       *dataencryption.Service
+	entriesCache              registrycache.MemoryEntriesCache
+	metadataPatchBeforeUpdate func() // test-only synchronization hook; nil in production
 }
 
 func (s *SQLiteStore) OutboxEnabled() bool {
@@ -450,66 +451,14 @@ func (s *SQLiteStore) createConversationWithID(ctx context.Context, userID strin
 	}, nil
 }
 
-func (s *SQLiteStore) ListConversations(ctx context.Context, userID string, query *string, afterCursor *string, limit int, mode model.ConversationListMode, ancestry model.ConversationAncestryFilter, archived registrystore.ArchiveFilter) ([]registrystore.ConversationSummary, *string, error) {
+func (s *SQLiteStore) ListConversations(ctx context.Context, userID string, query *string, afterCursor *string, limit int, mode model.ConversationListMode, ancestry model.ConversationAncestryFilter, archived registrystore.ArchiveFilter, metadataFilter *registrystore.MetadataKeyFilter) ([]registrystore.ConversationSummary, *string, error) {
 	requestedLimit := limit
 	queryStr := ""
 	if query != nil {
 		queryStr = strings.TrimSpace(*query)
 	}
 
-	tx := s.dbFor(ctx).
-		Table("conversations c").
-		Select(conversationSelectColumns+", cm.access_level").
-		Joins("JOIN conversation_memberships cm ON cm.conversation_group_id = c.conversation_group_id AND cm.user_id = ?", userID).
-		Joins("JOIN conversation_groups cg ON cg.id = c.conversation_group_id")
-	tx = joinDirectConversationAncestry(tx)
-
-	switch archived {
-	case registrystore.ArchiveFilterInclude:
-	case registrystore.ArchiveFilterOnly:
-		tx = tx.Where("c.archived_at IS NOT NULL")
-	default:
-		tx = tx.Where("c.archived_at IS NULL")
-	}
-
-	switch mode {
-	case model.ListModeRoots:
-		tx = tx.Where("ca_direct.ancestor_conversation_id IS NULL")
-	case model.ListModeLatestFork:
-		subquery := "SELECT MAX(c2.updated_at) FROM conversations c2 WHERE c2.conversation_group_id = c.conversation_group_id"
-		if archived == registrystore.ArchiveFilterOnly {
-			subquery += " AND c2.archived_at IS NOT NULL"
-		} else if archived != registrystore.ArchiveFilterInclude {
-			subquery += " AND c2.archived_at IS NULL"
-		}
-		tx = tx.Where("c.updated_at = (" + subquery + ")")
-	}
-	switch ancestry {
-	case model.ConversationAncestryChildren:
-		tx = tx.Where("c.started_by_conversation_id IS NOT NULL")
-	case model.ConversationAncestryAll:
-	default:
-		tx = tx.Where("c.started_by_conversation_id IS NULL")
-	}
-
-	if afterCursor != nil {
-		tx = tx.Where("c.created_at < (SELECT created_at FROM conversations WHERE id = ?)", *afterCursor)
-	}
-
-	queryLimit := requestedLimit + 1
-	if queryStr != "" {
-		// Titles are encrypted at rest, so text filtering must happen post-decryption.
-		// Over-fetch a bounded window to keep pagination reasonably useful.
-		queryLimit = requestedLimit * 5
-		if queryLimit < requestedLimit+1 {
-			queryLimit = requestedLimit + 1
-		}
-		if queryLimit > 1000 {
-			queryLimit = 1000
-		}
-	}
-
-	tx = tx.Order("c.created_at DESC").Limit(queryLimit)
+	const selectColumns = conversationSelectColumns + ", cm.access_level"
 
 	type row struct {
 		ID                      string                 `gorm:"column:id"`
@@ -526,6 +475,69 @@ func (s *SQLiteStore) ListConversations(ctx context.Context, userID string, quer
 		ArchivedAt              *time.Time             `gorm:"column:archived_at"`
 		AccessLevel             model.AccessLevel      `gorm:"column:access_level"`
 	}
+
+	base := s.dbFor(ctx).
+		Table("conversations c").
+		Joins("JOIN conversation_memberships cm ON cm.conversation_group_id = c.conversation_group_id AND cm.user_id = ?", userID).
+		Joins("JOIN conversation_groups cg ON cg.id = c.conversation_group_id")
+	base = joinDirectConversationAncestry(base)
+
+	switch archived {
+	case registrystore.ArchiveFilterInclude:
+	case registrystore.ArchiveFilterOnly:
+		base = base.Where("c.archived_at IS NOT NULL")
+	default:
+		base = base.Where("c.archived_at IS NULL")
+	}
+
+	switch ancestry {
+	case model.ConversationAncestryChildren:
+		base = base.Where("c.started_by_conversation_id IS NOT NULL")
+	case model.ConversationAncestryAll:
+	default:
+		base = base.Where("c.started_by_conversation_id IS NULL")
+	}
+
+	if metadataFilter != nil {
+		path := "$." + metadataFilter.Key
+		base = base.Where("json_type(c.metadata, ?) = 'text' AND json_extract(c.metadata, ?) = ?", path, path, metadataFilter.Value)
+	}
+
+	createdAtColumn := "c.created_at"
+	var tx *gorm.DB
+	switch mode {
+	case model.ListModeRoots:
+		tx = base.
+			Where("ca_direct.ancestor_conversation_id IS NULL").
+			Select(selectColumns)
+	case model.ListModeLatestFork:
+		ranked := base.Select(selectColumns + ", ROW_NUMBER() OVER (PARTITION BY c.conversation_group_id ORDER BY c.updated_at DESC, c.created_at DESC, c.id DESC) AS group_rank")
+		tx = s.dbFor(ctx).
+			Table("(?) AS ranked", ranked).
+			Select("id, title, owner_user_id, metadata, conversation_group_id, forked_at_entry_id, forked_at_conversation_id, started_by_conversation_id, started_by_entry_id, created_at, updated_at, archived_at, access_level").
+			Where("group_rank = 1")
+		createdAtColumn = "ranked.created_at"
+	default:
+		tx = base.Select(selectColumns)
+	}
+
+	if afterCursor != nil {
+		tx = tx.Where(createdAtColumn+" < (SELECT created_at FROM conversations WHERE id = ?)", *afterCursor)
+	}
+
+	queryLimit := requestedLimit + 1
+	if queryStr != "" {
+		queryLimit = requestedLimit * 5
+		if queryLimit < requestedLimit+1 {
+			queryLimit = requestedLimit + 1
+		}
+		if queryLimit > 1000 {
+			queryLimit = 1000
+		}
+	}
+
+	tx = tx.Order(createdAtColumn + " DESC").Limit(queryLimit)
+
 	var rows []row
 	if err := tx.Scan(&rows).Error; err != nil {
 		return nil, nil, fmt.Errorf("failed to list conversations: %w", err)
@@ -620,14 +632,24 @@ func (s *SQLiteStore) GetConversation(ctx context.Context, userID string, conver
 	}, nil
 }
 
-func (s *SQLiteStore) UpdateConversation(ctx context.Context, userID string, conversationID string, title *string, metadata map[string]interface{}) (*registrystore.ConversationDetail, error) {
+func (s *SQLiteStore) UpdateConversation(ctx context.Context, userID string, conversationID string, title *string, metadata registrystore.MetadataPatch) (*registrystore.ConversationDetail, error) {
 	db := s.writeDBFor(ctx, "sqlite store update conversation")
 	var conv model.Conversation
-	if err := db.Where("id = ? AND archived_at IS NULL", conversationID).First(&conv).Error; err != nil {
+	result := db.Where("id = ?", conversationID).Limit(1).Find(&conv)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	if result.RowsAffected == 0 {
 		return nil, &registrystore.NotFoundError{Resource: "conversation", ID: string(conversationID)}
 	}
 	if _, err := s.requireAccess(ctx, userID, conv.ConversationGroupID, model.AccessLevelWriter); err != nil {
 		return nil, err
+	}
+	if title == nil && len(metadata) == 0 {
+		return s.GetConversation(ctx, userID, conversationID)
+	}
+	if len(metadata) > 0 && s.metadataPatchBeforeUpdate != nil {
+		s.metadataPatchBeforeUpdate()
 	}
 
 	updates := map[string]interface{}{"updated_at": time.Now()}
@@ -638,9 +660,49 @@ func (s *SQLiteStore) UpdateConversation(ctx context.Context, userID string, con
 		}
 		updates["title"] = encTitle
 	}
+
 	if metadata != nil {
-		updates["metadata"] = metadata
+		// Build atomic top-level patch: each key present with non-null value replaces that entire top-level value;
+		// null deletes that top-level key; absent keys remain unchanged.
+		// Sort keys for deterministic SQL/argument order.
+		keys := make([]string, 0, len(metadata))
+		for k := range metadata {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+
+		// Start with existing metadata (or empty object if null).
+		expr := "COALESCE(metadata,'{}')"
+		args := []interface{}{}
+
+		for _, key := range keys {
+			value := metadata[key]
+			if value == nil {
+				// Explicit null: delete the top-level key.
+				deleteJSON, err := json.Marshal(map[string]interface{}{key: nil})
+				if err != nil {
+					return nil, fmt.Errorf("failed to marshal deletion patch for key %q: %w", key, err)
+				}
+				expr = fmt.Sprintf("json_patch(%s, ?)", expr)
+				args = append(args, string(deleteJSON))
+			} else {
+				// Non-null value: first delete any existing top-level value, then insert the replacement wholesale.
+				deleteJSON, err := json.Marshal(map[string]interface{}{key: nil})
+				if err != nil {
+					return nil, fmt.Errorf("failed to marshal deletion patch for key %q: %w", key, err)
+				}
+				insertJSON, err := json.Marshal(map[string]interface{}{key: value})
+				if err != nil {
+					return nil, fmt.Errorf("failed to marshal insertion patch for key %q: %w", key, err)
+				}
+				expr = fmt.Sprintf("json_patch(json_patch(%s, ?), ?)", expr)
+				args = append(args, string(deleteJSON), string(insertJSON))
+			}
+		}
+
+		updates["metadata"] = gorm.Expr(expr, args...)
 	}
+
 	if err := db.Model(&conv).Updates(updates).Error; err != nil {
 		return nil, fmt.Errorf("failed to update conversation: %w", err)
 	}
@@ -648,7 +710,8 @@ func (s *SQLiteStore) UpdateConversation(ctx context.Context, userID string, con
 }
 
 func (s *SQLiteStore) ArchiveConversation(ctx context.Context, userID string, conversationID string) error {
-	db := s.writeDBFor(ctx, "sqlite store archive conversation")
+	// Read the conversation first (uses the current scope, read or write).
+	db := s.dbFor(ctx)
 	var conv model.Conversation
 	if err := db.Where("id = ? AND archived_at IS NULL", conversationID).First(&conv).Error; err != nil {
 		return &registrystore.NotFoundError{Resource: "conversation", ID: string(conversationID)}
@@ -658,18 +721,22 @@ func (s *SQLiteStore) ArchiveConversation(ctx context.Context, userID string, co
 	}
 
 	now := time.Now()
-	return db.Transaction(func(tx *gorm.DB) error {
-		groupIDs, err := s.startedConversationGroupIDsForDelete(ctx, conv.ConversationGroupID)
+	groupID := conv.ConversationGroupID
+	// Use InWriteTx so that if we are already inside a write scope the calls join it,
+	// and if called standalone the two updates are wrapped in a single transaction.
+	return s.InWriteTx(ctx, func(txCtx context.Context) error {
+		wdb := s.writeDBFor(txCtx, "sqlite store archive conversation")
+		groupIDs, err := s.startedConversationGroupIDsForDelete(txCtx, groupID)
 		if err != nil {
 			return err
 		}
-		// Archive the conversation group and its fork tree. Entries and memberships remain until eviction.
-		if err := tx.Model(&model.ConversationGroup{}).
+		// Archive the conversation group and its fork tree.
+		if err := wdb.Model(&model.ConversationGroup{}).
 			Where("id IN ?", groupIDs).
 			Update("archived_at", now).Error; err != nil {
 			return fmt.Errorf("failed to archive group: %w", err)
 		}
-		if err := tx.Model(&model.Conversation{}).
+		if err := wdb.Model(&model.Conversation{}).
 			Where("conversation_group_id IN ? AND archived_at IS NULL", groupIDs).
 			Update("archived_at", now).Error; err != nil {
 			return fmt.Errorf("failed to archive conversations: %w", err)
@@ -679,7 +746,7 @@ func (s *SQLiteStore) ArchiveConversation(ctx context.Context, userID string, co
 }
 
 func (s *SQLiteStore) UnarchiveConversation(ctx context.Context, userID string, conversationID string) error {
-	db := s.writeDBFor(ctx, "sqlite store unarchive conversation")
+	db := s.dbFor(ctx)
 	var conv model.Conversation
 	result := db.Where("id = ? AND archived_at IS NOT NULL", conversationID).Limit(1).Find(&conv)
 	if result.Error != nil {
@@ -692,17 +759,19 @@ func (s *SQLiteStore) UnarchiveConversation(ctx context.Context, userID string, 
 		return err
 	}
 
-	return db.Transaction(func(tx *gorm.DB) error {
-		groupIDs, err := s.startedConversationGroupIDsForDelete(ctx, conv.ConversationGroupID)
+	groupID := conv.ConversationGroupID
+	return s.InWriteTx(ctx, func(txCtx context.Context) error {
+		wdb := s.writeDBFor(txCtx, "sqlite store unarchive conversation")
+		groupIDs, err := s.startedConversationGroupIDsForDelete(txCtx, groupID)
 		if err != nil {
 			return err
 		}
-		if err := tx.Model(&model.ConversationGroup{}).
+		if err := wdb.Model(&model.ConversationGroup{}).
 			Where("id IN ?", groupIDs).
 			Update("archived_at", nil).Error; err != nil {
 			return fmt.Errorf("failed to unarchive group: %w", err)
 		}
-		if err := tx.Model(&model.Conversation{}).
+		if err := wdb.Model(&model.Conversation{}).
 			Where("conversation_group_id IN ? AND archived_at IS NOT NULL", groupIDs).
 			Update("archived_at", nil).Error; err != nil {
 			return fmt.Errorf("failed to unarchive conversations: %w", err)
@@ -1439,7 +1508,7 @@ func (s *SQLiteStore) AppendEntries(ctx context.Context, userID string, conversa
 	}
 	db := s.writeDBFor(ctx, "sqlite store append entries")
 	var conv model.Conversation
-	convResult := db.Where("id = ? AND archived_at IS NULL", conversationID).Limit(1).Find(&conv)
+	convResult := db.Where("id = ?", conversationID).Limit(1).Find(&conv)
 	if convResult.Error != nil {
 		return nil, convResult.Error
 	}
@@ -1483,7 +1552,7 @@ func (s *SQLiteStore) AppendEntries(ctx context.Context, userID string, conversa
 			loaded := false
 			for attempt := 0; attempt < 10; attempt++ {
 				convResult = db.
-					Where("id = ? AND archived_at IS NULL", conversationID).
+					Where("id = ?", conversationID).
 					Limit(1).
 					Find(&conv)
 				if convResult.Error != nil {
@@ -1514,6 +1583,10 @@ func (s *SQLiteStore) AppendEntries(ctx context.Context, userID string, conversa
 				UpdatedAt:               detail.UpdatedAt,
 			}
 		}
+	}
+	// Block appending to archived conversations. Use explicit unarchive via conversationPatch.archived=false first.
+	if conv.ArchivedAt != nil {
+		return nil, &registrystore.NotFoundError{Resource: "conversation", ID: conversationID}
 	}
 	if _, err := s.requireAccess(ctx, userID, conv.ConversationGroupID, model.AccessLevelWriter); err != nil {
 		return nil, err
@@ -1637,7 +1710,7 @@ func (s *SQLiteStore) SyncAgentEntry(ctx context.Context, userID string, convers
 
 	autoCreated := false
 	var conv model.Conversation
-	result := db.Where("id = ? AND archived_at IS NULL", conversationID).Limit(1).Find(&conv)
+	result := db.Where("id = ?", conversationID).Limit(1).Find(&conv)
 	if result.Error != nil {
 		return nil, result.Error
 	}
@@ -1652,6 +1725,10 @@ func (s *SQLiteStore) SyncAgentEntry(ctx context.Context, userID string, convers
 			return nil, err
 		}
 		autoCreated = true
+	}
+	// Block syncing to archived conversations. Use explicit unarchive via conversationPatch.archived=false first.
+	if !autoCreated && conv.ArchivedAt != nil {
+		return nil, &registrystore.NotFoundError{Resource: "conversation", ID: conversationID}
 	}
 	if _, err := s.requireAccess(ctx, userID, conv.ConversationGroupID, model.AccessLevelWriter); err != nil {
 		return nil, err
@@ -2167,7 +2244,12 @@ func (s *SQLiteStore) AdminListConversations(ctx context.Context, query registry
 	default:
 		base = base.Where("c.started_by_conversation_id IS NULL")
 	}
+	if query.MetadataFilter != nil {
+		path := "$." + query.MetadataFilter.Key
+		base = base.Where("json_type(c.metadata, ?) = 'text' AND json_extract(c.metadata, ?) = ?", path, path, query.MetadataFilter.Value)
+	}
 
+	createdAtColumn := "c.created_at"
 	var tx *gorm.DB
 	switch query.Mode {
 	case model.ListModeRoots:
@@ -2180,14 +2262,15 @@ func (s *SQLiteStore) AdminListConversations(ctx context.Context, query registry
 			Table("(?) AS ranked", ranked).
 			Select("id, title, owner_user_id, client_id, agent_id, metadata, conversation_group_id, forked_at_entry_id, forked_at_conversation_id, started_by_conversation_id, started_by_entry_id, created_at, updated_at, archived_at, access_level").
 			Where("group_rank = 1")
+		createdAtColumn = "ranked.created_at"
 	default:
 		tx = base.Select(selectColumns)
 	}
 
 	if query.AfterCursor != nil {
-		tx = tx.Where("created_at < (SELECT created_at FROM conversations WHERE id = ?)", *query.AfterCursor)
+		tx = tx.Where(createdAtColumn+" < (SELECT created_at FROM conversations WHERE id = ?)", *query.AfterCursor)
 	}
-	tx = tx.Order("created_at DESC").Limit(query.Limit + 1)
+	tx = tx.Order(createdAtColumn + " DESC").Limit(query.Limit + 1)
 
 	var rows []row
 	if err := tx.Scan(&rows).Error; err != nil {

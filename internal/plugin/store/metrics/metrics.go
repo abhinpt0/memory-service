@@ -44,9 +44,9 @@ func (m *metricsStore) CreateConversationWithID(ctx context.Context, userID stri
 	return m.inner.CreateConversationWithID(ctx, userID, clientID, convID, title, metadata, agentID, forkedAtConversationID, forkedAtEntryID)
 }
 
-func (m *metricsStore) ListConversations(ctx context.Context, userID string, query *string, afterCursor *string, limit int, mode model.ConversationListMode, ancestry model.ConversationAncestryFilter, archived store.ArchiveFilter) ([]store.ConversationSummary, *string, error) {
+func (m *metricsStore) ListConversations(ctx context.Context, userID string, query *string, afterCursor *string, limit int, mode model.ConversationListMode, ancestry model.ConversationAncestryFilter, archived store.ArchiveFilter, metadataFilter *store.MetadataKeyFilter) ([]store.ConversationSummary, *string, error) {
 	defer observe("list_conversations", time.Now())
-	return m.inner.ListConversations(ctx, userID, query, afterCursor, limit, mode, ancestry, archived)
+	return m.inner.ListConversations(ctx, userID, query, afterCursor, limit, mode, ancestry, archived, metadataFilter)
 }
 
 func (m *metricsStore) GetConversation(ctx context.Context, userID string, conversationID string) (*store.ConversationDetail, error) {
@@ -54,9 +54,9 @@ func (m *metricsStore) GetConversation(ctx context.Context, userID string, conve
 	return m.inner.GetConversation(ctx, userID, conversationID)
 }
 
-func (m *metricsStore) UpdateConversation(ctx context.Context, userID string, conversationID string, title *string, metadata map[string]interface{}) (*store.ConversationDetail, error) {
+func (m *metricsStore) UpdateConversation(ctx context.Context, userID string, conversationID string, title *string, metadataPatch store.MetadataPatch) (*store.ConversationDetail, error) {
 	defer observe("update_conversation", time.Now())
-	return m.inner.UpdateConversation(ctx, userID, conversationID, title, metadata)
+	return m.inner.UpdateConversation(ctx, userID, conversationID, title, metadataPatch)
 }
 
 func (m *metricsStore) ArchiveConversation(ctx context.Context, userID string, conversationID string) error {

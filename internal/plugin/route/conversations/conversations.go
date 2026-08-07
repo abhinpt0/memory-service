@@ -70,9 +70,14 @@ func listConversations(c *gin.Context, store registrystore.MemoryStore) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	metadataFilter, err := registrystore.ParseMetadataFilterQuery(c.Request.URL.RawQuery)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 
 	if err := routetx.MemoryRead(c, store, func(ctx context.Context) error {
-		summaries, cursor, err := store.ListConversations(ctx, userID, query, afterCursor, limit, mode, ancestry, archived)
+		summaries, cursor, err := store.ListConversations(ctx, userID, query, afterCursor, limit, mode, ancestry, archived, metadataFilter)
 		if err != nil {
 			return err
 		}
@@ -238,11 +243,16 @@ func updateConversation(c *gin.Context, store registrystore.MemoryStore, eventBu
 			title = &value
 		}
 	}
-	var metadata map[string]interface{}
+	var metadataPatch registrystore.MetadataPatch
 	if data, ok := raw["metadata"]; ok {
-		if err := json.Unmarshal(data, &metadata); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid metadata"})
-			return
+		trimmed := bytes.TrimSpace(data)
+		if !bytes.Equal(trimmed, []byte("null")) {
+			var err error
+			metadataPatch, err = registrystore.DecodeMetadataPatch(trimmed)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
 		}
 	}
 	var archived *bool
@@ -265,6 +275,8 @@ func updateConversation(c *gin.Context, store registrystore.MemoryStore, eventBu
 			eventData     map[string]any
 			memberUserIDs []string
 		)
+
+		// Apply archive/unarchive first if requested.
 		if archived != nil {
 			conv, err = store.GetConversation(ctx, userID, convID)
 			if err != nil {
@@ -289,18 +301,32 @@ func updateConversation(c *gin.Context, store registrystore.MemoryStore, eventBu
 				"members":            memberUserIDs,
 				"archived":           *archived,
 			}
-		} else {
-			conv, err = store.UpdateConversation(ctx, userID, convID, title, metadata)
+		}
+
+		// Apply title and/or metadata merge-patch if provided (independent of archived).
+		if title != nil || len(metadataPatch) > 0 {
+			conv, err = store.UpdateConversation(ctx, userID, convID, title, metadataPatch)
 			if err != nil {
 				return err
 			}
-			eventData = map[string]any{
-				"conversation":       conv.ID,
-				"conversation_group": conv.ConversationGroupID,
+			// Only overwrite eventData if we didn't also archive (archive event takes precedence).
+			if archived == nil {
+				eventData = map[string]any{
+					"conversation":       conv.ID,
+					"conversation_group": conv.ConversationGroupID,
+				}
+			}
+		}
+
+		if conv == nil {
+			// Nothing was changed — fetch for the response.
+			conv, err = store.GetConversation(ctx, userID, convID)
+			if err != nil {
+				return err
 			}
 		}
 		updatedConv = conv
-		if conv != nil {
+		if conv != nil && eventData != nil {
 			events := []registryeventbus.Event{{
 				Event:               eventName,
 				Kind:                "conversation",
@@ -412,12 +438,16 @@ type conversationDetailResponse struct {
 }
 
 func toConversationSummary(item registrystore.ConversationSummary) conversationSummaryResponse {
+	metadata := item.Metadata
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
 	return conversationSummaryResponse{
 		ID:                      item.ID,
 		Title:                   item.Title,
 		OwnerUserID:             item.OwnerUserID,
 		AgentID:                 item.AgentID,
-		Metadata:                item.Metadata,
+		Metadata:                metadata,
 		ForkedAtEntryID:         item.ForkedAtEntryID,
 		ForkedAtConversationID:  item.ForkedAtConversationID,
 		StartedByConversationID: item.StartedByConversationID,

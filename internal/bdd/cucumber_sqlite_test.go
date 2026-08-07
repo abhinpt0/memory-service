@@ -44,5 +44,6 @@ func collectSQLiteRESTFeatures(t *testing.T) []string {
 		"sse-events-replay-rest.feature": true,
 	})
 	featureFiles = append(featureFiles, filepath.Join("testdata", "features-sqlite", "mcp-sqlite.feature"))
+	featureFiles = append(featureFiles, filepath.Join("testdata", "features-grpc", "metadata-and-conversation-patch-grpc.feature"))
 	return featureFiles
 }

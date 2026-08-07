@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -22,6 +23,7 @@ func init() {
 		e := &sseEventSteps{s: s, streams: make(map[string]*sseStream)}
 
 		// Connection management
+		ctx.Step(`^"([^"]*)" is connected to the SSE event stream via the Unix socket$`, e.userIsConnectedToSSEStreamViaUDS)
 		ctx.Step(`^"([^"]*)" is connected to the SSE event stream$`, e.userIsConnectedToSSEStream)
 		ctx.Step(`^"([^"]*)" is connected to the SSE event stream filtered to kinds "([^"]*)"$`, e.userIsConnectedToSSEStreamFilteredToKinds)
 		ctx.Step(`^"([^"]*)" is connected to the SSE event stream with query "([^"]*)"$`, e.userIsConnectedToSSEStreamWithQuery)
@@ -152,6 +154,87 @@ func (e *sseEventSteps) closeAll() {
 		<-stream.done
 	}
 	e.streams = make(map[string]*sseStream)
+}
+
+func (e *sseEventSteps) userIsConnectedToSSEStreamViaUDS(userID string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	// Close existing stream for this user if any.
+	if existing, ok := e.streams[userID]; ok {
+		existing.cancel()
+		<-existing.done
+	}
+
+	socketPath, ok := e.s.Extra["udsSocketPath"].(string)
+	if !ok || socketPath == "" {
+		return fmt.Errorf("udsSocketPath not set in scenario Extra; is this running under TestFeaturesSQLiteEmbedded?")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Dial over the Unix socket. The embedded server runs plaintext (EnableTLS=false),
+	// so no TLS config is needed. No Authorization header is sent either — local-socket
+	// auth (UnixSocketAuth=local) identifies the caller by socket ownership.
+	client := &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(dialCtx context.Context, _, _ string) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(dialCtx, "unix", socketPath)
+			},
+		},
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://unix/v1/events", nil)
+	if err != nil {
+		cancel()
+		return err
+	}
+	req.Header.Set("Accept", "text/event-stream")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		cancel()
+		return err
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		cancel()
+		return fmt.Errorf("SSE UDS connect failed: status %d, body: %s", resp.StatusCode, body)
+	}
+
+	stream := &sseStream{
+		events: make(chan map[string]any, 100),
+		cancel: cancel,
+		resp:   resp,
+		done:   make(chan struct{}),
+	}
+	e.streams[userID] = stream
+
+	go func() {
+		defer close(stream.done)
+		defer resp.Body.Close()
+		scanner := bufio.NewScanner(resp.Body)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			data := strings.TrimPrefix(line, "data: ")
+			var event map[string]any
+			if err := json.Unmarshal([]byte(data), &event); err != nil {
+				continue
+			}
+			select {
+			case stream.events <- event:
+			default:
+			}
+		}
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	return nil
 }
 
 func (e *sseEventSteps) userIsConnectedToSSEStream(userID string) error {

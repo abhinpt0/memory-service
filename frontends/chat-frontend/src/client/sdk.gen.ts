@@ -150,6 +150,9 @@ export class ConversationsService {
       limit?: number;
       query?: string;
       archived?: "exclude" | "include" | "only";
+      metadata?: {
+        [key: string]: string;
+      };
     },
     options?: Options<never, ThrowOnError>,
   ) {
@@ -164,6 +167,7 @@ export class ConversationsService {
             { in: "query", key: "limit" },
             { in: "query", key: "query" },
             { in: "query", key: "archived" },
+            { in: "query", key: "metadata" },
           ],
         },
       ],
@@ -242,7 +246,8 @@ export class ConversationsService {
    * Update a conversation
    *
    * Updates conversation properties.
-   * Requires writer or higher access on the conversation.
+   * Updating the title or metadata requires writer or higher access on the
+   * conversation. Changing the archived state requires owner access.
    */
   public static updateConversation<ThrowOnError extends boolean = true>(
     parameters: {

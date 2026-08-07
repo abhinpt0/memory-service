@@ -46,6 +46,9 @@ CREATE TABLE IF NOT EXISTS conversations (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_group_id_id
     ON conversations (conversation_group_id, id);
 
+-- GIN index on metadata JSONB enables efficient containment filter lookups (metadata @> object).
+CREATE INDEX IF NOT EXISTS idx_conversations_metadata ON conversations USING GIN (metadata jsonb_path_ops);
+
 CREATE TABLE IF NOT EXISTS conversation_ancestry (
     conversation_group_id UUID NOT NULL REFERENCES conversation_groups (id) ON DELETE CASCADE,
     descendant_conversation_id TEXT NOT NULL,

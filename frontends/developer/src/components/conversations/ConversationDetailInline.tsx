@@ -3,6 +3,7 @@ import { Archive, Loader2, User, Hash } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { useAdminConversation, useAdminConversationEntries } from "@/hooks/useAdminApi";
 import { formatRelativeTime } from "@/lib/utils";
+import { getErrorMessage } from "@/lib/errors";
 import { EntryCard } from "@/components/conversations/EntryCard";
 import type { Entry } from "@/api/client";
 
@@ -29,7 +30,7 @@ export function ConversationDetailInline({ conversationId, highlightEntryId }: C
   if (conversationError || entriesError) {
     return (
       <div className="py-4 text-center text-sm text-destructive">
-        {((conversationError || entriesError) as Error).message || "Failed to load conversation details"}
+        {getErrorMessage(conversationError || entriesError, "Failed to load conversation details")}
       </div>
     );
   }
