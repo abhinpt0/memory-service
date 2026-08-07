@@ -184,6 +184,71 @@ func TestCognitionPoliciesCompileWithRegoV1(t *testing.T) {
 	}
 }
 
+const testTimestamp = "2025-06-10T13:30:00Z"
+
+func TestCognitionPoliciesRegoAssertions(t *testing.T) {
+	policyDir := filepath.Join("..", "..", "deploy", "episodic-policies", "cognition")
+	engine, err := NewPolicyEngine(context.Background(), policyDir)
+	if err != nil {
+		t.Fatalf("compile cognition policies: %v", err)
+	}
+
+	ctx := context.Background()
+
+	t.Run("extracts_observedAt_and_effectiveAt_from_index", func(t *testing.T) {
+		namespace := []string{"user", "alice", "cognition.v1", "fact"}
+		value := map[string]interface{}{
+			"content":    "User prefers Go",
+			"confidence": 0.9,
+		}
+		index := map[string]string{
+			"content":      "User prefers Go",
+			"type":         "fact",
+			"observed_at":  testTimestamp,
+			"effective_at": testTimestamp,
+		}
+		attrs, err := engine.ExtractAttributes(ctx, namespace, "key-1", value, index, PolicyContext{})
+		if err != nil {
+			t.Fatalf("ExtractAttributes: %v", err)
+		}
+		if got, ok := attrs["observedAt"]; !ok || got != testTimestamp {
+			t.Errorf("observedAt: want %q, got %v", testTimestamp, got)
+		}
+		if got, ok := attrs["effectiveAt"]; !ok || got != testTimestamp {
+			t.Errorf("effectiveAt: want %q, got %v", testTimestamp, got)
+		}
+	})
+
+	t.Run("omits_observedAt_when_index_key_absent", func(t *testing.T) {
+		namespace := []string{"user", "alice", "cognition.v1", "fact"}
+		value := map[string]interface{}{"content": "old memory"}
+		index := map[string]string{"content": "old memory", "type": "fact"}
+		attrs, err := engine.ExtractAttributes(ctx, namespace, "key-2", value, index, PolicyContext{})
+		if err != nil {
+			t.Fatalf("ExtractAttributes: %v", err)
+		}
+		if _, ok := attrs["observedAt"]; ok {
+			t.Error("observedAt must not be present when missing from index")
+		}
+	})
+
+	t.Run("omits_observedAt_when_index_value_is_empty", func(t *testing.T) {
+		namespace := []string{"user", "alice", "cognition.v1", "fact"}
+		value := map[string]interface{}{"content": "some fact"}
+		index := map[string]string{"observed_at": "", "effective_at": ""}
+		attrs, err := engine.ExtractAttributes(ctx, namespace, "key-3", value, index, PolicyContext{})
+		if err != nil {
+			t.Fatalf("ExtractAttributes: %v", err)
+		}
+		if _, ok := attrs["observedAt"]; ok {
+			t.Error("observedAt must not be present when index value is empty string")
+		}
+		if _, ok := attrs["effectiveAt"]; ok {
+			t.Error("effectiveAt must not be present when index value is empty string")
+		}
+	})
+}
+
 func evalRegoBoolean(t *testing.T, modules map[string]string, query string) bool {
 	t.Helper()
 	opts := []func(*rego.Rego){rego.Query(query)}

@@ -82,4 +82,16 @@ cognition_attributes["entryIds"] = entry_id if {
     entry_id := input.value.provenance.entry_ids[0]
 }
 
+cognition_attributes["observedAt"] = observed_at if {
+    is_string(input.index.observed_at)
+    input.index.observed_at != ""
+    observed_at := input.index.observed_at
+}
+
+cognition_attributes["effectiveAt"] = effective_at if {
+    is_string(input.index.effective_at)
+    input.index.effective_at != ""
+    effective_at := input.index.effective_at
+}
+
 attributes = object.union(base_attributes, cognition_attributes)
