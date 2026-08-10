@@ -184,11 +184,15 @@ func TestCognitionPoliciesCompileWithRegoV1(t *testing.T) {
 	}
 }
 
-const testTimestamp = "2025-06-10T13:30:00Z"
+// testTimestamp is the expected normalised form: fixed-width nanosecond-precision UTC.
+const testTimestamp = "2025-06-10T13:30:00.000000000Z"
 
 // testTimestampWithNanos has sub-second precision; after normalisation it must
-// equal testTimestamp.
+// equal testTimestampNanosNorm.
 const testTimestampWithNanos = "2025-06-10T13:30:00.500000000Z"
+
+// testTimestampNanosNorm is the expected normalised form of testTimestampWithNanos.
+const testTimestampNanosNorm = "2025-06-10T13:30:00.500000000Z"
 
 func TestCognitionPoliciesRegoAssertions(t *testing.T) {
 	policyDir := filepath.Join("..", "..", "deploy", "episodic-policies", "cognition")
@@ -312,8 +316,8 @@ func TestCognitionPoliciesRegoAssertions(t *testing.T) {
 		}
 	})
 
-	// A sub-second precision timestamp must be normalised to second-precision UTC.
-	t.Run("normalises_nanosecond_timestamp_to_second_precision", func(t *testing.T) {
+	// A sub-second precision timestamp must be normalised to fixed-width nanosecond UTC.
+	t.Run("normalises_nanosecond_timestamp_to_fixed_width_nanosecond_utc", func(t *testing.T) {
 		namespace := []string{"user", "alice", "cognition.v1", "facts"}
 		value := map[string]interface{}{
 			"kind":        "fact",
@@ -328,8 +332,8 @@ func TestCognitionPoliciesRegoAssertions(t *testing.T) {
 		if !ok {
 			t.Fatal("observedAt must be present for a valid RFC3339 timestamp with nanos")
 		}
-		if got != testTimestamp {
-			t.Errorf("observedAt: want %q, got %q", testTimestamp, got)
+		if got != testTimestampNanosNorm {
+			t.Errorf("observedAt: want %q, got %q", testTimestampNanosNorm, got)
 		}
 	})
 
