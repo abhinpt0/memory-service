@@ -186,6 +186,10 @@ func TestCognitionPoliciesCompileWithRegoV1(t *testing.T) {
 
 const testTimestamp = "2025-06-10T13:30:00Z"
 
+// testTimestampWithNanos has sub-second precision; after normalisation it must
+// equal testTimestamp.
+const testTimestampWithNanos = "2025-06-10T13:30:00.500000000Z"
+
 func TestCognitionPoliciesRegoAssertions(t *testing.T) {
 	policyDir := filepath.Join("..", "..", "deploy", "episodic-policies", "cognition")
 	engine, err := NewPolicyEngine(context.Background(), policyDir)
@@ -195,17 +199,21 @@ func TestCognitionPoliciesRegoAssertions(t *testing.T) {
 
 	ctx := context.Background()
 
-	t.Run("extracts_observedAt_and_effectiveAt_from_index", func(t *testing.T) {
-		namespace := []string{"user", "alice", "cognition.v1", "fact"}
+	// Cognition stores temporal metadata in the encrypted value payload. The index
+	// remains limited to caller-redacted text that the episodic indexer embeds, so
+	// timestamp attributes must not depend on duplicating metadata into the index.
+	t.Run("extracts_observedAt_and_effectiveAt_from_value", func(t *testing.T) {
+		namespace := []string{"user", "alice", "cognition.v1", "facts"}
 		value := map[string]interface{}{
-			"content":    "User prefers Go",
-			"confidence": 0.9,
-		}
-		index := map[string]string{
-			"content":      "User prefers Go",
-			"type":         "fact",
+			"kind":         "fact",
+			"statement":    "User prefers Go",
+			"confidence":   0.9,
 			"observed_at":  testTimestamp,
 			"effective_at": testTimestamp,
+		}
+		index := map[string]string{
+			"statement": "user prefers go",
+			"title":     "preferred language go",
 		}
 		attrs, err := engine.ExtractAttributes(ctx, namespace, "key-1", value, index, PolicyContext{})
 		if err != nil {
@@ -219,32 +227,126 @@ func TestCognitionPoliciesRegoAssertions(t *testing.T) {
 		}
 	})
 
-	t.Run("omits_observedAt_when_index_key_absent", func(t *testing.T) {
-		namespace := []string{"user", "alice", "cognition.v1", "fact"}
-		value := map[string]interface{}{"content": "old memory"}
-		index := map[string]string{"content": "old memory", "type": "fact"}
+	// Memories written before temporal metadata was introduced remain valid. The
+	// extraction policy should simply omit attributes that the value does not have.
+	t.Run("omits_temporal_attributes_when_value_keys_absent", func(t *testing.T) {
+		namespace := []string{"user", "alice", "cognition.v1", "facts"}
+		value := map[string]interface{}{"kind": "fact", "statement": "old memory"}
+		index := map[string]string{"statement": "old memory"}
 		attrs, err := engine.ExtractAttributes(ctx, namespace, "key-2", value, index, PolicyContext{})
 		if err != nil {
 			t.Fatalf("ExtractAttributes: %v", err)
 		}
 		if _, ok := attrs["observedAt"]; ok {
-			t.Error("observedAt must not be present when missing from index")
+			t.Error("observedAt must not be present when missing from value")
+		}
+		if _, ok := attrs["effectiveAt"]; ok {
+			t.Error("effectiveAt must not be present when missing from value")
 		}
 	})
 
-	t.Run("omits_observedAt_when_index_value_is_empty", func(t *testing.T) {
-		namespace := []string{"user", "alice", "cognition.v1", "fact"}
-		value := map[string]interface{}{"content": "some fact"}
-		index := map[string]string{"observed_at": "", "effective_at": ""}
+	// Empty strings represent unknown optional metadata, not searchable instants.
+	// Omitting them also keeps downstream range filters from treating them as dates.
+	t.Run("omits_temporal_attributes_when_values_are_empty", func(t *testing.T) {
+		namespace := []string{"user", "alice", "cognition.v1", "facts"}
+		value := map[string]interface{}{
+			"kind":         "fact",
+			"statement":    "some fact",
+			"observed_at":  "",
+			"effective_at": "",
+		}
+		index := map[string]string{"statement": "some fact", "type": "fact"}
 		attrs, err := engine.ExtractAttributes(ctx, namespace, "key-3", value, index, PolicyContext{})
 		if err != nil {
 			t.Fatalf("ExtractAttributes: %v", err)
 		}
 		if _, ok := attrs["observedAt"]; ok {
-			t.Error("observedAt must not be present when index value is empty string")
+			t.Error("observedAt must not be present when value is empty string")
 		}
 		if _, ok := attrs["effectiveAt"]; ok {
-			t.Error("effectiveAt must not be present when index value is empty string")
+			t.Error("effectiveAt must not be present when value is empty string")
+		}
+	})
+
+	// Range queries assume that promoted temporal attributes are RFC3339. Rejecting
+	// other strings here prevents backend-specific lexical matches and SQL cast errors.
+	t.Run("omits_temporal_attributes_when_values_are_not_rfc3339", func(t *testing.T) {
+		namespace := []string{"user", "alice", "cognition.v1", "facts"}
+		value := map[string]interface{}{
+			"kind":         "fact",
+			"statement":    "some fact",
+			"observed_at":  "tomorrow",
+			"effective_at": "next week",
+		}
+		index := map[string]string{
+			"statement":    "some fact",
+			"type":         "fact",
+			"observed_at":  "tomorrow",
+			"effective_at": "next week",
+		}
+		attrs, err := engine.ExtractAttributes(ctx, namespace, "key-4", value, index, PolicyContext{})
+		if err != nil {
+			t.Fatalf("ExtractAttributes: %v", err)
+		}
+		if _, ok := attrs["observedAt"]; ok {
+			t.Error("observedAt must not be present when value is not RFC3339")
+		}
+		if _, ok := attrs["effectiveAt"]; ok {
+			t.Error("effectiveAt must not be present when value is not RFC3339")
+		}
+	})
+
+	t.Run("omits_observedAt_when_value_is_non_string", func(t *testing.T) {
+		namespace := []string{"user", "alice", "cognition.v1", "facts"}
+		value := map[string]interface{}{
+			"kind":        "fact",
+			"statement":   "some fact",
+			"observed_at": 1234567890,
+		}
+		attrs, err := engine.ExtractAttributes(ctx, namespace, "key-5", value, map[string]string{}, PolicyContext{})
+		if err != nil {
+			t.Fatalf("ExtractAttributes: %v", err)
+		}
+		if _, ok := attrs["observedAt"]; ok {
+			t.Error("observedAt must not be present when value is not a string")
+		}
+	})
+
+	// A sub-second precision timestamp must be normalised to second-precision UTC.
+	t.Run("normalises_nanosecond_timestamp_to_second_precision", func(t *testing.T) {
+		namespace := []string{"user", "alice", "cognition.v1", "facts"}
+		value := map[string]interface{}{
+			"kind":        "fact",
+			"statement":   "some fact",
+			"observed_at": testTimestampWithNanos,
+		}
+		attrs, err := engine.ExtractAttributes(ctx, namespace, "key-6", value, map[string]string{}, PolicyContext{})
+		if err != nil {
+			t.Fatalf("ExtractAttributes: %v", err)
+		}
+		got, ok := attrs["observedAt"]
+		if !ok {
+			t.Fatal("observedAt must be present for a valid RFC3339 timestamp with nanos")
+		}
+		if got != testTimestamp {
+			t.Errorf("observedAt: want %q, got %q", testTimestamp, got)
+		}
+	})
+
+	// expires_at is not promoted — it is not part of the searchable attribute schema.
+	t.Run("does_not_promote_expires_at", func(t *testing.T) {
+		namespace := []string{"user", "alice", "cognition.v1", "facts"}
+		value := map[string]interface{}{
+			"kind":       "fact",
+			"statement":  "some fact",
+			"expires_at": testTimestamp,
+		}
+		attrs, err := engine.ExtractAttributes(ctx, namespace, "key-7", value, map[string]string{}, PolicyContext{})
+		if err != nil {
+			t.Fatalf("ExtractAttributes: %v", err)
+		}
+		if _, ok := attrs["expiresAt"]; ok {
+			t.Error("expiresAt must not be promoted")
 		}
 	})
 }

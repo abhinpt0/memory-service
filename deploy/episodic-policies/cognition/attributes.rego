@@ -4,6 +4,12 @@ package memories.attributes
 # It preserves the built-in namespace/sub attributes and adds only safe, compact
 # cognition metadata. Do not extract raw content, citations, prompts, provider IDs,
 # or client metadata.
+#
+# Temporal fields (observed_at / effective_at) are read from input.value and
+# promoted only when they parse as valid RFC3339 timestamps; malformed, empty,
+# or non-string values are silently omitted. Promoted values are normalised to
+# second-precision UTC so lexicographic order equals chronological order on all
+# store backends.
 
 default attributes = {}
 
@@ -82,16 +88,22 @@ cognition_attributes["entryIds"] = entry_id if {
     entry_id := input.value.provenance.entry_ids[0]
 }
 
-cognition_attributes["observedAt"] = observed_at if {
-    is_string(input.index.observed_at)
-    input.index.observed_at != ""
-    observed_at := input.index.observed_at
+# Promote observed_at from the value struct as a second-precision UTC string.
+# The rule does not fire if the field is absent, non-string, or not valid RFC3339.
+cognition_attributes["observedAt"] = ts_norm if {
+    raw := input.value.observed_at
+    is_string(raw)
+    ns := time.parse_rfc3339_ns(raw)
+    ts_norm := time.format([ns, "UTC", "2006-01-02T15:04:05Z"])
 }
 
-cognition_attributes["effectiveAt"] = effective_at if {
-    is_string(input.index.effective_at)
-    input.index.effective_at != ""
-    effective_at := input.index.effective_at
+# Promote effective_at from the value struct as a second-precision UTC string.
+# The rule does not fire if the field is absent, non-string, or not valid RFC3339.
+cognition_attributes["effectiveAt"] = ts_norm if {
+    raw := input.value.effective_at
+    is_string(raw)
+    ns := time.parse_rfc3339_ns(raw)
+    ts_norm := time.format([ns, "UTC", "2006-01-02T15:04:05Z"])
 }
 
 attributes = object.union(base_attributes, cognition_attributes)
