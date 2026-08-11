@@ -23,6 +23,8 @@ var ErrSemanticSearchUnavailable = errors.New("semantic search unavailable")
 
 var attributeFilterFieldPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 
+const attributeFilterTimestampLayout = "2006-01-02T15:04:05.000000000Z"
+
 // PutMemoryRequest is the input for creating or updating a memory.
 type PutMemoryRequest struct {
 	// Namespace is the decoded namespace segments.
@@ -323,10 +325,12 @@ func normalizeAttributeFilterRange(raw interface{}) (AttributeFilterValue, Attri
 	case int64, float64:
 		return value, AttributeFilterRangeNumber, nil
 	case string:
-		if _, err := time.Parse(time.RFC3339, value.Text); err != nil {
+		parsed, err := time.Parse(time.RFC3339, value.Text)
+		if err != nil {
 			return AttributeFilterValue{}, "", fmt.Errorf("expected numeric value or RFC3339 timestamp string")
 		}
-		return value, AttributeFilterRangeTime, nil
+		canonical := parsed.UTC().Format(attributeFilterTimestampLayout)
+		return AttributeFilterValue{Raw: canonical, Text: canonical}, AttributeFilterRangeTime, nil
 	default:
 		return AttributeFilterValue{}, "", fmt.Errorf("expected numeric value or RFC3339 timestamp string")
 	}
