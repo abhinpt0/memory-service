@@ -51,6 +51,47 @@ func TestNormalizeAttributeFiltersCombinesCallerAndPolicyConstraints(t *testing.
 // effectiveAt) are accepted as valid filter fields with range operators, making
 // them queryable through the search API.
 func TestNormalizeAttributeFiltersTemporalFields(t *testing.T) {
+	t.Run("canonicalizes_equivalent_rfc3339_range_bounds", func(t *testing.T) {
+		tests := map[string]struct {
+			input string
+			want  string
+		}{
+			"utc_without_fraction": {
+				input: "2025-06-10T13:30:00Z",
+				want:  "2025-06-10T13:30:00.000000000Z",
+			},
+			"timezone_offset": {
+				input: "2025-06-10T09:30:00-04:00",
+				want:  "2025-06-10T13:30:00.000000000Z",
+			},
+			"short_fraction": {
+				input: "2025-06-10T13:30:00.5Z",
+				want:  "2025-06-10T13:30:00.500000000Z",
+			},
+		}
+
+		for name, tt := range tests {
+			t.Run(name, func(t *testing.T) {
+				filter, err := NormalizeAttributeFilters(map[string]interface{}{
+					"observedAt": map[string]interface{}{"$gte": tt.input},
+				})
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if got := len(filter.Conditions); got != 1 {
+					t.Fatalf("condition count = %d, want 1", got)
+				}
+				value := filter.Conditions[0].Values[0]
+				if value.Text != tt.want {
+					t.Errorf("text value = %q, want %q", value.Text, tt.want)
+				}
+				if value.Raw != tt.want {
+					t.Errorf("raw value = %v, want %q", value.Raw, tt.want)
+				}
+			})
+		}
+	})
+
 	t.Run("observedAt_gte", func(t *testing.T) {
 		filter, err := NormalizeAttributeFilters(map[string]interface{}{
 			"observedAt": map[string]interface{}{"$gte": "2025-06-01T00:00:00Z"},

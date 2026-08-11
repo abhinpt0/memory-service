@@ -11,7 +11,8 @@ import (
 )
 
 // TestSQLiteTemporalAttributeRangeOrder verifies that $gte/$lte range filters on
-// observedAt return memories in correct chronological order on SQLite.
+// observedAt return memories in correct chronological order on SQLite even when
+// query bounds use equivalent offsets and fractional precision.
 func TestSQLiteTemporalAttributeRangeOrder(t *testing.T) {
 	t.Parallel()
 
@@ -21,6 +22,8 @@ func TestSQLiteTemporalAttributeRangeOrder(t *testing.T) {
 
 	const tsEarlier = "2025-06-10T13:30:00.000000000Z"
 	const tsLater = "2025-06-10T13:30:01.000000000Z"
+	const tsEarlierBound = "2025-06-10T13:30:00Z"
+	const tsLaterBound = "2025-06-10T09:30:01-04:00"
 
 	require.NoError(t, store.InWriteTx(ctx, func(wctx context.Context) error {
 		_, err := store.PutMemory(wctx, registryepisodic.PutMemoryRequest{
@@ -44,7 +47,7 @@ func TestSQLiteTemporalAttributeRangeOrder(t *testing.T) {
 	require.NoError(t, store.InReadTx(ctx, func(rctx context.Context) error {
 		// $gte tsLater must match only mem-later.
 		filter, err := registryepisodic.NormalizeAttributeFilters(map[string]interface{}{
-			"observedAt": map[string]interface{}{"$gte": tsLater},
+			"observedAt": map[string]interface{}{"$gte": tsLaterBound},
 		})
 		require.NoError(t, err)
 
@@ -55,7 +58,7 @@ func TestSQLiteTemporalAttributeRangeOrder(t *testing.T) {
 
 		// $lte tsEarlier must match only mem-earlier.
 		filter2, err := registryepisodic.NormalizeAttributeFilters(map[string]interface{}{
-			"observedAt": map[string]interface{}{"$lte": tsEarlier},
+			"observedAt": map[string]interface{}{"$lte": tsEarlierBound},
 		})
 		require.NoError(t, err)
 

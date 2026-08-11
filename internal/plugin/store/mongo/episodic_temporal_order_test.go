@@ -10,7 +10,8 @@ import (
 )
 
 // TestMongoTemporalAttributeRangeOrder verifies that $gte/$lte range filters on
-// observedAt return memories in correct chronological order on MongoDB.
+// observedAt return memories in correct chronological order on MongoDB even when
+// query bounds use equivalent offsets and fractional precision.
 func TestMongoTemporalAttributeRangeOrder(t *testing.T) {
 	store, ctx := setupMongoEpisodicStore(t)
 
@@ -18,6 +19,8 @@ func TestMongoTemporalAttributeRangeOrder(t *testing.T) {
 
 	const tsEarlier = "2025-06-10T13:30:00.000000000Z"
 	const tsLater = "2025-06-10T13:30:01.000000000Z"
+	const tsEarlierBound = "2025-06-10T13:30:00Z"
+	const tsLaterBound = "2025-06-10T09:30:01-04:00"
 
 	_, err := store.PutMemory(ctx, registryepisodic.PutMemoryRequest{
 		Namespace:        ns,
@@ -37,7 +40,7 @@ func TestMongoTemporalAttributeRangeOrder(t *testing.T) {
 
 	// $gte tsLater must match only mem-later.
 	filter, err := registryepisodic.NormalizeAttributeFilters(map[string]interface{}{
-		"observedAt": map[string]interface{}{"$gte": tsLater},
+		"observedAt": map[string]interface{}{"$gte": tsLaterBound},
 	})
 	require.NoError(t, err)
 
@@ -48,7 +51,7 @@ func TestMongoTemporalAttributeRangeOrder(t *testing.T) {
 
 	// $lte tsEarlier must match only mem-earlier.
 	filter2, err := registryepisodic.NormalizeAttributeFilters(map[string]interface{}{
-		"observedAt": map[string]interface{}{"$lte": tsEarlier},
+		"observedAt": map[string]interface{}{"$lte": tsEarlierBound},
 	})
 	require.NoError(t, err)
 
