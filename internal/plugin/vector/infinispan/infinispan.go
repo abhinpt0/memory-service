@@ -81,8 +81,7 @@ func init() {
 					Category:    "Vector Store:",
 					Sources:     cli.EnvVars("MEMORY_SERVICE_VECTOR_INFINISPAN_URL"),
 					Destination: &cfg.InfinispanVectorURL,
-					Value:       "http://localhost:11222",
-					Usage:       "Infinispan REST endpoint URL (http:// for plaintext, https:// for TLS)",
+					Usage:       "Infinispan REST endpoint URL (http:// for plaintext, https:// for TLS); defaults to MEMORY_SERVICE_INFINISPAN_URL with scheme translated redis:// to http://, rediss:// to https://",
 				},
 				&cli.StringFlag{
 					Name:        "vector-infinispan-cache-name",
