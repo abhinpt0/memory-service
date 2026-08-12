@@ -42,8 +42,25 @@ func NewLocatorStore(ctx context.Context, cfg *config.Config) (LocatorStore, err
 		}
 		return newRedisLocatorStore(ctx, opts)
 	case "infinispan":
-		if strings.TrimSpace(cfg.InfinispanHost) == "" {
-			return nil, fmt.Errorf("response recording: infinispan cache enabled but MEMORY_SERVICE_INFINISPAN_HOST is not set")
+		if strings.TrimSpace(cfg.InfinispanURL) == "" {
+			return nil, fmt.Errorf("response recording: infinispan cache enabled but MEMORY_SERVICE_INFINISPAN_URL is not set")
+		}
+		opts, err := goredis.ParseURL(cfg.InfinispanURL)
+		if err != nil {
+			return nil, fmt.Errorf("response recording: invalid infinispan URL: %w", err)
+		}
+		// Infinispan RESP endpoint requires RESP2.
+		opts.Protocol = 2
+		// Separate credential flags override any userinfo embedded in the URL.
+		if cfg.InfinispanUsername != "" {
+			opts.Username = cfg.InfinispanUsername
+		}
+		if cfg.InfinispanPassword != "" {
+			opts.Password = cfg.InfinispanPassword
+		}
+		// Allow self-signed certs when TLS is active (rediss://).
+		if cfg.InfinispanTLSInsecureSkipVerify && opts.TLSConfig != nil {
+			opts.TLSConfig.InsecureSkipVerify = true // #nosec G402 - explicitly enabled by infinispan TLS skip-verify config.
 		}
 		timeout := cfg.InfinispanStartupTimeout
 		if timeout <= 0 {
@@ -51,12 +68,6 @@ func NewLocatorStore(ctx context.Context, cfg *config.Config) (LocatorStore, err
 		}
 		timeoutCtx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
-		opts := &goredis.Options{
-			Addr:     cfg.InfinispanHost,
-			Username: cfg.InfinispanUsername,
-			Password: cfg.InfinispanPassword,
-			Protocol: 2,
-		}
 		return newRedisLocatorStore(timeoutCtx, opts)
 	default:
 		return nil, fmt.Errorf("response recording: unsupported cache type %q", cfg.CacheType)

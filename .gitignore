@@ -60,5 +60,4 @@ __pycache__/
 /*.png
 /vendor
 /tmp
-.claude
 .playwright-mcp

@@ -56,14 +56,25 @@ func loadRedis(ctx context.Context) (registryeventbus.EventBus, error) {
 
 func loadInfinispan(ctx context.Context) (registryeventbus.EventBus, error) {
 	cfg := config.FromContext(ctx)
-	if cfg == nil || cfg.InfinispanHost == "" {
-		return nil, fmt.Errorf("infinispan event bus requires InfinispanHost to be set")
+	if cfg == nil || cfg.InfinispanURL == "" {
+		return nil, fmt.Errorf("infinispan event bus requires MEMORY_SERVICE_INFINISPAN_URL to be set")
 	}
-	opts := &goredis.Options{
-		Addr:     cfg.InfinispanHost,
-		Username: cfg.InfinispanUsername,
-		Password: cfg.InfinispanPassword,
-		Protocol: 2, // Infinispan RESP endpoint requires RESP2
+	opts, err := goredis.ParseURL(cfg.InfinispanURL)
+	if err != nil {
+		return nil, fmt.Errorf("infinispan event bus: invalid URL: %w", err)
+	}
+	// Infinispan RESP endpoint requires RESP2.
+	opts.Protocol = 2
+	// Separate credential flags override any userinfo embedded in the URL.
+	if cfg.InfinispanUsername != "" {
+		opts.Username = cfg.InfinispanUsername
+	}
+	if cfg.InfinispanPassword != "" {
+		opts.Password = cfg.InfinispanPassword
+	}
+	// Allow self-signed certs when TLS is active (rediss://).
+	if cfg.InfinispanTLSInsecureSkipVerify && opts.TLSConfig != nil {
+		opts.TLSConfig.InsecureSkipVerify = true // #nosec G402 - explicitly enabled by infinispan TLS skip-verify config.
 	}
 	return LoadFromOptions(ctx, opts)
 }

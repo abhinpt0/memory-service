@@ -97,9 +97,10 @@ type Config struct {
 	RedisURL string
 
 	// Infinispan (RESP protocol — connects via go-redis under the covers)
-	InfinispanHost     string // host:port (e.g. "localhost:11222")
-	InfinispanUsername string
-	InfinispanPassword string
+	InfinispanURL                   string // redis:// or rediss:// for TLS (e.g. "redis://localhost:11222")
+	InfinispanUsername              string
+	InfinispanPassword              string
+	InfinispanTLSInsecureSkipVerify bool
 
 	// Datastore backend type
 	DatastoreType string // "postgres" or "mongo"
@@ -149,12 +150,13 @@ type Config struct {
 	QdrantStartupTimeout   time.Duration
 
 	// Infinispan vector store (REST API)
-	InfinispanVectorURL         string
-	InfinispanVectorCacheName   string
-	InfinispanVectorCachePrefix string
-	InfinispanVectorUsername    string
-	InfinispanVectorPassword    string
-	InfinispanVectorAuthType    string // "basic" or "digest"
+	InfinispanVectorURL                   string
+	InfinispanVectorCacheName             string
+	InfinispanVectorCachePrefix           string
+	InfinispanVectorUsername              string
+	InfinispanVectorPassword              string
+	InfinispanVectorAuthType              string // "basic" or "digest"
+	InfinispanVectorTLSInsecureSkipVerify bool
 
 	// Embedding type
 	EmbedType string // "none", "local", or "openai"

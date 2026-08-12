@@ -266,27 +266,28 @@ MEMORY_SERVICE_CACHE_LOCAL_MAX_BYTES=64M`}/>
 
 Infinispan provides a distributed cache for context entries and response recordings.
 
-| Flag                                                                     | Values      | Default           | Description                               |
-| ------------------------------------------------------------------------ | ----------- | ----------------- | ----------------------------------------- |
-| <Cfg p="--infinispan-host" e="MEMORY_SERVICE_INFINISPAN_HOST" />         | `host:port` | `localhost:11222` | Infinispan server host                    |
-| <Cfg p="--infinispan-username" e="MEMORY_SERVICE_INFINISPAN_USERNAME" /> | string      | _(none)_          | Infinispan username                       |
-| <Cfg p="--infinispan-password" e="MEMORY_SERVICE_INFINISPAN_PASSWORD" /> | string      | _(none)_          | Infinispan password                       |
-| `MEMORY_SERVICE_CACHE_INFINISPAN_STARTUP_TIMEOUT`                        | duration    | `PT30S`           | Startup timeout for Infinispan connection |
+| Flag                                                                                                     | Values   | Default                   | Description                                                       |
+| -------------------------------------------------------------------------------------------------------- | -------- | ------------------------- | ----------------------------------------------------------------- |
+| <Cfg p="--infinispan-url" e="MEMORY_SERVICE_INFINISPAN_URL" />                                           | URL      | `redis://localhost:11222` | Infinispan RESP endpoint (`redis://` plaintext, `rediss://` TLS)  |
+| <Cfg p="--infinispan-username" e="MEMORY_SERVICE_INFINISPAN_USERNAME" />                                 | string   | _(none)_                  | Infinispan username (overrides userinfo in URL)                   |
+| <Cfg p="--infinispan-password" e="MEMORY_SERVICE_INFINISPAN_PASSWORD" />                                 | string   | _(none)_                  | Infinispan password (overrides userinfo in URL)                   |
+| <Cfg p="--infinispan-tls-insecure-skip-verify" e="MEMORY_SERVICE_INFINISPAN_TLS_INSECURE_SKIP_VERIFY" /> | bool     | `false`                   | Skip TLS certificate verification (only applies with `rediss://`) |
+| <Cfg p="--infinispan-startup-timeout" e="MEMORY_SERVICE_INFINISPAN_STARTUP_TIMEOUT" />                   | duration | `30s`                     | Timeout waiting for Infinispan RESP endpoint to become ready      |
 
 <ConfigBlock property={`# Enable Infinispan cache (response recording manager will automatically use it)
 --cache-kind=infinispan
 
-# Infinispan connection
+# Infinispan connection (use rediss:// for TLS)
 
---infinispan-host=localhost:11222
+--infinispan-url=redis://localhost:11222
 --infinispan-username=admin
 --infinispan-password=password`}
   env={`# Enable Infinispan cache (response recording manager will automatically use it)
 MEMORY_SERVICE_CACHE_KIND=infinispan
 
-# Infinispan connection
+# Infinispan connection (use rediss:// for TLS)
 
-MEMORY_SERVICE_INFINISPAN_HOST=localhost:11222
+MEMORY_SERVICE_INFINISPAN_URL=redis://localhost:11222
 MEMORY_SERVICE_INFINISPAN_USERNAME=admin
 MEMORY_SERVICE_INFINISPAN_PASSWORD=password`}
 />
@@ -378,13 +379,13 @@ The `infinispan` backend uses Infinispan's RESP-compatible Pub/Sub endpoint thro
   property={`# Infinispan event bus (reuses Infinispan RESP endpoint)
 --eventbus-kind=infinispan
 --cache-kind=infinispan
---infinispan-host=localhost:11222
+--infinispan-url=redis://localhost:11222
 --infinispan-username=admin
 --infinispan-password=password`}
   env={`# Infinispan event bus (reuses Infinispan RESP endpoint)
 MEMORY_SERVICE_EVENTBUS_KIND=infinispan
 MEMORY_SERVICE_CACHE_KIND=infinispan
-MEMORY_SERVICE_INFINISPAN_HOST=localhost:11222
+MEMORY_SERVICE_INFINISPAN_URL=redis://localhost:11222
 MEMORY_SERVICE_INFINISPAN_USERNAME=admin
 MEMORY_SERVICE_INFINISPAN_PASSWORD=password`}
 />
@@ -657,32 +658,50 @@ By default, memory-service derives the collection name as `memory-service_<model
 
 ### Vector Store: Infinispan Configuration
 
-The `infinispan` vector backend uses the Infinispan REST API v3 for vector search. It is separate from the RESP-based cache and event-bus integration, so vector search uses its own URL and optional auth settings even when you already use Infinispan elsewhere in the service.
+The `infinispan` vector backend uses the Infinispan REST API v3 for vector search. Infinispan exposes both RESP and HTTP on the same port (default `11222`), so the cache and vector plugins can share the same server instance.
 
 - Requires Infinispan `16.1` or later for vector search support.
-- The default URL is `http://localhost:11222`.
+- If `MEMORY_SERVICE_VECTOR_INFINISPAN_URL` is unset, the service derives the REST URL from `MEMORY_SERVICE_INFINISPAN_URL` by translating the scheme: `redis://` → `http://`, `rediss://` → `https://`. Set `MEMORY_SERVICE_INFINISPAN_URL` once to configure both plugins.
 - If `MEMORY_SERVICE_VECTOR_INFINISPAN_CACHE_NAME` is unset, memory-service derives a cache name from the embedding model and dimensions.
-- `MEMORY_SERVICE_VECTOR_INFINISPAN_URL`, `MEMORY_SERVICE_VECTOR_INFINISPAN_USERNAME`, and `MEMORY_SERVICE_VECTOR_INFINISPAN_PASSWORD` also accept the shared `MEMORY_SERVICE_INFINISPAN_*` connection values as fallbacks.
+- `MEMORY_SERVICE_VECTOR_INFINISPAN_USERNAME`, `MEMORY_SERVICE_VECTOR_INFINISPAN_PASSWORD`, and `MEMORY_SERVICE_VECTOR_INFINISPAN_TLS_INSECURE_SKIP_VERIFY` fall back to the shared `MEMORY_SERVICE_INFINISPAN_*` values when unset.
 
-| Flag / Env Var                                                                             | Default                  | Description                           |
-| ------------------------------------------------------------------------------------------ | ------------------------ | ------------------------------------- |
-| <Cfg p="--vector-infinispan-url" e="MEMORY_SERVICE_VECTOR_INFINISPAN_URL" />               | `http://localhost:11222` | Infinispan REST endpoint URL          |
-| <Cfg p="--vector-infinispan-cache-name" e="MEMORY_SERVICE_VECTOR_INFINISPAN_CACHE_NAME" /> | _(auto)_                 | Optional explicit cache name override |
-| <Cfg p="--vector-infinispan-username" e="MEMORY_SERVICE_VECTOR_INFINISPAN_USERNAME" />     | _(none)_                 | Authentication username               |
-| <Cfg p="--vector-infinispan-password" e="MEMORY_SERVICE_VECTOR_INFINISPAN_PASSWORD" />     | _(none)_                 | Authentication password               |
-| <Cfg p="--vector-infinispan-auth-type" e="MEMORY_SERVICE_VECTOR_INFINISPAN_AUTH_TYPE" />   | `digest`                 | Auth mechanism: `basic` or `digest`   |
+| Flag / Env Var                                                                                                         | Default                                                                | Description                                                        |
+| ---------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| <Cfg p="--vector-infinispan-url" e="MEMORY_SERVICE_VECTOR_INFINISPAN_URL" />                                           | _(derived from `MEMORY_SERVICE_INFINISPAN_URL`)_                       | Infinispan REST endpoint URL (`http://` plaintext, `https://` TLS) |
+| <Cfg p="--vector-infinispan-cache-name" e="MEMORY_SERVICE_VECTOR_INFINISPAN_CACHE_NAME" />                             | _(auto)_                                                               | Optional explicit cache name override                              |
+| <Cfg p="--vector-infinispan-username" e="MEMORY_SERVICE_VECTOR_INFINISPAN_USERNAME" />                                 | _(falls back to `MEMORY_SERVICE_INFINISPAN_USERNAME`)_                 | Authentication username                                            |
+| <Cfg p="--vector-infinispan-password" e="MEMORY_SERVICE_VECTOR_INFINISPAN_PASSWORD" />                                 | _(falls back to `MEMORY_SERVICE_INFINISPAN_PASSWORD`)_                 | Authentication password                                            |
+| <Cfg p="--vector-infinispan-auth-type" e="MEMORY_SERVICE_VECTOR_INFINISPAN_AUTH_TYPE" />                               | `digest`                                                               | Auth mechanism: `basic` or `digest`                                |
+| <Cfg p="--vector-infinispan-tls-insecure-skip-verify" e="MEMORY_SERVICE_VECTOR_INFINISPAN_TLS_INSECURE_SKIP_VERIFY" /> | _(falls back to `MEMORY_SERVICE_INFINISPAN_TLS_INSECURE_SKIP_VERIFY`)_ | Skip TLS certificate verification (only applies with `https://`)   |
 
-Use an `https://` value for `MEMORY_SERVICE_VECTOR_INFINISPAN_URL` when TLS is required.
+The simplest configuration when using Infinispan for both cache and vector search — set `MEMORY_SERVICE_INFINISPAN_URL` once and both plugins pick it up:
 
 <ConfigBlock
-  property={`# Infinispan vector store
+  property={`# Infinispan for cache + vector (shared connection)
+--cache-kind=infinispan
 --vector-kind=infinispan
---vector-infinispan-url=http://localhost:11222
+--infinispan-url=redis://localhost:11222
+--infinispan-username=admin
+--infinispan-password=password`}
+  env={`# Infinispan for cache + vector (shared connection)
+MEMORY_SERVICE_CACHE_KIND=infinispan
+MEMORY_SERVICE_VECTOR_KIND=infinispan
+MEMORY_SERVICE_INFINISPAN_URL=redis://localhost:11222
+MEMORY_SERVICE_INFINISPAN_USERNAME=admin
+MEMORY_SERVICE_INFINISPAN_PASSWORD=password`}
+/>
+
+To override the vector REST endpoint explicitly (e.g. a separate Infinispan cluster for vector search):
+
+<ConfigBlock
+  property={`# Infinispan vector store with explicit URL override
+--vector-kind=infinispan
+--vector-infinispan-url=http://vector-infinispan:11222
 --vector-infinispan-username=admin
 --vector-infinispan-password=password`}
-  env={`# Infinispan vector store
+  env={`# Infinispan vector store with explicit URL override
 MEMORY_SERVICE_VECTOR_KIND=infinispan
-MEMORY_SERVICE_VECTOR_INFINISPAN_URL=http://localhost:11222
+MEMORY_SERVICE_VECTOR_INFINISPAN_URL=http://vector-infinispan:11222
 MEMORY_SERVICE_VECTOR_INFINISPAN_USERNAME=admin
 MEMORY_SERVICE_VECTOR_INFINISPAN_PASSWORD=password`}
 />
