@@ -38,7 +38,7 @@ func TestFeatures(t *testing.T) {
 	cfg.Mode = config.ModeTesting
 	cfg.DBURL = dbURL
 	cfg.CacheType = "infinispan"
-	cfg.InfinispanHost = infinispan.Host
+	cfg.InfinispanURL = infinispan.URL
 	cfg.InfinispanUsername = infinispan.Username
 	cfg.InfinispanPassword = infinispan.Password
 	cfg.EncryptionDBDisabled = true

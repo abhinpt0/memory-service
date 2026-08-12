@@ -13,7 +13,7 @@ import (
 
 // Infinispan holds connection details for a running Infinispan container.
 type Infinispan struct {
-	Host     string // host:port (e.g. "localhost:11222")
+	URL      string // RESP endpoint URL (e.g. "redis://localhost:11222")
 	Username string
 	Password string
 }
@@ -73,7 +73,7 @@ func StartInfinispan(tb testing.TB) Infinispan {
 	}
 
 	return Infinispan{
-		Host:     hostPort,
+		URL:      fmt.Sprintf("redis://%s", hostPort),
 		Username: username,
 		Password: password,
 	}

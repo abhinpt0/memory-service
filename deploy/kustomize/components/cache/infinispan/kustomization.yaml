@@ -11,7 +11,7 @@ configMapGenerator:
     behavior: merge
     literals:
       - MEMORY_SERVICE_CACHE_KIND=infinispan
-      - MEMORY_SERVICE_INFINISPAN_HOST=infinispan:11222
+      - MEMORY_SERVICE_INFINISPAN_URL=redis://infinispan:11222
 
 secretGenerator:
   - name: infinispan-secret

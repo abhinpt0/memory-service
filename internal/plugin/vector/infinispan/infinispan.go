@@ -4,6 +4,7 @@ package infinispan
 
 import (
 	"context"
+	"crypto/tls"
 	_ "embed"
 	"fmt"
 	"net/http"
@@ -78,10 +79,10 @@ func init() {
 				&cli.StringFlag{
 					Name:        "vector-infinispan-url",
 					Category:    "Vector Store:",
-					Sources:     cli.EnvVars("MEMORY_SERVICE_VECTOR_INFINISPAN_URL", "MEMORY_SERVICE_INFINISPAN_URL"),
+					Sources:     cli.EnvVars("MEMORY_SERVICE_VECTOR_INFINISPAN_URL"),
 					Destination: &cfg.InfinispanVectorURL,
 					Value:       "http://localhost:11222",
-					Usage:       "Infinispan server URL",
+					Usage:       "Infinispan REST endpoint URL (http:// for plaintext, https:// for TLS)",
 				},
 				&cli.StringFlag{
 					Name:        "vector-infinispan-cache-name",
@@ -111,6 +112,13 @@ func init() {
 					Destination: &cfg.InfinispanVectorAuthType,
 					Value:       "digest",
 					Usage:       "Infinispan auth mechanism (basic|digest)",
+				},
+				&cli.BoolFlag{
+					Name:        "vector-infinispan-tls-insecure-skip-verify",
+					Category:    "Vector Store:",
+					Sources:     cli.EnvVars("MEMORY_SERVICE_VECTOR_INFINISPAN_TLS_INSECURE_SKIP_VERIFY"),
+					Destination: &cfg.InfinispanVectorTLSInsecureSkipVerify,
+					Usage:       "Skip TLS certificate verification for Infinispan REST connection (only applies with https://)",
 				},
 			}
 		},
@@ -271,12 +279,32 @@ func effectiveCacheName(cfg *config.Config) string {
 func newInfinispanClient(cfg *config.Config) (*InfinispanClient, error) {
 	baseURL := cfg.InfinispanVectorURL
 	if baseURL == "" {
-		baseURL = "http://localhost:11222"
+		// Fall back to MEMORY_SERVICE_INFINISPAN_URL, translating the RESP scheme
+		// to HTTP: redis:// → http://, rediss:// → https://. Both protocols share
+		// the same Infinispan port (11222) so the host:port is reused as-is.
+		switch {
+		case strings.HasPrefix(cfg.InfinispanURL, "rediss://"):
+			baseURL = "https://" + strings.TrimPrefix(cfg.InfinispanURL, "rediss://")
+		case strings.HasPrefix(cfg.InfinispanURL, "redis://"):
+			baseURL = "http://" + strings.TrimPrefix(cfg.InfinispanURL, "redis://")
+		default:
+			baseURL = "http://localhost:11222"
+		}
 	}
 
-	var transport http.RoundTripper
+	// Build base transport, optionally skipping TLS verification for self-signed certs.
+	// Also honour the shared MEMORY_SERVICE_INFINISPAN_TLS_INSECURE_SKIP_VERIFY fallback
+	// when the vector URL itself was derived from MEMORY_SERVICE_INFINISPAN_URL.
+	var base http.RoundTripper = http.DefaultTransport
+	if cfg.InfinispanVectorTLSInsecureSkipVerify || cfg.InfinispanTLSInsecureSkipVerify {
+		t := http.DefaultTransport.(*http.Transport).Clone()
+		t.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} // #nosec G402 - explicitly enabled by vector infinispan TLS skip-verify config.
+		base = t
+	}
+
+	var transport http.RoundTripper = base
 	if cfg.InfinispanVectorUsername != "" && cfg.InfinispanVectorPassword != "" {
-		// Create auth transport
+		// Create auth transport wrapping the (possibly TLS-configured) base transport.
 		authType := cfg.InfinispanVectorAuthType
 		if authType == "" {
 			authType = "digest"
@@ -285,7 +313,7 @@ func newInfinispanClient(cfg *config.Config) (*InfinispanClient, error) {
 			username: cfg.InfinispanVectorUsername,
 			password: cfg.InfinispanVectorPassword,
 			authType: authType,
-			base:     http.DefaultTransport,
+			base:     base,
 		}
 	}
 
