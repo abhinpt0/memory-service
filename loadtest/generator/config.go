@@ -1,0 +1,36 @@
+package main
+
+import (
+	"flag"
+	"fmt"
+	"os"
+)
+
+// GeneratorConfig holds all CLI-configurable parameters for the seed generator.
+type GeneratorConfig struct {
+	BaseURL            string
+	APIKey             string
+	TotalConversations int
+	WorkerCount        int
+	SeedManifestPath   string
+}
+
+// parseConfig reads CLI flags and returns a GeneratorConfig.
+func parseConfig() GeneratorConfig {
+	cfg := GeneratorConfig{}
+
+	flag.StringVar(&cfg.BaseURL, "base-url", "http://localhost:8082", "Base URL of the memory service")
+	flag.StringVar(&cfg.APIKey, "api-key", "agent-api-key-1", "API key for authentication")
+	flag.IntVar(&cfg.TotalConversations, "total-conversations", 200, "Number of conversations to seed")
+	flag.IntVar(&cfg.WorkerCount, "worker-count", 20, "Number of concurrent seeding workers")
+	flag.StringVar(&cfg.SeedManifestPath, "seed-manifest-path", "loadtest/results/seed-manifest.json", "Path to write the seed manifest JSON")
+
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage: generator [flags]\n\nFlags:\n")
+		flag.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "\nExample:\n  go run ./loadtest/generator/ --total-conversations=50\n")
+	}
+
+	flag.Parse()
+	return cfg
+}

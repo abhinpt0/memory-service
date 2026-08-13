@@ -602,9 +602,12 @@ tasks:
         echo "SNAPSHOT published to Maven Central"
 
   loadtest:seed:
-    desc: Seed the running memory service with load-test data (stub — see Sub-Task 2).
+    desc: |
+      Seed the running memory service with load-test data.
+      Requires task dev:memory-service to be running on port 8082.
+      Accepts extra flags via -- e.g.: task loadtest:seed -- --total-conversations=50
     cmds:
-      - go run ./loadtest/generator/ --help || true
+      - go run ./loadtest/generator/ {{.CLI_ARGS}}
 
   loadtest:bench:
     desc: Run Hyperfoil benchmark flows against the seeded memory service (stub — see Sub-Task 3).
