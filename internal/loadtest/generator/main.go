@@ -135,8 +135,7 @@ func seedEntries(
 	entryCount int,
 	participantType string,
 ) error {
-	// Determine user IDs and roles per participant type.
-	// entryCount is the number of USER entries; each is followed by an AI reply,
+	// entryCount is the number of USER turns; each is followed by an AI reply,
 	// so the actual total entries stored is entryCount*2.
 	for i := range entryCount {
 		var userID, aiUserID string

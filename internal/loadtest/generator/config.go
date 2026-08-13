@@ -28,7 +28,7 @@ func parseConfig() GeneratorConfig {
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: generator [flags]\n\nFlags:\n")
 		flag.PrintDefaults()
-		fmt.Fprintf(os.Stderr, "\nExample:\n  go run ./loadtest/generator/ --total-conversations=50\n")
+		fmt.Fprintf(os.Stderr, "\nExample:\n  go run ./internal/loadtest/generator/ --total-conversations=50\n")
 	}
 
 	flag.Parse()
