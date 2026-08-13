@@ -600,3 +600,31 @@ tasks:
       - |
         echo ""
         echo "SNAPSHOT published to Maven Central"
+
+  loadtest:seed:
+    desc: Seed the running memory service with load-test data (stub — see Sub-Task 2).
+    cmds:
+      - go run ./loadtest/generator/ --help || true
+
+  loadtest:bench:
+    desc: Run Hyperfoil benchmark flows against the seeded memory service (stub — see Sub-Task 3).
+    cmds:
+      - echo "loadtest:bench not yet implemented"
+
+  loadtest:correctness:
+    desc: Run pagination correctness tests against the seeded memory service (stub — see Sub-Task 4).
+    cmds:
+      - go test ./loadtest/correctness/ -v -run TestNotImplemented
+
+  loadtest:report:
+    desc: Aggregate loadtest results into report.md and report.json (stub — see Sub-Task 5).
+    cmds:
+      - echo "loadtest:report not yet implemented"
+
+  loadtest:all:
+    desc: "Run the full load-test pipeline: seed -> bench -> correctness -> report."
+    deps:
+      - loadtest:seed
+      - loadtest:bench
+      - loadtest:correctness
+      - loadtest:report
