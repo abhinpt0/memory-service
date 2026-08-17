@@ -1,0 +1,28 @@
+name: list-forks
+
+# GET /v1/conversations/{id}/forks on seeded fork root conversations.
+# SLO: p99 < 300ms (checked in run.sh from exported JSON)
+
+http:
+  - host: localhost
+    port: 8082
+    name: memory-service
+    sharedConnections: 20
+
+phases:
+  - listForksLoad:
+      always:
+        users: 10
+        duration: 60s
+        scenario:
+          - getForks:
+              - randomCsvRow:
+                  file: ../results/fork-root-ids.csv
+                  columns:
+                    0: conversationId
+              - httpRequest:
+                  GET: /v1/conversations/${conversationId}/forks
+                  headers:
+                    X-API-Key: agent-api-key-1
+                    X-User-ID: loadtest-user-1
+                  metric: list-forks

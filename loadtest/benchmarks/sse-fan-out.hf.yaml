@@ -1,0 +1,62 @@
+name: sse-fan-out
+
+# SSE fan-out: 50 concurrent connections on /v1/events + append burst.
+# NOTE: If Hyperfoil cannot handle persistent SSE streams, escalate to
+# Diego Lovison (via Eric Deandrea) before using the Go fallback client.
+
+http:
+  - host: localhost
+    port: 8082
+    name: memory-service
+    sharedConnections: 80
+
+phases:
+  - openConnections:
+      always:
+        users: 50
+        duration: 160s
+        scenario:
+          - connectSSE:
+              - httpRequest:
+                  GET: /v1/events
+                  headers:
+                    Accept: text/event-stream
+                    X-API-Key: agent-api-key-1
+                    X-User-ID: loadtest-sse-1
+                  metric: sse-connection
+                  sync: false
+
+  - appendBurst:
+      always:
+        users: 10
+        duration: 30s
+        startTime: 5s
+        scenario:
+          - burstAppend:
+              - httpRequest:
+                  POST: /v1/conversations/search
+                  headers:
+                    Content-Type: application/json
+                    X-API-Key: agent-api-key-1
+                    X-User-ID: loadtest-sse-1
+                  body: |
+                    {"query":"load-test","limit":1}
+                  metric: burst-search
+                  handler:
+                    body:
+                      json:
+                        query: .data[0].id
+                        toVar: burstConvId
+              - breakSequence:
+                  stringCondition:
+                    fromVar: burstConvId
+                    equalTo: null
+              - httpRequest:
+                  POST: /v1/conversations/${burstConvId}/entries
+                  headers:
+                    Content-Type: application/json
+                    X-API-Key: agent-api-key-1
+                    X-User-ID: loadtest-sse-1
+                  body: |
+                    {"contentType":"history","content":[{"role":"USER","text":"sse fan-out burst entry"}],"userId":"loadtest-sse-1"}
+                  metric: burst-append

@@ -1,0 +1,44 @@
+name: list-conversations
+
+# Walks all pages of GET /v1/conversations using cursor-based pagination.
+# SLO: p99 < 300ms per page request (checked in run.sh from exported JSON)
+
+http:
+  - host: localhost
+    port: 8082
+    name: memory-service
+    sharedConnections: 40
+
+phases:
+  - listPages:
+      always:
+        users: 20
+        duration: 90s
+        scenario:
+          - walkPages:
+              - httpRequest:
+                  GET: /v1/conversations?mode=all&limit=20
+                  headers:
+                    X-API-Key: agent-api-key-1
+                    X-User-ID: loadtest-user-1
+                  metric: list-conversations-page
+                  handler:
+                    body:
+                      json:
+                        query: .afterCursor
+                        toVar: afterCursor
+              - breakSequence:
+                  stringCondition:
+                    fromVar: afterCursor
+                    equalTo: null
+              - httpRequest:
+                  GET: /v1/conversations?mode=all&limit=20&afterCursor=${afterCursor}
+                  headers:
+                    X-API-Key: agent-api-key-1
+                    X-User-ID: loadtest-user-1
+                  metric: list-conversations-page
+                  handler:
+                    body:
+                      json:
+                        query: .afterCursor
+                        toVar: afterCursor

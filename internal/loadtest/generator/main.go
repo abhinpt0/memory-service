@@ -76,13 +76,18 @@ func main() {
 				entryCount := EntryCount(wr)
 				participantType := ParticipantType(j.index)
 
-				convID, err := createConversation(client, cfg, title)
+				ownerID := fmt.Sprintf("loadtest-user-%d", j.index)
+				if participantType == "two-agent" {
+					ownerID = fmt.Sprintf("loadtest-agent-%d", j.index)
+				}
+
+				convID, err := createConversation(client, cfg, title, ownerID)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "ERROR createConversation: %v\n", err)
 					continue
 				}
 
-				if err := seedEntries(client, cfg, wr, convID, entryCount, participantType); err != nil {
+				if err := seedEntries(client, cfg, wr, convID, ownerID, entryCount, participantType); err != nil {
 					fmt.Fprintf(os.Stderr, "ERROR seedEntries conv=%s: %v\n", convID, err)
 					continue
 				}
@@ -131,32 +136,24 @@ func seedEntries(
 	client *http.Client,
 	cfg GeneratorConfig,
 	r *rand.Rand,
-	convID string,
+	convID, ownerID string,
 	entryCount int,
 	participantType string,
 ) error {
 	// entryCount is the number of USER turns; each is followed by an AI reply,
 	// so the actual total entries stored is entryCount*2.
-	for i := range entryCount {
+	for range entryCount {
 		var userID, aiUserID string
 		switch participantType {
 		case "two-user":
-			if i%2 == 0 {
-				userID = "loadtest-user-1"
-			} else {
-				userID = "loadtest-user-2"
-			}
-			aiUserID = userID // AI reply attributed to same user slot
+			userID = ownerID
+			aiUserID = ownerID
 		case "two-agent":
-			if i%2 == 0 {
-				userID = "loadtest-agent-1"
-			} else {
-				userID = "loadtest-agent-2"
-			}
-			aiUserID = userID
+			userID = ownerID
+			aiUserID = ownerID
 		default: // single-user
-			userID = "loadtest-user-1"
-			aiUserID = "loadtest-user-1"
+			userID = ownerID
+			aiUserID = ownerID
 		}
 
 		userRole := "USER"
@@ -167,12 +164,12 @@ func seedEntries(
 		}
 
 		// USER (or first agent) turn.
-		if _, err := appendEntry(client, cfg, convID, userID, userRole, EntryText(r), "", ""); err != nil {
+		if _, err := appendEntry(client, cfg, convID, ownerID, userID, userRole, EntryText(r), "", ""); err != nil {
 			return err
 		}
 
 		// AI reply turn.
-		if _, err := appendEntry(client, cfg, convID, aiUserID, aiRole, EntryText(r), "", ""); err != nil {
+		if _, err := appendEntry(client, cfg, convID, ownerID, aiUserID, aiRole, EntryText(r), "", ""); err != nil {
 			return err
 		}
 	}
@@ -187,7 +184,7 @@ func seedForkChains(client *http.Client, cfg GeneratorConfig, r *rand.Rand) ([]f
 
 	for range n {
 		rootTitle := "load-test-fork-root-" + uuid.New().String()
-		rootID, err := createConversation(client, cfg, rootTitle)
+		rootID, err := createConversation(client, cfg, rootTitle, "loadtest-user-1")
 		if err != nil {
 			return forks, fmt.Errorf("fork root create: %w", err)
 		}
@@ -197,7 +194,7 @@ func seedForkChains(client *http.Client, cfg GeneratorConfig, r *rand.Rand) ([]f
 
 		var forkAtEntryID string
 		for i := 1; i <= rootEntries; i++ {
-			entryID, err := appendEntry(client, cfg, rootID, "loadtest-user-1", "USER", EntryText(r), "", "")
+			entryID, err := appendEntry(client, cfg, rootID, "loadtest-user-1", "loadtest-user-1", "USER", EntryText(r), "", "")
 			if err != nil {
 				return forks, fmt.Errorf("fork root entry %d: %w", i, err)
 			}
@@ -205,7 +202,7 @@ func seedForkChains(client *http.Client, cfg GeneratorConfig, r *rand.Rand) ([]f
 				forkAtEntryID = entryID
 			}
 			// AI reply
-			if _, err := appendEntry(client, cfg, rootID, "loadtest-user-1", "AI", EntryText(r), "", ""); err != nil {
+			if _, err := appendEntry(client, cfg, rootID, "loadtest-user-1", "loadtest-user-1", "AI", EntryText(r), "", ""); err != nil {
 				return forks, fmt.Errorf("fork root AI entry %d: %w", i, err)
 			}
 		}

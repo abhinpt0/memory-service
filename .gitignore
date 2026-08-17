@@ -66,3 +66,4 @@ __pycache__/
 loadtest/results/*.json
 loadtest/results/*.md
 
+loadtest/results/*.csv

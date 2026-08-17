@@ -1,0 +1,74 @@
+name: append-throughput
+
+# Sustained append throughput: ramp to 50 users, hold 120s.
+# SLO: p99 < 500ms, p50 < 200ms (checked in run.sh from exported JSON)
+
+http:
+  - host: localhost
+    port: 8082
+    name: memory-service
+    sharedConnections: 50
+
+phases:
+  - rampUp:
+      rampPerSec:
+        initialUsersPerSec: 0
+        targetUsersPerSec: 50
+        duration: 30s
+        maxSessions: 100
+        startTime: 0s
+        scenario:
+          - appendEntry:
+              - randomCsvRow:
+                  file: ../results/conversation-ids.csv
+                  columns:
+                    0: conversationId
+              - httpRequest:
+                  POST: /v1/conversations/${conversationId}/entries
+                  headers:
+                    Content-Type: application/json
+                    X-API-Key: agent-api-key-1
+                    X-User-ID: loadtest-user-1
+                  body: |
+                    {"contentType":"history","content":[{"role":"USER","text":"load test benchmark entry - user turn"}],"userId":"loadtest-user-1"}
+                  metric: append-user-entry
+              - httpRequest:
+                  POST: /v1/conversations/${conversationId}/entries
+                  headers:
+                    Content-Type: application/json
+                    X-API-Key: agent-api-key-1
+                    X-User-ID: loadtest-user-1
+                  body: |
+                    {"contentType":"history","content":[{"role":"AI","text":"load test benchmark entry - ai reply"}],"userId":"loadtest-user-1"}
+                  metric: append-ai-entry
+
+  - steadyState:
+      constantRate:
+        usersPerSec: 50
+        duration: 120s
+        maxSessions: 200
+        startAfter: rampUp
+        scenario:
+          - appendEntry:
+              - randomCsvRow:
+                  file: ../results/conversation-ids.csv
+                  columns:
+                    0: conversationId
+              - httpRequest:
+                  POST: /v1/conversations/${conversationId}/entries
+                  headers:
+                    Content-Type: application/json
+                    X-API-Key: agent-api-key-1
+                    X-User-ID: loadtest-user-1
+                  body: |
+                    {"contentType":"history","content":[{"role":"USER","text":"load test benchmark entry - user turn"}],"userId":"loadtest-user-1"}
+                  metric: append-user-entry
+              - httpRequest:
+                  POST: /v1/conversations/${conversationId}/entries
+                  headers:
+                    Content-Type: application/json
+                    X-API-Key: agent-api-key-1
+                    X-User-ID: loadtest-user-1
+                  body: |
+                    {"contentType":"history","content":[{"role":"AI","text":"load test benchmark entry - ai reply"}],"userId":"loadtest-user-1"}
+                  metric: append-ai-entry

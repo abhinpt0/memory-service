@@ -610,9 +610,12 @@ tasks:
       - go run ./internal/loadtest/generator/ {{.CLI_ARGS}}
 
   loadtest:bench:
-    desc: Run Hyperfoil benchmark flows against the seeded memory service (stub — see Sub-Task 3).
+    desc: |
+      Run all Hyperfoil benchmark flows against the seeded memory service.
+      Requires task dev:memory-service running on port 8082 and task loadtest:seed completed.
+      Requires jbang on PATH: https://www.jbang.dev/download/
     cmds:
-      - echo "loadtest:bench not yet implemented"
+      - sh loadtest/benchmarks/run.sh
 
   loadtest:correctness:
     desc: Run pagination correctness tests against the seeded memory service (stub — see Sub-Task 4).

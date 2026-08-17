@@ -1,0 +1,51 @@
+name: search-conversations
+
+# Sustained POST /v1/conversations/search load with pagination.
+# SLO: p99 < 1000ms (checked in run.sh from exported JSON)
+
+http:
+  - host: localhost
+    port: 8082
+    name: memory-service
+    sharedConnections: 20
+
+phases:
+  - searchLoad:
+      constantRate:
+        usersPerSec: 10
+        duration: 60s
+        maxSessions: 30
+        scenario:
+          - searchAndPage:
+              - httpRequest:
+                  POST: /v1/conversations/search
+                  headers:
+                    Content-Type: application/json
+                    X-API-Key: agent-api-key-1
+                    X-User-ID: loadtest-user-1
+                  body: |
+                    {"query":"load-test","limit":5}
+                  metric: search-conversations
+                  handler:
+                    body:
+                      json:
+                        query: .afterCursor
+                        toVar: afterCursor
+              - breakSequence:
+                  stringCondition:
+                    fromVar: afterCursor
+                    equalTo: null
+              - httpRequest:
+                  POST: /v1/conversations/search
+                  headers:
+                    Content-Type: application/json
+                    X-API-Key: agent-api-key-1
+                    X-User-ID: loadtest-user-1
+                  body: |
+                    {"query":"load-test","limit":5,"afterCursor":"${afterCursor}"}
+                  metric: search-conversations
+                  handler:
+                    body:
+                      json:
+                        query: .afterCursor
+                        toVar: afterCursor
