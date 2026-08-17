@@ -246,6 +246,7 @@ func TestEntryListPagination(t *testing.T) {
 		}
 	}
 
+	totalEntries := 0
 	for _, conv := range sampled {
 		conv := conv // capture
 		t.Run(conv.ID, func(t *testing.T) {
@@ -299,8 +300,19 @@ func TestEntryListPagination(t *testing.T) {
 				t.Errorf("entry count mismatch for conversation %s: got %d, want %d",
 					conv.ID, len(collected), expected)
 			}
+
+			resultsMu.Lock()
+			totalEntries += len(collected)
+			resultsMu.Unlock()
 		})
 	}
+
+	// Record aggregate result after all sub-tests complete.
+	t.Cleanup(func() {
+		passed := !t.Failed()
+		recordResult("TestEntryListPagination", passed, totalEntries,
+			fmt.Sprintf("%d conversations sampled", len(sampled)))
+	})
 }
 
 // ---------------------------------------------------------------------------

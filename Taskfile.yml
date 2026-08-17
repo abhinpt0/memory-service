@@ -623,14 +623,14 @@ tasks:
       - go test ./internal/loadtest/correctness/ -v -timeout 30m -count=1
 
   loadtest:report:
-    desc: Aggregate loadtest results into report.md and report.json (stub — see Sub-Task 5).
+    desc: Aggregate loadtest results into report.md and report.json.
     cmds:
-      - echo "loadtest:report not yet implemented"
+      - go run ./internal/loadtest/report/
 
   loadtest:all:
     desc: "Run the full load-test pipeline: seed -> bench -> correctness -> report."
-    deps:
-      - loadtest:seed
-      - loadtest:bench
-      - loadtest:correctness
-      - loadtest:report
+    cmds:
+      - task: loadtest:seed
+      - task: loadtest:bench
+      - task: loadtest:correctness
+      - task: loadtest:report
