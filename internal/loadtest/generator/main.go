@@ -15,6 +15,7 @@ import (
 // conversationRecord is a single entry in the seed manifest's conversations list.
 type conversationRecord struct {
 	ID              string `json:"id"`
+	OwnerID         string `json:"ownerID"`
 	EntryCount      int    `json:"entryCount"`
 	ParticipantType string `json:"participantType"`
 }
@@ -95,6 +96,7 @@ func main() {
 				mu.Lock()
 				conversations = append(conversations, conversationRecord{
 					ID:              convID,
+					OwnerID:         ownerID,
 					EntryCount:      entryCount,
 					ParticipantType: participantType,
 				})

@@ -618,9 +618,9 @@ tasks:
       - sh loadtest/benchmarks/run.sh
 
   loadtest:correctness:
-    desc: Run pagination correctness tests against the seeded memory service (stub — see Sub-Task 4).
+    desc: Run pagination correctness tests against a seeded memory service.
     cmds:
-      - go test ./internal/loadtest/correctness/ -v -run TestNotImplemented
+      - go test ./internal/loadtest/correctness/ -v -timeout 30m -count=1
 
   loadtest:report:
     desc: Aggregate loadtest results into report.md and report.json (stub — see Sub-Task 5).
