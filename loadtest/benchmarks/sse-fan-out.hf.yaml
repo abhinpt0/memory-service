@@ -33,30 +33,19 @@ phases:
         startTime: 5s
         scenario:
           - burstAppend:
+              # Pick a seeded conversation ID from CSV (same pattern as append-throughput).
+              # Do NOT use a runtime search — the SSE users (loadtest-sse-*) own no
+              # conversations, so the search would return empty data[].
+              - randomCsvRow:
+                  file: ../results/conversation-ids.csv
+                  columns:
+                    0: conversationId
               - httpRequest:
-                  POST: /v1/conversations/search
+                  POST: /v1/conversations/${conversationId}/entries
                   headers:
                     Content-Type: application/json
                     X-API-Key: agent-api-key-1
-                    X-User-ID: loadtest-sse-1
+                    X-User-ID: loadtest-user-1
                   body: |
-                    {"query":"load-test","limit":1}
-                  metric: burst-search
-                  handler:
-                    body:
-                      json:
-                        query: .data[0].id
-                        toVar: burstConvId
-              - breakSequence:
-                  stringCondition:
-                    fromVar: burstConvId
-                    equalTo: null
-              - httpRequest:
-                  POST: /v1/conversations/${burstConvId}/entries
-                  headers:
-                    Content-Type: application/json
-                    X-API-Key: agent-api-key-1
-                    X-User-ID: loadtest-sse-1
-                  body: |
-                    {"contentType":"history","content":[{"role":"USER","text":"sse fan-out burst entry"}],"userId":"loadtest-sse-1"}
+                    {"contentType":"history","content":[{"role":"USER","text":"sse fan-out burst entry"}],"userId":"loadtest-user-1"}
                   metric: burst-append

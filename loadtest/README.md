@@ -11,12 +11,16 @@ Results are written to `loadtest/results/` and are suitable for capture as CI ar
 
 - **`task dev:memory-service` must be running** on port **8082** before executing any load-test task.
 - API key: `agent-api-key-1` (configured automatically by the dev stack via `MEMORY_SERVICE_API_KEYS_AGENT`).
+- **Rate limiting must be disabled** for load testing — start the service with `MEMORY_SERVICE_RATE_LIMIT_MODE=off`, otherwise the token-bucket limiter will reject benchmark traffic.
+- **`MEMORY_SERVICE_TRUSTED_USER_ID_CLIENTS=agent`** must be set so that `X-User-ID` headers sent by the generator and correctness tests are trusted by the server.
 - [jbang](https://www.jbang.dev/download/) must be installed and on your `PATH` for Hyperfoil benchmarks (`loadtest:bench`).
 - Go 1.21+ for the generator, correctness, and report binaries.
 
-Start the dev stack first:
+Start the dev stack with load-test overrides:
 
 ```sh
+MEMORY_SERVICE_RATE_LIMIT_MODE=off \
+MEMORY_SERVICE_TRUSTED_USER_ID_CLIENTS=agent \
 task dev:memory-service
 ```
 
@@ -40,13 +44,25 @@ This executes **seed → bench → correctness → report** in sequence and writ
 
 Seeds the running memory service with 200 conversations (default). Writes
 `loadtest/results/seed-manifest.json` which the benchmark and correctness tasks consume.
-Re-running is a no-op if the manifest already exists (idempotent).
+
+**You do not need to delete the manifest between runs.** Re-running `task loadtest:all`
+is safe — the seed step skips automatically if the manifest already exists. Only delete it
+in these specific situations:
+
+| Situation | Action |
+|---|---|
+| Normal re-run (same DB) | Just run `task loadtest:all` — seed skips automatically |
+| DB was wiped or restarted | `rm loadtest/results/seed-manifest.json && task loadtest:all` |
+| Want different conversation count | `rm loadtest/results/seed-manifest.json && task loadtest:seed -- --total-conversations=500` |
 
 ```sh
 task loadtest:seed
 # Override conversation count:
 task loadtest:seed -- --total-conversations=50
 ```
+
+> **Sign of a stale manifest:** correctness tests return HTTP 403 after a DB wipe.
+> Fix: `rm loadtest/results/seed-manifest.json && task loadtest:all`
 
 ### `task loadtest:bench`
 
@@ -152,16 +168,16 @@ loadtest/                          ← non-Go assets
     └── .gitkeep                   ← keeps dir in git; *.json and *.md are gitignored
 
 internal/loadtest/                 ← all Go source
-├── generator/                     ← data seeder binary (Sub-Task 2)
+├── generator/                     ← data seeder binary
 │   ├── main.go
 │   ├── config.go
 │   ├── distribution.go
 │   └── seeder.go
-├── correctness/                   ← pagination correctness tests (Sub-Task 4)
+├── correctness/                   ← pagination correctness tests
 │   ├── correctness_test.go
 │   └── reporter.go
-├── report/                        ← results aggregator binary (Sub-Task 5)
-│   └── main.go
-└── sse/                           ← fallback only if Hyperfoil SSE proves unworkable
-    └── sse_test.go
+├── hfrun/                         ← Hyperfoil non-interactive runner
+│   └── main.go                    ← starts jbang, polls log, fetches /stats/total via REST
+└── report/                        ← results aggregator binary
+    └── main.go
 ```

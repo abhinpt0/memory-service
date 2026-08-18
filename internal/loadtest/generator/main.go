@@ -61,6 +61,7 @@ func main() {
 	var (
 		mu            sync.Mutex
 		conversations []conversationRecord
+		indexQueue    []indexEntryRequest
 		seeded        int
 	)
 
@@ -88,7 +89,8 @@ func main() {
 					continue
 				}
 
-				if err := seedEntries(client, cfg, wr, convID, ownerID, entryCount, participantType); err != nil {
+				entries, err := seedEntriesWithIndex(client, cfg, wr, convID, ownerID, entryCount, participantType)
+				if err != nil {
 					fmt.Fprintf(os.Stderr, "ERROR seedEntries conv=%s: %v\n", convID, err)
 					continue
 				}
@@ -100,6 +102,7 @@ func main() {
 					EntryCount:      entryCount,
 					ParticipantType: participantType,
 				})
+				indexQueue = append(indexQueue, entries...)
 				seeded++
 				fmt.Fprintf(os.Stderr, "Seeded %d/%d conversations\n", seeded, cfg.TotalConversations)
 				mu.Unlock()
@@ -107,6 +110,15 @@ func main() {
 		}()
 	}
 	wg.Wait()
+
+	// --- index all seeded entries for search ---
+	fmt.Fprintf(os.Stderr, "Indexing %d entries for search...\n", len(indexQueue))
+	if err := indexEntries(client, cfg, indexQueue); err != nil {
+		fmt.Fprintf(os.Stderr, "WARNING: indexEntries failed: %v (search tests may return 0 results)\n", err)
+		// Non-fatal: continue writing manifest
+	} else {
+		fmt.Fprintf(os.Stderr, "Indexing complete.\n")
+	}
 
 	// --- seed fork chains ---
 	forks, err := seedForkChains(client, cfg, r)
@@ -133,49 +145,45 @@ func main() {
 }
 
 // seedEntries appends entryCount USER+AI entry pairs to convID according to
-// the participant type.
-func seedEntries(
+// the participant type. Returns index requests for all appended entries so the
+// caller can submit them to POST /v1/conversations/index.
+func seedEntriesWithIndex(
 	client *http.Client,
 	cfg GeneratorConfig,
 	r *rand.Rand,
 	convID, ownerID string,
 	entryCount int,
 	participantType string,
-) error {
+) ([]indexEntryRequest, error) {
+	var idxReqs []indexEntryRequest
 	// entryCount is the number of USER turns; each is followed by an AI reply,
 	// so the actual total entries stored is entryCount*2.
 	for range entryCount {
-		var userID, aiUserID string
-		switch participantType {
-		case "two-user":
-			userID = ownerID
-			aiUserID = ownerID
-		case "two-agent":
-			userID = ownerID
-			aiUserID = ownerID
-		default: // single-user
-			userID = ownerID
-			aiUserID = ownerID
-		}
-
 		userRole := "USER"
 		aiRole := "AI"
 		if participantType == "two-agent" {
-			userRole = "AI" // both participants send AI-role messages
+			userRole = "AI"
 			aiRole = "AI"
 		}
 
-		// USER (or first agent) turn.
-		if _, err := appendEntry(client, cfg, convID, ownerID, userID, userRole, EntryText(r), "", ""); err != nil {
-			return err
+		userText := EntryText(r)
+		entryID, err := appendEntry(client, cfg, convID, ownerID, ownerID, userRole, userText, "", "")
+		if err != nil {
+			return idxReqs, err
 		}
+		// Only index USER/first-agent turn entries so search finds conversations.
+		idxReqs = append(idxReqs, indexEntryRequest{
+			ConversationID: convID,
+			EntryID:        entryID,
+			IndexedContent: userText,
+		})
 
-		// AI reply turn.
-		if _, err := appendEntry(client, cfg, convID, ownerID, aiUserID, aiRole, EntryText(r), "", ""); err != nil {
-			return err
+		aiText := EntryText(r)
+		if _, err := appendEntry(client, cfg, convID, ownerID, ownerID, aiRole, aiText, "", ""); err != nil {
+			return idxReqs, err
 		}
 	}
-	return nil
+	return idxReqs, nil
 }
 
 // seedForkChains creates SeedForkChains() root conversations of 10 entries

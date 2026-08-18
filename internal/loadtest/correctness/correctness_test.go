@@ -294,10 +294,12 @@ func TestEntryListPagination(t *testing.T) {
 				}
 			}
 
-			// Generator stores USER+AI pairs, so total stored = entryCount * 2.
+			// Generator stores USER+AI pairs, so minimum seeded = entryCount * 2.
+			// Use >= not == because benchmark flows (append-throughput) may append
+			// additional entries to these conversations after the manifest is written.
 			expected := conv.EntryCount * 2
-			if len(collected) != expected {
-				t.Errorf("entry count mismatch for conversation %s: got %d, want %d",
+			if len(collected) < expected {
+				t.Errorf("entry count too low for conversation %s: got %d, want >= %d",
 					conv.ID, len(collected), expected)
 			}
 
@@ -355,7 +357,14 @@ func TestSearchPagination(t *testing.T) {
 		cursor = *page.AfterCursor
 	}
 
-	// Assert no duplicates.
+	// Assert search returned results — if 0, entries were likely not indexed.
+	if len(collected) == 0 {
+		recordResult("TestSearchPagination", false, 0,
+			"search returned 0 results — were entries indexed? (re-run task loadtest:seed)")
+		t.Fatalf("search for 'load-test' returned 0 results — entries may not be indexed")
+	}
+
+	// Assert no duplicates across pages.
 	var duplicated []string
 	for id, count := range collected {
 		if count > 1 {

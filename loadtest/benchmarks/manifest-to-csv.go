@@ -22,6 +22,7 @@ import (
 
 type conversationRecord struct {
 	ID              string `json:"id"`
+	OwnerID         string `json:"ownerID"`
 	EntryCount      int    `json:"entryCount"`
 	ParticipantType string `json:"participantType"`
 }
