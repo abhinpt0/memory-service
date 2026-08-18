@@ -148,8 +148,10 @@ func loadSeedManifest(root string) (seedManifest, bool) {
 	return m, true
 }
 
-// loadHyperfoilResults reads all hyperfoil-*.json files and performs best-effort
-// field extraction using a flexible map[string]any parse.
+// loadHyperfoilResults reads all hyperfoil-*.json files.
+// It supports the /run/{id}/stats/total JSON format returned by Hyperfoil 0.27.2
+// (field: statistics[].summary.percentileResponseTime + requestCount),
+// as well as the older flat format (fields: throughput, p50, p99).
 func loadHyperfoilResults(root string) []benchmarkRow {
 	pattern := filepath.Join(root, "loadtest", "results", "hyperfoil-*.json")
 	files, err := filepath.Glob(pattern)
@@ -157,8 +159,22 @@ func loadHyperfoilResults(root string) []benchmarkRow {
 		return nil
 	}
 
-	var rows []benchmarkRow
+	// De-duplicate: keep only the latest file per benchmark name.
+	latest := make(map[string]string) // name -> filepath
 	for _, f := range files {
+		base := strings.TrimSuffix(filepath.Base(f), ".json")
+		base = strings.TrimPrefix(base, "hyperfoil-")
+		// Strip trailing -YYYYMMDDTHHMMSS timestamp if present.
+		if idx := strings.LastIndex(base, "-"); idx >= 0 && len(base)-idx > 8 {
+			base = base[:idx]
+		}
+		if prev, ok := latest[base]; !ok || f > prev {
+			latest[base] = f
+		}
+	}
+
+	var rows []benchmarkRow
+	for name, f := range latest {
 		data, err := os.ReadFile(f)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: could not read %s (%v); skipping\n", f, err)
@@ -170,46 +186,76 @@ func loadHyperfoilResults(root string) []benchmarkRow {
 			continue
 		}
 
-		name := strVal(raw, "name")
-		if name == "" {
-			// Derive name from filename: hyperfoil-<name>-<timestamp>.json
-			base := strings.TrimSuffix(filepath.Base(f), ".json")
-			base = strings.TrimPrefix(base, "hyperfoil-")
-			// Strip trailing timestamp segment if present (e.g. -20060102T150405)
-			if idx := strings.LastIndex(base, "-"); idx >= 0 {
-				candidate := base[:idx]
-				if len(base)-idx > 8 {
-					base = candidate
+		// Use embedded name field if present.
+		if n := strVal(raw, "name"); n != "" {
+			name = n
+		}
+
+		// Skip stub files (stats-unavailable or parse-failed).
+		if note := strVal(raw, "note"); note != "" {
+			fmt.Fprintf(os.Stderr, "info: %s has note=%q (benchmark ran but stats not available)\n", name, note)
+			rows = append(rows, benchmarkRow{Name: name, SLOPass: true, hasData: false})
+			continue
+		}
+
+		var rps, p50, p99 float64
+
+		// --- Hyperfoil 0.27.2 /stats/total format ---
+		// {"status":"TERMINATED","statistics":[{"phase":"...","summary":{"percentileResponseTime":{"50.0":...,"99.0":...},"requestCount":N,...}},...]}
+		if statsArr, ok := raw["statistics"].([]any); ok && len(statsArr) > 0 {
+			var totalRequests float64
+			var totalDurationNs float64
+			var p50sum, p99sum float64
+			count := 0
+			for _, s := range statsArr {
+				stat, ok := s.(map[string]any)
+				if !ok {
+					continue
+				}
+				summary, ok := stat["summary"].(map[string]any)
+				if !ok {
+					continue
+				}
+				if rc, ok := floatVal(summary, "requestCount"); ok {
+					totalRequests += rc
+				}
+				if et, ok := floatVal(summary, "endTime"); ok {
+					if st, ok := floatVal(summary, "startTime"); ok {
+						totalDurationNs += et - st
+					}
+				}
+				if pcts, ok := summary["percentileResponseTime"].(map[string]any); ok {
+					if v, ok := floatVal(pcts, "50.0"); ok {
+						p50sum += v / 1e6 // ns → ms
+						count++
+					}
+					if v, ok := floatVal(pcts, "99.0"); ok {
+						p99sum += v / 1e6
+					}
 				}
 			}
-			name = base
-		}
-
-		rps, _ := floatVal(raw, "throughput")
-		p50, _ := floatVal(raw, "p50")
-		p99, _ := floatVal(raw, "p99")
-		mean, _ := floatVal(raw, "mean")
-
-		// Some Hyperfoil report formats nest latency under a "stats" or "phases" key.
-		// Try the top-level "total" object as a fallback.
-		if total, ok := raw["total"].(map[string]any); ok {
-			if rps == 0 {
-				rps, _ = floatVal(total, "throughput")
+			if count > 0 {
+				p50 = p50sum / float64(count)
+				p99 = p99sum / float64(count)
 			}
-			if p50 == 0 {
-				p50, _ = floatVal(total, "p50")
-			}
-			if p99 == 0 {
-				p99, _ = floatVal(total, "p99")
-			}
-			if mean == 0 {
-				mean, _ = floatVal(total, "mean")
+			// RPS = total requests / total duration in seconds.
+			if totalDurationNs > 0 {
+				rps = totalRequests / (totalDurationNs / 1e3) // ms → s
 			}
 		}
-		_ = mean
+
+		// --- Fallback: flat format (throughput, p50, p99) ---
+		if rps == 0 {
+			rps, _ = floatVal(raw, "throughput")
+		}
+		if p50 == 0 {
+			p50, _ = floatVal(raw, "p50")
+		}
+		if p99 == 0 {
+			p99, _ = floatVal(raw, "p99")
+		}
 
 		sloViolations := boolVal(raw, "sloViolations")
-
 		rows = append(rows, benchmarkRow{
 			Name:    name,
 			RPS:     rps,

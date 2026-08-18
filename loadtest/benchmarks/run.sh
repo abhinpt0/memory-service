@@ -1,5 +1,9 @@
 #!/bin/sh
-# run.sh — Run all Hyperfoil benchmark flows via jbang.
+# run.sh — Run all Hyperfoil benchmark flows.
+#
+# Hyperfoil is started as a background server (start-local), the CLI connects
+# to it for each command, and stats are collected via the REST API before
+# shutdown.  This is the correct non-interactive pattern for Hyperfoil 0.27.2.
 #
 # Prerequisites:
 #   - jbang installed and on PATH  (https://www.jbang.dev/download/)
@@ -8,9 +12,6 @@
 #
 # Usage (from repo root):
 #   sh loadtest/benchmarks/run.sh
-#
-# Results are written to loadtest/results/ as hyperfoil-<flow>-<timestamp>.json
-# A pass/fail SLO summary is printed to stdout at the end.
 #
 # POSIX-compatible — uses sh, not bash.
 set -e
@@ -26,6 +27,7 @@ HF_VERSION="0.27.2"
 HF_MAIN="io.hyperfoil.cli.HyperfoilCli"
 HF_DEPS="io.hyperfoil:hyperfoil-core:${HF_VERSION},io.hyperfoil:hyperfoil-clustering:${HF_VERSION},io.hyperfoil:hyperfoil-http:${HF_VERSION}"
 HF_CLI="io.hyperfoil:hyperfoil-cli:${HF_VERSION}"
+HF_LOG="/tmp/hyperfoil/hyperfoil.local.log"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -40,15 +42,10 @@ die() {
     exit 1
 }
 
-# Run a single Hyperfoil benchmark non-interactively by piping commands to the
-# Hyperfoil CLI shell.  Outputs a JSON report to the given path.
-run_hyperfoil() {
-    YAML="$1"
-    REPORT="$2"
-    BENCHMARK_NAME="$(basename "${YAML}" .hf.yaml)"
-
-    printf "start-local\nupload %s\nrun %s\nwait-run\nexport --destination=%s\nexit\n" \
-        "${YAML}" "${BENCHMARK_NAME}" "${REPORT}" \
+# hf_cli <cmd> — send a single command to the running controller.
+# The controller address is stored in HF_CONTROLLER_ADDR.
+hf_cli() {
+    printf '%s\nexit\n' "$1" \
         | jbang --deps "${HF_DEPS}" --main "${HF_MAIN}" "${HF_CLI}" 2>/dev/null
 }
 
@@ -81,7 +78,14 @@ log "CSV generation complete."
 FLOWS="append-throughput list-conversations list-entries search-conversations list-forks sse-fan-out"
 
 # ---------------------------------------------------------------------------
-# Step 3: Run each flow with Hyperfoil via jbang
+# Step 3: Run each flow — start controller, run benchmark, fetch stats, stop
+#
+# Pattern (correct for Hyperfoil 0.27.2 non-interactive use):
+#   a) Start controller in background, capture its port from the log
+#   b) Upload + run + wait-run in ONE pipe (all before wait-run blocks)
+#   c) Poll log for "Run XXX completed" to know when done
+#   d) Fetch /run/XXX/stats/total via REST while controller is alive
+#   e) Send shutdown via CLI, then kill background process
 # ---------------------------------------------------------------------------
 
 PASSED=""
@@ -100,11 +104,20 @@ run_flow() {
 
     log "Running flow: ${FLOW} ..."
 
-    if run_hyperfoil "${YAML}" "${RESULT_JSON}"; then
+    # Clear the Hyperfoil log so we start fresh.
+    rm -f "${HF_LOG}"
+
+    # Start the CLI with start-local + upload + run + wait-run in one pipe.
+    # After wait-run the CLI blocks waiting for more stdin — we DON'T send
+    # exit yet so the controller stays alive for the REST API call.
+    # We use the Go hfrun helper which handles this correctly.
+    if go run "${REPO_ROOT}/internal/loadtest/hfrun/" \
+            --yaml="${YAML}" \
+            --out="${RESULT_JSON}"; then
         log "PASS: ${FLOW} — results written to ${RESULT_JSON}"
         PASSED="${PASSED} ${FLOW}"
     else
-        log "FAIL: ${FLOW} — SLO violated or error (results may still be in ${RESULT_JSON})"
+        log "FAIL: ${FLOW} — see ${RESULT_JSON}"
         FAILED="${FAILED} ${FLOW}"
     fi
 }
@@ -130,9 +143,9 @@ fi
 printf '\n'
 
 if [ -n "${FAILED}" ]; then
-    log "One or more flows failed SLO assertions. See result files in ${RESULTS_DIR}/"
+    log "One or more flows failed. See result files in ${RESULTS_DIR}/"
     exit 1
 fi
 
-log "All flows passed SLO assertions."
+log "All flows passed."
 exit 0
