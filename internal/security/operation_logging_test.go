@@ -64,6 +64,37 @@ func TestCanonicalOperationAndAdminAuditAreDistinct(t *testing.T) {
 	}
 }
 
+func TestAdminMemoryKindLifecycleRequiresJustification(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	paths := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodPost, "/admin/v1/memory-kinds"},
+		{http.MethodGet, "/admin/v1/memory-kinds"},
+		{http.MethodGet, "/admin/v1/memory-kinds/family/v1"},
+		{http.MethodPost, "/admin/v1/memory-kind-migrations"},
+		{http.MethodGet, "/admin/v1/memory-kind-migrations"},
+		{http.MethodGet, "/admin/v1/memory-kind-migrations/id"},
+		{http.MethodDelete, "/admin/v1/memory-kind-migrations/id"},
+	}
+	for _, tc := range paths {
+		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
+			router := gin.New()
+			router.Use(AdminAuditMiddleware(true))
+			router.Handle(tc.method, tc.path, func(c *gin.Context) { c.Status(http.StatusNoContent) })
+
+			missing := httptest.NewRecorder()
+			router.ServeHTTP(missing, httptest.NewRequest(tc.method, tc.path, nil))
+			require.Equal(t, http.StatusBadRequest, missing.Code)
+
+			present := httptest.NewRecorder()
+			router.ServeHTTP(present, httptest.NewRequest(tc.method, tc.path+"?justification=approved", nil))
+			require.Equal(t, http.StatusNoContent, present.Code)
+		})
+	}
+}
+
 func TestOperationEventMiddlewareUsesRouteTemplateAndNormalizedError(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()

@@ -131,43 +131,6 @@ Feature: Admin Memory REST API
     """
     Then the response status should be 200
 
-  Scenario: Admin REST put runs attribute extraction with neutral admin context
-    Given I call PUT "/admin/v1/memory-policies" with body:
-    """
-    {
-      "authz": "package memories.authz\ndefault decision = {\"allow\": true}",
-      "attributes": "package memories.attributes\ndefault attributes = {}\nattributes = {\"admin_user_id\": input.context.user_id, \"admin_role\": input.context.jwt_claims.roles[0]} if { count(input.context.jwt_claims.roles) > 0 }",
-      "filter": "package memories.filter\nnamespace_prefix := input.namespace_prefix\nattribute_filter := {}"
-    }
-    """
-    And the response status should be 204
-    When I call PUT "/admin/v1/memories" with body:
-    """
-    {
-      "namespace": ["user", "erin", "cognition.v1", "facts"],
-      "key": "neutral-context-rest",
-      "value": {
-        "content": "uses neutral admin context"
-      }
-    }
-    """
-    Then the response status should be 200
-    When I call POST "/admin/v1/memories/search" with body:
-    """
-    {
-      "namespace_prefix": ["user", "erin", "cognition.v1", "facts"],
-      "filter": {
-        "admin_user_id": { "\u0024eq": "" },
-        "admin_role": { "\u0024eq": "admin" }
-      },
-      "limit": 10
-    }
-    """
-    Then the response status should be 200
-    And the response body field "items[0].key" should be "neutral-context-rest"
-    And the response body field "items[0].attributes.admin_user_id" should be ""
-    And the response body field "items[0].attributes.admin_role" should be "admin"
-
   Scenario: Non-admin receives 403 on admin memory endpoints
     Given I am authenticated as user "eve"
     When I call PUT "/admin/v1/memories" with body:

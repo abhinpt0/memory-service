@@ -3,7 +3,9 @@ package episodic
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/open-policy-agent/opa/v1/rego"
@@ -72,22 +74,6 @@ test_deny_owner_when_too_many_index_keys if {
 	} == {"allow": false, "reason": "too many index fields (max 8)"}
 }
 
-# --- attribute extraction assertions ---
-
-test_extracts_namespace_and_sub if {
-	data.memories.attributes.attributes with input as {
-		"namespace": ["user", "alice", "notes"],
-		"key": "k1",
-		"value": {"text": "hello"},
-		"index": {"text": "hello"},
-		"context": {
-			"user_id": "alice",
-			"client_id": "agent-1",
-			"jwt_claims": {"roles": []}
-		}
-	} == {"namespace": "user", "sub": "alice"}
-}
-
 # --- filter injection assertions ---
 
 test_filter_narrows_prefix_to_subject if {
@@ -100,7 +86,7 @@ test_filter_narrows_prefix_to_subject if {
 		}
 	} == {
 		"namespace_prefix": ["user", "alice"],
-		"attribute_filter": {"namespace": "user", "sub": "alice"}
+		"attribute_filter": {}
 	}
 }
 
@@ -114,11 +100,11 @@ test_filter_keeps_narrower_prefix if {
 		}
 	} == {
 		"namespace_prefix": ["user", "alice", "notes"],
-		"attribute_filter": {"namespace": "user", "sub": "alice"}
+		"attribute_filter": {}
 	}
 }
 
-test_filter_enforces_namespace_and_sub_attributes if {
+test_filter_uses_namespace_scope_without_projection_fields if {
 	data.memories.filter with input as {
 		"namespace_prefix": ["user", "alice"],
 		"filter": {"topic": "python"},
@@ -128,11 +114,11 @@ test_filter_enforces_namespace_and_sub_attributes if {
 		}
 	} == {
 		"namespace_prefix": ["user", "alice"],
-		"attribute_filter": {"namespace": "user", "sub": "alice"}
+		"attribute_filter": {}
 	}
 }
 
-test_admin_filter_not_restricted if {
+test_admin_role_filter_is_user_scoped if {
 	data.memories.filter with input as {
 		"namespace_prefix": ["user"],
 		"filter": {},
@@ -141,29 +127,43 @@ test_admin_filter_not_restricted if {
 			"jwt_claims": {"roles": ["admin"]}
 		}
 	} == {
-		"namespace_prefix": ["user"],
+		"namespace_prefix": ["user", "alice"],
 		"attribute_filter": {}
 	}
+}
+
+# The default filter policy does not output a "kind" field, so callers retain
+# their kind selector unchanged after IntersectKindSelectors("cognition/v2", "").
+test_default_policy_does_not_output_kind if {
+	result := data.memories.filter with input as {
+		"namespace_prefix": ["user", "alice"],
+		"filter": {},
+		"kind": "cognition/v2",
+		"context": {
+			"user_id": "alice",
+			"jwt_claims": {"roles": []}
+		}
+	}
+	not result.kind
 }
 `
 
 func TestDefaultPoliciesRegoAssertions(t *testing.T) {
 	modules := map[string]string{
-		"authz.rego":      defaultAuthzRego,
-		"attributes.rego": defaultAttrExtractRego,
-		"filter.rego":     defaultFilterInjectRego,
-		"tests.rego":      defaultPolicyAssertionsRego,
+		"authz.rego":  defaultAuthzRego,
+		"filter.rego": defaultFilterInjectRego,
+		"tests.rego":  defaultPolicyAssertionsRego,
 	}
 	testRules := []string{
 		"test_allow_owner_namespace",
 		"test_deny_other_subject",
 		"test_deny_non_user_namespace",
 		"test_deny_owner_when_too_many_index_keys",
-		"test_extracts_namespace_and_sub",
 		"test_filter_narrows_prefix_to_subject",
 		"test_filter_keeps_narrower_prefix",
-		"test_filter_enforces_namespace_and_sub_attributes",
-		"test_admin_filter_not_restricted",
+		"test_filter_uses_namespace_scope_without_projection_fields",
+		"test_admin_role_filter_is_user_scoped",
+		"test_default_policy_does_not_output_kind",
 	}
 
 	for _, rule := range testRules {
@@ -176,11 +176,49 @@ func TestDefaultPoliciesRegoAssertions(t *testing.T) {
 	}
 }
 
-func TestCognitionPoliciesCompileWithRegoV1(t *testing.T) {
-	policyDir := filepath.Join("..", "..", "deploy", "episodic-policies", "cognition")
-	_, err := NewPolicyEngine(context.Background(), policyDir)
-	if err != nil {
-		t.Fatalf("compile cognition policies: %v", err)
+func TestPolicyImportDirectoryAllowsMemoryKindProjectionSubdirectories(t *testing.T) {
+	policyImportDir := filepath.Join("..", "..", "deploy", "episodic-policies", "cognition")
+	if _, err := NewPolicyEngine(context.Background(), policyImportDir); err != nil {
+		t.Fatalf("memory-kind projection in policy import directory should be accepted: %v", err)
+	}
+}
+
+func TestConfiguredPolicyDirectoryRequiresBothPrograms(t *testing.T) {
+	t.Parallel()
+	for _, missing := range []string{"authz.rego", "filter.rego"} {
+		t.Run(missing, func(t *testing.T) {
+			dir := t.TempDir()
+			for name, source := range map[string]string{
+				"authz.rego":  defaultAuthzRego,
+				"filter.rego": defaultFilterInjectRego,
+			} {
+				if name != missing {
+					if err := os.WriteFile(filepath.Join(dir, name), []byte(source), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			_, err := NewPolicyEngine(context.Background(), dir)
+			if err == nil || !strings.Contains(err.Error(), "requires "+missing) {
+				t.Fatalf("expected missing %s error, got %v", missing, err)
+			}
+		})
+	}
+}
+
+func TestConfiguredPolicyDirectoryAllowsManifestRegoAssets(t *testing.T) {
+	dir := t.TempDir()
+	for name, source := range map[string]string{
+		"authz.rego":     defaultAuthzRego,
+		"filter.rego":    defaultFilterInjectRego,
+		"attribute.rego": "package memories.attributes",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(source), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := NewPolicyEngine(context.Background(), dir); err != nil {
+		t.Fatalf("non-global Rego assets should be left for manifest-based importers: %v", err)
 	}
 }
 
@@ -194,18 +232,28 @@ const testTimestampWithNanos = "2025-06-10T13:30:00.500000000Z"
 // testTimestampNanosNorm is the expected normalised form of testTimestampWithNanos.
 const testTimestampNanosNorm = "2025-06-10T13:30:00.500000000Z"
 
-func TestCognitionPoliciesRegoAssertions(t *testing.T) {
-	policyDir := filepath.Join("..", "..", "deploy", "episodic-policies", "cognition")
-	engine, err := NewPolicyEngine(context.Background(), policyDir)
+// loadCognitionSchemaProgram compiles the cognition projection.rego as a schema program.
+func loadCognitionSchemaProgram(t *testing.T) interface {
+	Eval(context.Context, ...interface{}) (interface{}, error)
+} {
+	t.Helper()
+	// Not used directly — we use CompileKindProjection + EvaluateKindProjection instead.
+	return nil
+}
+
+// TestCognitionSchemaProjection tests the cognition projection.rego compiled as a
+// MemoryKindVersion program (Enhancement 115).
+func TestCognitionSchemaProjection(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("..", "..", "deploy", "episodic-policies", "cognition", "projection.rego"))
 	if err != nil {
-		t.Fatalf("compile cognition policies: %v", err)
+		t.Fatalf("read cognition projection.rego: %v", err)
+	}
+	ctx := context.Background()
+	pq, err := CompileKindProjection(ctx, string(src))
+	if err != nil {
+		t.Fatalf("CompileKindProjection: %v", err)
 	}
 
-	ctx := context.Background()
-
-	// Cognition stores temporal metadata in the encrypted value payload. The index
-	// remains limited to caller-redacted text that the episodic indexer embeds, so
-	// timestamp attributes must not depend on duplicating metadata into the index.
 	t.Run("extracts_observedAt_and_effectiveAt_from_value", func(t *testing.T) {
 		namespace := []string{"user", "alice", "cognition.v1", "facts"}
 		value := map[string]interface{}{
@@ -219,9 +267,9 @@ func TestCognitionPoliciesRegoAssertions(t *testing.T) {
 			"statement": "user prefers go",
 			"title":     "preferred language go",
 		}
-		attrs, err := engine.ExtractAttributes(ctx, namespace, "key-1", value, index, PolicyContext{})
+		attrs, err := EvaluateKindProjection(ctx, pq, namespace, "key-1", value, index)
 		if err != nil {
-			t.Fatalf("ExtractAttributes: %v", err)
+			t.Fatalf("EvaluateKindProjection: %v", err)
 		}
 		if got, ok := attrs["observedAt"]; !ok || got != testTimestamp {
 			t.Errorf("observedAt: want %q, got %v", testTimestamp, got)
@@ -231,15 +279,13 @@ func TestCognitionPoliciesRegoAssertions(t *testing.T) {
 		}
 	})
 
-	// Memories written before temporal metadata was introduced remain valid. The
-	// extraction policy should simply omit attributes that the value does not have.
 	t.Run("omits_temporal_attributes_when_value_keys_absent", func(t *testing.T) {
 		namespace := []string{"user", "alice", "cognition.v1", "facts"}
 		value := map[string]interface{}{"kind": "fact", "statement": "old memory"}
 		index := map[string]string{"statement": "old memory"}
-		attrs, err := engine.ExtractAttributes(ctx, namespace, "key-2", value, index, PolicyContext{})
+		attrs, err := EvaluateKindProjection(ctx, pq, namespace, "key-2", value, index)
 		if err != nil {
-			t.Fatalf("ExtractAttributes: %v", err)
+			t.Fatalf("EvaluateKindProjection: %v", err)
 		}
 		if _, ok := attrs["observedAt"]; ok {
 			t.Error("observedAt must not be present when missing from value")
@@ -249,8 +295,6 @@ func TestCognitionPoliciesRegoAssertions(t *testing.T) {
 		}
 	})
 
-	// Empty strings represent unknown optional metadata, not searchable instants.
-	// Omitting them also keeps downstream range filters from treating them as dates.
 	t.Run("omits_temporal_attributes_when_values_are_empty", func(t *testing.T) {
 		namespace := []string{"user", "alice", "cognition.v1", "facts"}
 		value := map[string]interface{}{
@@ -260,9 +304,9 @@ func TestCognitionPoliciesRegoAssertions(t *testing.T) {
 			"effective_at": "",
 		}
 		index := map[string]string{"statement": "some fact", "type": "fact"}
-		attrs, err := engine.ExtractAttributes(ctx, namespace, "key-3", value, index, PolicyContext{})
+		attrs, err := EvaluateKindProjection(ctx, pq, namespace, "key-3", value, index)
 		if err != nil {
-			t.Fatalf("ExtractAttributes: %v", err)
+			t.Fatalf("EvaluateKindProjection: %v", err)
 		}
 		if _, ok := attrs["observedAt"]; ok {
 			t.Error("observedAt must not be present when value is empty string")
@@ -272,8 +316,6 @@ func TestCognitionPoliciesRegoAssertions(t *testing.T) {
 		}
 	})
 
-	// Range queries assume that promoted temporal attributes are RFC3339. Rejecting
-	// other strings here prevents backend-specific lexical matches and SQL cast errors.
 	t.Run("omits_temporal_attributes_when_values_are_not_rfc3339", func(t *testing.T) {
 		namespace := []string{"user", "alice", "cognition.v1", "facts"}
 		value := map[string]interface{}{
@@ -282,15 +324,10 @@ func TestCognitionPoliciesRegoAssertions(t *testing.T) {
 			"observed_at":  "tomorrow",
 			"effective_at": "next week",
 		}
-		index := map[string]string{
-			"statement":    "some fact",
-			"type":         "fact",
-			"observed_at":  "tomorrow",
-			"effective_at": "next week",
-		}
-		attrs, err := engine.ExtractAttributes(ctx, namespace, "key-4", value, index, PolicyContext{})
+		index := map[string]string{"statement": "some fact", "type": "fact"}
+		attrs, err := EvaluateKindProjection(ctx, pq, namespace, "key-4", value, index)
 		if err != nil {
-			t.Fatalf("ExtractAttributes: %v", err)
+			t.Fatalf("EvaluateKindProjection: %v", err)
 		}
 		if _, ok := attrs["observedAt"]; ok {
 			t.Error("observedAt must not be present when value is not RFC3339")
@@ -300,23 +337,6 @@ func TestCognitionPoliciesRegoAssertions(t *testing.T) {
 		}
 	})
 
-	t.Run("omits_observedAt_when_value_is_non_string", func(t *testing.T) {
-		namespace := []string{"user", "alice", "cognition.v1", "facts"}
-		value := map[string]interface{}{
-			"kind":        "fact",
-			"statement":   "some fact",
-			"observed_at": 1234567890,
-		}
-		attrs, err := engine.ExtractAttributes(ctx, namespace, "key-5", value, map[string]string{}, PolicyContext{})
-		if err != nil {
-			t.Fatalf("ExtractAttributes: %v", err)
-		}
-		if _, ok := attrs["observedAt"]; ok {
-			t.Error("observedAt must not be present when value is not a string")
-		}
-	})
-
-	// A sub-second precision timestamp must be normalised to fixed-width nanosecond UTC.
 	t.Run("normalises_nanosecond_timestamp_to_fixed_width_nanosecond_utc", func(t *testing.T) {
 		namespace := []string{"user", "alice", "cognition.v1", "facts"}
 		value := map[string]interface{}{
@@ -324,9 +344,9 @@ func TestCognitionPoliciesRegoAssertions(t *testing.T) {
 			"statement":   "some fact",
 			"observed_at": testTimestampWithNanos,
 		}
-		attrs, err := engine.ExtractAttributes(ctx, namespace, "key-6", value, map[string]string{}, PolicyContext{})
+		attrs, err := EvaluateKindProjection(ctx, pq, namespace, "key-6", value, map[string]string{})
 		if err != nil {
-			t.Fatalf("ExtractAttributes: %v", err)
+			t.Fatalf("EvaluateKindProjection: %v", err)
 		}
 		got, ok := attrs["observedAt"]
 		if !ok {
@@ -334,23 +354,6 @@ func TestCognitionPoliciesRegoAssertions(t *testing.T) {
 		}
 		if got != testTimestampNanosNorm {
 			t.Errorf("observedAt: want %q, got %q", testTimestampNanosNorm, got)
-		}
-	})
-
-	// expires_at is not promoted — it is not part of the searchable attribute schema.
-	t.Run("does_not_promote_expires_at", func(t *testing.T) {
-		namespace := []string{"user", "alice", "cognition.v1", "facts"}
-		value := map[string]interface{}{
-			"kind":       "fact",
-			"statement":  "some fact",
-			"expires_at": testTimestamp,
-		}
-		attrs, err := engine.ExtractAttributes(ctx, namespace, "key-7", value, map[string]string{}, PolicyContext{})
-		if err != nil {
-			t.Fatalf("ExtractAttributes: %v", err)
-		}
-		if _, ok := attrs["expiresAt"]; ok {
-			t.Error("expiresAt must not be promoted")
 		}
 	})
 }

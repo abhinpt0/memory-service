@@ -174,7 +174,7 @@ The policy injection API should return the effective namespace prefix and policy
 
 ### Cognition Attributes
 
-The built-in default policy continues to extract only the namespace guard attributes (`namespace`, `sub`). Cognition deployments need a configured `attributes.rego` example, or a packaged cognition policy bundle, that extracts these additional safe attributes:
+The built-in default policy continues to extract only the namespace guard attributes (`namespace`, `sub`). Cognition deployments need a configured `projection.rego` example, or a packaged cognition policy bundle, that extracts these additional safe attributes:
 
 | Attribute | Source | Purpose |
 | --- | --- | --- |
@@ -324,7 +324,7 @@ Feature: Enhanced episodic memory search
 | `internal/generated/pb/` and generated gRPC clients | Regenerate from protobuf after `SearchMemories` contract changes |
 | `internal/registry/episodic/plugin.go` | Update search request/store contracts for normalized operator filters, implicit ordering, semantic availability, and no pagination |
 | `internal/plugin/route/memories/memories.go` | Parse enhanced search requests with strict obsolete-field rejection, conjoin caller and OPA filters, reject obsolete pagination/order fields, enforce semantic no-fallback behavior, and sort deterministically |
-| `internal/episodic/policy.go` and configured `attributes.rego` examples | Return policy-injected filters without overwriting caller constraints, document or extract safe non-null cognition attributes from memory values/index payloads |
+| `internal/episodic/policy.go` and configured `projection.rego` examples | Return policy-injected filters without overwriting caller constraints, document or extract safe non-null cognition attributes from memory values/index payloads |
 | `internal/plugin/store/postgres/episodic_store.go` | Support normalized operator filters, array policy attributes, and deterministic ordered memory search |
 | `internal/plugin/store/sqlite/episodic_store.go` | Support normalized operator filters, array policy attributes, and deterministic ordered memory search |
 | `internal/plugin/store/mongo/episodic_store.go` | Support normalized operator filters, array policy attributes, and deterministic ordered memory search |

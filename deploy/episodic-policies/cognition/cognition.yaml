@@ -1,0 +1,15 @@
+kind: memory-kind
+name: cognition/v1
+attributes:
+  namespace: string
+  sub: string
+  memoryKind: string
+  runtimeId: string
+  runtimeVersion: string
+  confidence: string
+  conversationIds: string
+  entryIds: string
+  observedAt: timestamp
+  effectiveAt: timestamp
+projectionRegoFile: projection.rego
+writable: true

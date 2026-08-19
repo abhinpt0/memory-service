@@ -285,7 +285,7 @@ The config should live in `chat-quarkus` first. The base profile should leave `c
 
 ### Safe Attribute Policy
 
-The current built-in episodic policy extracts only namespace guard attributes such as `namespace` and `sub`. To support type-aware cognition retrieval, add a deployable cognition `attributes.rego` example, for example under `deploy/episodic-policies/cognition/attributes.rego`, that extracts only safe plaintext attributes. Do not add these cognition-specific fields to the built-in default policy; deployments that run a cognition processor should opt into the richer attribute extraction by setting `MEMORY_SERVICE_EPISODIC_POLICY_DIR`. The policy loader falls back to built-in `authz.rego` and `filter.rego` when a policy directory only overrides `attributes.rego`.
+The current built-in memory kind projects only namespace guard attributes such as `namespace` and `sub`. To support type-aware cognition retrieval, add a deployable cognition memory-kind document and `projection.rego` under `deploy/episodic-policies/cognition/`. Do not add these cognition-specific fields to the built-in kind. The distributed image packages this cognition bundle and selects it through its default `MEMORY_SERVICE_POLICY_IMPORT_DIR`; the policy loader retains the built-in `authz.rego` and `filter.rego` programs because the bundle does not override them.
 
 | Attribute         | Source                                                        |
 | ----------------- | ------------------------------------------------------------- |
@@ -558,7 +558,7 @@ Add a `@QuarkusTest` that replaces the chat model with `TestChatModel` and asser
 - [x] Add `CognitionMemoryContentInjector` with compact advisory framing.
 - [x] Wire `Agent` with `retrievalAugmentor = CognitionMemoryRetrievalAugmentor.class`.
 - [x] Update the `Agent` system message with durable-memory usage guidance.
-- [x] Add a deployable cognition-safe `attributes.rego` policy example and document `MEMORY_SERVICE_EPISODIC_POLICY_DIR`.
+- [x] Add a deployable cognition memory-kind manifest and safe `projection.rego`, and document `MEMORY_SERVICE_POLICY_IMPORT_DIR`.
 - [ ] Add focused unit tests for first-turn profile context, every-turn ad hoc search, close-match gating, request construction, formatting, and failure behavior.
 - [ ] Add an AI-service integration test that verifies retrieved memory reaches the model request.
 - [ ] Verify whether retrieved content is persisted by `MemoryServiceChatMemoryStore`; add a guard if needed.
@@ -585,7 +585,7 @@ Add a `@QuarkusTest` that replaces the chat model with `TestChatModel` and asser
 | `java/quarkus/examples/chat-quarkus/src/main/resources/application.properties`                     | Add `chat.cognition-rag.*` defaults, `%alt` enablement, and logging categories. |
 | `java/quarkus/examples/chat-quarkus/src/test/java/org/acme/`                                       | Add unit/integration tests for retrieval and AI-service wiring.                 |
 | `java/quarkus/examples/chat-quarkus/README.md`                                                     | Document local cognition processor workflow and expected behavior.              |
-| `deploy/episodic-policies/cognition/attributes.rego`                                               | New optional policy example for safe cognition attribute extraction.            |
+| `deploy/episodic-policies/cognition/`                                                              | Memory-kind manifest and safe cognition attribute projection imported from the shared policy root. |
 | `site/src/pages/docs/`                                                                             | Optional follow-up docs if this becomes a published guide.                      |
 | `java/quarkus/FACTS.md`                                                                            | Keep any discovered Quarkus LangChain4j retrieval gotchas current.              |
 

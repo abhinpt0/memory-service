@@ -18,7 +18,7 @@ type postgresEpisodicAdminStatsRow struct {
 
 func (e *postgresEpisodicStore) AdminStatsSummary(ctx context.Context) (*registryepisodic.AdminStatsSummary, error) {
 	var row postgresEpisodicAdminStatsRow
-	if err := e.db.WithContext(ctx).Raw(`
+	if err := e.s.dbFor(ctx).Raw(`
 		SELECT
 			(SELECT COUNT(*) FROM memories WHERE archived_at IS NULL) AS memories_total,
 			(SELECT COUNT(*) FROM memories WHERE archived_at IS NOT NULL) AS memories_archived,

@@ -105,6 +105,54 @@ func (e EvictRequestResourceTypes) Valid() bool {
 	}
 }
 
+// Defines values for MemoryAttributeSortDirection.
+const (
+	Asc  MemoryAttributeSortDirection = "asc"
+	Desc MemoryAttributeSortDirection = "desc"
+)
+
+// Valid indicates whether the value is a known member of the MemoryAttributeSortDirection enum.
+func (e MemoryAttributeSortDirection) Valid() bool {
+	switch e {
+	case Asc:
+		return true
+	case Desc:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for MemoryKindMigrationState.
+const (
+	Canceled  MemoryKindMigrationState = "canceled"
+	Canceling MemoryKindMigrationState = "canceling"
+	Failed    MemoryKindMigrationState = "failed"
+	Queued    MemoryKindMigrationState = "queued"
+	Running   MemoryKindMigrationState = "running"
+	Succeeded MemoryKindMigrationState = "succeeded"
+)
+
+// Valid indicates whether the value is a known member of the MemoryKindMigrationState enum.
+func (e MemoryKindMigrationState) Valid() bool {
+	switch e {
+	case Canceled:
+		return true
+	case Canceling:
+		return true
+	case Failed:
+		return true
+	case Queued:
+		return true
+	case Running:
+		return true
+	case Succeeded:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for AdminListMemoriesParamsArchived.
 const (
 	AdminListMemoriesParamsArchivedExclude AdminListMemoriesParamsArchived = "exclude"
@@ -491,6 +539,9 @@ type AdminMemoryItem struct {
 	Id         *openapi_types.UUID     `json:"id,omitempty"`
 	Key        *string                 `json:"key,omitempty"`
 
+	// Kind Canonical schema name for this memory row (e.g. "default/v1"). Always non-empty.
+	Kind string `json:"kind"`
+
 	// MatchedQueries Attribution — purposes (or texts) of all queries that matched this item. Present only in multi-query responses.
 	MatchedQueries *[]string               `json:"matchedQueries,omitempty"`
 	Namespace      *[]string               `json:"namespace,omitempty"`
@@ -551,6 +602,10 @@ type AdminSearchMemoriesRequest struct {
 	Justification *string                             `json:"justification,omitempty"`
 	KeyPrefix     *string                             `json:"key_prefix,omitempty"`
 
+	// Kind Optional schema selector. An exact canonical name searches that version only.
+	// A family name searches all versions in that family. Omission searches all schemas.
+	Kind *string `json:"kind,omitempty"`
+
 	// Limit Maximum number of results to return. The server may enforce a lower configured maximum.
 	Limit           *int      `json:"limit,omitempty"`
 	NamespacePrefix *[]string `json:"namespace_prefix,omitempty"`
@@ -563,6 +618,10 @@ type AdminSearchMemoriesRequest struct {
 
 	// Query Single semantic search string. Mutually exclusive with queries.
 	Query *string `json:"query,omitempty"`
+
+	// Sort One-field typed sort for attribute-only memory searches. Rejected when query or queries
+	// is present (semantic results are ordered by similarity score).
+	Sort *MemoryAttributeSort `json:"sort,omitempty"`
 }
 
 // AdminSearchMemoriesRequestArchived defines model for AdminSearchMemoriesRequest.Archived.
@@ -654,6 +713,32 @@ type ConversationMembership struct {
 	UserId         *string    `json:"userId,omitempty"`
 }
 
+// CreateMemoryKindMigrationRequest defines model for CreateMemoryKindMigrationRequest.
+type CreateMemoryKindMigrationRequest struct {
+	// NamespacePrefix Optional namespace scope restriction.
+	NamespacePrefix *[]string `json:"namespace_prefix,omitempty"`
+
+	// Source Source schema version canonical name.
+	Source string `json:"source"`
+
+	// Target Target schema version canonical name.
+	Target string `json:"target"`
+}
+
+// CreateMemoryKindVersionRequest defines model for CreateMemoryKindVersionRequest.
+type CreateMemoryKindVersionRequest struct {
+	Attributes map[string]string `json:"attributes"`
+
+	// Name Canonical schema name (family/version).
+	Name string `json:"name"`
+
+	// ProjectionRego OPA Rego source for `package memories.attributes`.
+	ProjectionRego string `json:"projectionRego"`
+
+	// Writable Whether new writes may use this immutable version. Defaults to true when omitted.
+	Writable *bool `json:"writable,omitempty"`
+}
+
 // Entry defines model for Entry.
 type Entry struct {
 	// Channel Logical channel of the entry within the conversation.
@@ -730,10 +815,32 @@ type LabeledTimeSeries struct {
 	Label string `json:"label"`
 }
 
+// ListMemoryKindMigrationsResponse defines model for ListMemoryKindMigrationsResponse.
+type ListMemoryKindMigrationsResponse struct {
+	Items *[]MemoryKindMigration `json:"items,omitempty"`
+}
+
+// ListMemoryKindVersionsResponse defines model for ListMemoryKindVersionsResponse.
+type ListMemoryKindVersionsResponse struct {
+	Items *[]MemoryKindVersion `json:"items,omitempty"`
+}
+
 // ListTopMemoryUsageResponse defines model for ListTopMemoryUsageResponse.
 type ListTopMemoryUsageResponse struct {
 	Items *[]TopMemoryUsageItem `json:"items,omitempty"`
 }
+
+// MemoryAttributeSort One-field typed sort for attribute-only memory searches. Rejected when query or queries
+// is present (semantic results are ordered by similarity score).
+type MemoryAttributeSort struct {
+	Direction *MemoryAttributeSortDirection `json:"direction,omitempty"`
+
+	// Field The attribute name to sort by. Must be declared in the selected schema(s).
+	Field string `json:"field"`
+}
+
+// MemoryAttributeSortDirection defines model for MemoryAttributeSort.Direction.
+type MemoryAttributeSortDirection string
 
 // MemoryIndexRunStats defines model for MemoryIndexRunStats.
 type MemoryIndexRunStats struct {
@@ -758,16 +865,47 @@ type MemoryIndexTriggerResponse struct {
 	Triggered *bool                `json:"triggered,omitempty"`
 }
 
-// MemoryPolicyBundle defines model for MemoryPolicyBundle.
-type MemoryPolicyBundle struct {
-	// Attributes Rego source for `package memories.attributes`.
-	Attributes string `json:"attributes"`
+// MemoryKindMigration defines model for MemoryKindMigration.
+type MemoryKindMigration struct {
+	CancelRequested *bool               `json:"cancel_requested,omitempty"`
+	CompletedAt     *time.Time          `json:"completed_at,omitempty"`
+	CreatedAt       *time.Time          `json:"created_at,omitempty"`
+	Id              *openapi_types.UUID `json:"id,omitempty"`
+	LastErrorCode   *string             `json:"last_error_code,omitempty"`
+	MigratedCount   *int64              `json:"migrated_count,omitempty"`
 
-	// Authz Rego source for `package memories.authz`.
-	Authz string `json:"authz"`
+	// NamespacePrefix Optional namespace scope restriction.
+	NamespacePrefix       *[]string `json:"namespace_prefix,omitempty"`
+	RetryCount            *int      `json:"retry_count,omitempty"`
+	SkippedTombstoneCount *int64    `json:"skipped_tombstone_count,omitempty"`
 
-	// Filter Rego source for `package memories.filter`.
-	Filter string `json:"filter"`
+	// Source Source schema version canonical name.
+	Source    *string                   `json:"source,omitempty"`
+	StartedAt *time.Time                `json:"started_at,omitempty"`
+	State     *MemoryKindMigrationState `json:"state,omitempty"`
+
+	// Target Target schema version canonical name.
+	Target             *string `json:"target,omitempty"`
+	VectorPendingCount *int64  `json:"vector_pending_count,omitempty"`
+}
+
+// MemoryKindMigrationState defines model for MemoryKindMigration.State.
+type MemoryKindMigrationState string
+
+// MemoryKindVersion defines model for MemoryKindVersion.
+type MemoryKindVersion struct {
+	// Attributes Declared type for each attribute the Rego program may return. Allowed type values: string, number, boolean, timestamp, string[].
+	Attributes *map[string]string `json:"attributes,omitempty"`
+	CreatedAt  *time.Time         `json:"createdAt,omitempty"`
+
+	// Name Canonical schema name (family/version), e.g. "customer-profile/v2".
+	Name *string `json:"name,omitempty"`
+
+	// ProjectionRego OPA Rego source for `package memories.attributes`. Present on definition endpoints only.
+	ProjectionRego *string `json:"projectionRego,omitempty"`
+
+	// Writable When false the version is not writable (e.g. a deprecated version set to read-only).
+	Writable *bool `json:"writable,omitempty"`
 }
 
 // MemoryUsageResponse defines model for MemoryUsageResponse.
@@ -783,8 +921,11 @@ type MemoryWriteResult struct {
 	ExpiresAt  *time.Time              `json:"expiresAt,omitempty"`
 	Id         *openapi_types.UUID     `json:"id,omitempty"`
 	Key        *string                 `json:"key,omitempty"`
-	Namespace  *[]string               `json:"namespace,omitempty"`
-	Revision   *int64                  `json:"revision,omitempty"`
+
+	// Kind Exact canonical schema name used for this write (e.g. "default/v1").
+	Kind      string    `json:"kind"`
+	Namespace *[]string `json:"namespace,omitempty"`
+	Revision  *int64    `json:"revision,omitempty"`
 }
 
 // MultiSeriesResponse Multi-series time series data for metrics grouped by a label (e.g., operation type).
@@ -802,12 +943,16 @@ type MultiSeriesResponse struct {
 // PutMemoryRequest defines model for PutMemoryRequest.
 type PutMemoryRequest struct {
 	// ExpectedRevision Optional optimistic concurrency revision expected for the active memory.
-	ExpectedRevision *int64                 `json:"expected_revision,omitempty"`
-	Index            *map[string]string     `json:"index,omitempty"`
-	Key              string                 `json:"key"`
-	Namespace        []string               `json:"namespace"`
-	TtlSeconds       *int                   `json:"ttl_seconds,omitempty"`
-	Value            map[string]interface{} `json:"value"`
+	ExpectedRevision *int64             `json:"expected_revision,omitempty"`
+	Index            *map[string]string `json:"index,omitempty"`
+	Key              string             `json:"key"`
+
+	// Kind Optional exact canonical schema name ("profile/v2"). Omission always uses
+	// the fixed built-in "default/v1" kind.
+	Kind       *string                `json:"kind,omitempty"`
+	Namespace  []string               `json:"namespace"`
+	TtlSeconds *int                   `json:"ttl_seconds,omitempty"`
+	Value      map[string]interface{} `json:"value"`
 }
 
 // SearchResult defines model for SearchResult.
@@ -894,7 +1039,13 @@ type AdminListMemoriesParams struct {
 	IncludeUsage    *bool                            `form:"includeUsage,omitempty" json:"includeUsage,omitempty"`
 	Limit           *int                             `form:"limit,omitempty" json:"limit,omitempty"`
 	AfterCursor     *string                          `form:"afterCursor,omitempty" json:"afterCursor,omitempty"`
-	Justification   *string                          `form:"justification,omitempty" json:"justification,omitempty"`
+
+	// Kind Optional memory kind selector. Exact canonical name (e.g. default/v1), family name (e.g. default), or omit for all kinds.
+	Kind *string `form:"kind,omitempty" json:"kind,omitempty"`
+
+	// Filter Optional JSON-encoded projected-attribute filter object (same format as AdminSearch filter body field).
+	Filter        *string `form:"filter,omitempty" json:"filter,omitempty"`
+	Justification *string `form:"justification,omitempty" json:"justification,omitempty"`
 }
 
 // AdminListMemoriesParamsArchived defines parameters for AdminListMemories.
@@ -916,6 +1067,45 @@ type AdminPutMemoryParams struct {
 // AdminGetMemoryParams defines parameters for AdminGetMemory.
 type AdminGetMemoryParams struct {
 	IncludeUsage  *bool   `form:"includeUsage,omitempty" json:"includeUsage,omitempty"`
+	Justification *string `form:"justification,omitempty" json:"justification,omitempty"`
+}
+
+// AdminListMemoryKindMigrationsParams defines parameters for AdminListMemoryKindMigrations.
+type AdminListMemoryKindMigrationsParams struct {
+	// State Filter by state (queued, running, canceling, succeeded, failed, canceled).
+	State         *string `form:"state,omitempty" json:"state,omitempty"`
+	Justification *string `form:"justification,omitempty" json:"justification,omitempty"`
+}
+
+// AdminCreateMemoryKindMigrationParams defines parameters for AdminCreateMemoryKindMigration.
+type AdminCreateMemoryKindMigrationParams struct {
+	Justification *string `form:"justification,omitempty" json:"justification,omitempty"`
+}
+
+// AdminCancelMemoryKindMigrationParams defines parameters for AdminCancelMemoryKindMigration.
+type AdminCancelMemoryKindMigrationParams struct {
+	Justification *string `form:"justification,omitempty" json:"justification,omitempty"`
+}
+
+// AdminGetMemoryKindMigrationParams defines parameters for AdminGetMemoryKindMigration.
+type AdminGetMemoryKindMigrationParams struct {
+	Justification *string `form:"justification,omitempty" json:"justification,omitempty"`
+}
+
+// AdminListMemoryKindVersionsParams defines parameters for AdminListMemoryKindVersions.
+type AdminListMemoryKindVersionsParams struct {
+	// Family Filter by schema family name.
+	Family        *string `form:"family,omitempty" json:"family,omitempty"`
+	Justification *string `form:"justification,omitempty" json:"justification,omitempty"`
+}
+
+// AdminCreateMemoryKindVersionParams defines parameters for AdminCreateMemoryKindVersion.
+type AdminCreateMemoryKindVersionParams struct {
+	Justification *string `form:"justification,omitempty" json:"justification,omitempty"`
+}
+
+// AdminGetMemoryKindVersionParams defines parameters for AdminGetMemoryKindVersion.
+type AdminGetMemoryKindVersionParams struct {
 	Justification *string `form:"justification,omitempty" json:"justification,omitempty"`
 }
 
@@ -1269,8 +1459,11 @@ type AdminPutMemoryJSONRequestBody = PutMemoryRequest
 // AdminSearchMemoriesJSONRequestBody defines body for AdminSearchMemories for application/json ContentType.
 type AdminSearchMemoriesJSONRequestBody = AdminSearchMemoriesRequest
 
-// AdminPutMemoryPoliciesJSONRequestBody defines body for AdminPutMemoryPolicies for application/json ContentType.
-type AdminPutMemoryPoliciesJSONRequestBody = MemoryPolicyBundle
+// AdminCreateMemoryKindMigrationJSONRequestBody defines body for AdminCreateMemoryKindMigration for application/json ContentType.
+type AdminCreateMemoryKindMigrationJSONRequestBody = CreateMemoryKindMigrationRequest
+
+// AdminCreateMemoryKindVersionJSONRequestBody defines body for AdminCreateMemoryKindVersion for application/json ContentType.
+type AdminCreateMemoryKindVersionJSONRequestBody = CreateMemoryKindVersionRequest
 
 // AdminDeleteAttachmentJSONRequestBody defines body for AdminDeleteAttachment for application/json ContentType.
 type AdminDeleteAttachmentJSONRequestBody = AdminActionRequest
@@ -1313,15 +1506,30 @@ type ServerInterface interface {
 	// AdminTriggerMemoryIndex Trigger one episodic memory indexing cycle
 	// (POST /admin/v1/memory-index/trigger)
 	AdminTriggerMemoryIndex(c *gin.Context)
+	// AdminListMemoryKindMigrations List memory schema migrations
+	// (GET /admin/v1/memory-kind-migrations)
+	AdminListMemoryKindMigrations(c *gin.Context, params AdminListMemoryKindMigrationsParams)
+	// AdminCreateMemoryKindMigration Create a memory schema migration
+	// (POST /admin/v1/memory-kind-migrations)
+	AdminCreateMemoryKindMigration(c *gin.Context, params AdminCreateMemoryKindMigrationParams)
+	// AdminCancelMemoryKindMigration Request cancellation of a migration
+	// (DELETE /admin/v1/memory-kind-migrations/{id})
+	AdminCancelMemoryKindMigration(c *gin.Context, id openapi_types.UUID, params AdminCancelMemoryKindMigrationParams)
+	// AdminGetMemoryKindMigration Get a memory schema migration
+	// (GET /admin/v1/memory-kind-migrations/{id})
+	AdminGetMemoryKindMigration(c *gin.Context, id openapi_types.UUID, params AdminGetMemoryKindMigrationParams)
+	// AdminListMemoryKindVersions List memory schema versions
+	// (GET /admin/v1/memory-kinds)
+	AdminListMemoryKindVersions(c *gin.Context, params AdminListMemoryKindVersionsParams)
+	// AdminCreateMemoryKindVersion Create an immutable memory schema version
+	// (POST /admin/v1/memory-kinds)
+	AdminCreateMemoryKindVersion(c *gin.Context, params AdminCreateMemoryKindVersionParams)
+	// AdminGetMemoryKindVersion Get a memory schema version
+	// (GET /admin/v1/memory-kinds/{family}/{version})
+	AdminGetMemoryKindVersion(c *gin.Context, family string, version string, params AdminGetMemoryKindVersionParams)
 	// AdminListMemoryNamespaces List episodic memory namespaces across users
 	// (GET /admin/v1/memory-namespaces)
 	AdminListMemoryNamespaces(c *gin.Context, params AdminListMemoryNamespacesParams)
-	// AdminGetMemoryPolicies Download active episodic memory policy bundle
-	// (GET /admin/v1/memory-policies)
-	AdminGetMemoryPolicies(c *gin.Context)
-	// AdminPutMemoryPolicies Upload episodic memory policy bundle
-	// (PUT /admin/v1/memory-policies)
-	AdminPutMemoryPolicies(c *gin.Context)
 	// AdminGetMemoryUsage Get episodic memory usage for a single key
 	// (GET /admin/v1/memory-usage)
 	AdminGetMemoryUsage(c *gin.Context, params AdminGetMemoryUsageParams)
@@ -1498,6 +1706,22 @@ func (siw *ServerInterfaceWrapper) AdminListMemories(c *gin.Context) {
 	err = runtime.BindQueryParameterWithOptions("form", true, false, "afterCursor", c.Request.URL.Query(), &params.AfterCursor, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
 	if err != nil {
 		siw.ErrorHandler(c, fmt.Errorf("Invalid format for parameter afterCursor: %w", err), http.StatusBadRequest)
+		return
+	}
+
+	// ------------- Optional query parameter "kind" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "kind", c.Request.URL.Query(), &params.Kind, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandler(c, fmt.Errorf("Invalid format for parameter kind: %w", err), http.StatusBadRequest)
+		return
+	}
+
+	// ------------- Optional query parameter "filter" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "filter", c.Request.URL.Query(), &params.Filter, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandler(c, fmt.Errorf("Invalid format for parameter filter: %w", err), http.StatusBadRequest)
 		return
 	}
 
@@ -1697,6 +1921,247 @@ func (siw *ServerInterfaceWrapper) AdminTriggerMemoryIndex(c *gin.Context) {
 	siw.Handler.AdminTriggerMemoryIndex(c)
 }
 
+// AdminListMemoryKindMigrations operation middleware
+func (siw *ServerInterfaceWrapper) AdminListMemoryKindMigrations(c *gin.Context) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params AdminListMemoryKindMigrationsParams
+
+	// ------------- Optional query parameter "state" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "state", c.Request.URL.Query(), &params.State, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandler(c, fmt.Errorf("Invalid format for parameter state: %w", err), http.StatusBadRequest)
+		return
+	}
+
+	// ------------- Optional query parameter "justification" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "justification", c.Request.URL.Query(), &params.Justification, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandler(c, fmt.Errorf("Invalid format for parameter justification: %w", err), http.StatusBadRequest)
+		return
+	}
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		middleware(c)
+		if c.IsAborted() {
+			return
+		}
+	}
+
+	siw.Handler.AdminListMemoryKindMigrations(c, params)
+}
+
+// AdminCreateMemoryKindMigration operation middleware
+func (siw *ServerInterfaceWrapper) AdminCreateMemoryKindMigration(c *gin.Context) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params AdminCreateMemoryKindMigrationParams
+
+	// ------------- Optional query parameter "justification" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "justification", c.Request.URL.Query(), &params.Justification, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandler(c, fmt.Errorf("Invalid format for parameter justification: %w", err), http.StatusBadRequest)
+		return
+	}
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		middleware(c)
+		if c.IsAborted() {
+			return
+		}
+	}
+
+	siw.Handler.AdminCreateMemoryKindMigration(c, params)
+}
+
+// AdminCancelMemoryKindMigration operation middleware
+func (siw *ServerInterfaceWrapper) AdminCancelMemoryKindMigration(c *gin.Context) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id openapi_types.UUID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", c.Param("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandler(c, fmt.Errorf("Invalid format for parameter id: %w", err), http.StatusBadRequest)
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params AdminCancelMemoryKindMigrationParams
+
+	// ------------- Optional query parameter "justification" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "justification", c.Request.URL.Query(), &params.Justification, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandler(c, fmt.Errorf("Invalid format for parameter justification: %w", err), http.StatusBadRequest)
+		return
+	}
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		middleware(c)
+		if c.IsAborted() {
+			return
+		}
+	}
+
+	siw.Handler.AdminCancelMemoryKindMigration(c, id, params)
+}
+
+// AdminGetMemoryKindMigration operation middleware
+func (siw *ServerInterfaceWrapper) AdminGetMemoryKindMigration(c *gin.Context) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id openapi_types.UUID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", c.Param("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandler(c, fmt.Errorf("Invalid format for parameter id: %w", err), http.StatusBadRequest)
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params AdminGetMemoryKindMigrationParams
+
+	// ------------- Optional query parameter "justification" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "justification", c.Request.URL.Query(), &params.Justification, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandler(c, fmt.Errorf("Invalid format for parameter justification: %w", err), http.StatusBadRequest)
+		return
+	}
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		middleware(c)
+		if c.IsAborted() {
+			return
+		}
+	}
+
+	siw.Handler.AdminGetMemoryKindMigration(c, id, params)
+}
+
+// AdminListMemoryKindVersions operation middleware
+func (siw *ServerInterfaceWrapper) AdminListMemoryKindVersions(c *gin.Context) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params AdminListMemoryKindVersionsParams
+
+	// ------------- Optional query parameter "family" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "family", c.Request.URL.Query(), &params.Family, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandler(c, fmt.Errorf("Invalid format for parameter family: %w", err), http.StatusBadRequest)
+		return
+	}
+
+	// ------------- Optional query parameter "justification" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "justification", c.Request.URL.Query(), &params.Justification, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandler(c, fmt.Errorf("Invalid format for parameter justification: %w", err), http.StatusBadRequest)
+		return
+	}
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		middleware(c)
+		if c.IsAborted() {
+			return
+		}
+	}
+
+	siw.Handler.AdminListMemoryKindVersions(c, params)
+}
+
+// AdminCreateMemoryKindVersion operation middleware
+func (siw *ServerInterfaceWrapper) AdminCreateMemoryKindVersion(c *gin.Context) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params AdminCreateMemoryKindVersionParams
+
+	// ------------- Optional query parameter "justification" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "justification", c.Request.URL.Query(), &params.Justification, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandler(c, fmt.Errorf("Invalid format for parameter justification: %w", err), http.StatusBadRequest)
+		return
+	}
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		middleware(c)
+		if c.IsAborted() {
+			return
+		}
+	}
+
+	siw.Handler.AdminCreateMemoryKindVersion(c, params)
+}
+
+// AdminGetMemoryKindVersion operation middleware
+func (siw *ServerInterfaceWrapper) AdminGetMemoryKindVersion(c *gin.Context) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "family" -------------
+	var family string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "family", c.Param("family"), &family, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandler(c, fmt.Errorf("Invalid format for parameter family: %w", err), http.StatusBadRequest)
+		return
+	}
+
+	// ------------- Path parameter "version" -------------
+	var version string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "version", c.Param("version"), &version, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandler(c, fmt.Errorf("Invalid format for parameter version: %w", err), http.StatusBadRequest)
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params AdminGetMemoryKindVersionParams
+
+	// ------------- Optional query parameter "justification" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "justification", c.Request.URL.Query(), &params.Justification, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandler(c, fmt.Errorf("Invalid format for parameter justification: %w", err), http.StatusBadRequest)
+		return
+	}
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		middleware(c)
+		if c.IsAborted() {
+			return
+		}
+	}
+
+	siw.Handler.AdminGetMemoryKindVersion(c, family, version, params)
+}
+
 // AdminListMemoryNamespaces operation middleware
 func (siw *ServerInterfaceWrapper) AdminListMemoryNamespaces(c *gin.Context) {
 
@@ -1770,32 +2235,6 @@ func (siw *ServerInterfaceWrapper) AdminListMemoryNamespaces(c *gin.Context) {
 	}
 
 	siw.Handler.AdminListMemoryNamespaces(c, params)
-}
-
-// AdminGetMemoryPolicies operation middleware
-func (siw *ServerInterfaceWrapper) AdminGetMemoryPolicies(c *gin.Context) {
-
-	for _, middleware := range siw.HandlerMiddlewares {
-		middleware(c)
-		if c.IsAborted() {
-			return
-		}
-	}
-
-	siw.Handler.AdminGetMemoryPolicies(c)
-}
-
-// AdminPutMemoryPolicies operation middleware
-func (siw *ServerInterfaceWrapper) AdminPutMemoryPolicies(c *gin.Context) {
-
-	for _, middleware := range siw.HandlerMiddlewares {
-		middleware(c)
-		if c.IsAborted() {
-			return
-		}
-	}
-
-	siw.Handler.AdminPutMemoryPolicies(c)
 }
 
 // AdminGetMemoryUsage operation middleware
@@ -3067,8 +3506,13 @@ func RegisterHandlersWithOptions(router gin.IRouter, si ServerInterface, options
 	router.PUT(options.BaseURL+"/admin/v1/memories", wrapper.AdminPutMemory)
 	router.POST(options.BaseURL+"/admin/v1/memories/search", wrapper.AdminSearchMemories)
 	router.GET(options.BaseURL+"/admin/v1/memory-namespaces", wrapper.AdminListMemoryNamespaces)
-	router.GET(options.BaseURL+"/admin/v1/memory-policies", wrapper.AdminGetMemoryPolicies)
-	router.PUT(options.BaseURL+"/admin/v1/memory-policies", wrapper.AdminPutMemoryPolicies)
+	router.GET(options.BaseURL+"/admin/v1/memory-kinds", wrapper.AdminListMemoryKindVersions)
+	router.POST(options.BaseURL+"/admin/v1/memory-kinds", wrapper.AdminCreateMemoryKindVersion)
+	router.GET(options.BaseURL+"/admin/v1/memory-kinds/:family/:version", wrapper.AdminGetMemoryKindVersion)
+	router.GET(options.BaseURL+"/admin/v1/memory-kind-migrations", wrapper.AdminListMemoryKindMigrations)
+	router.POST(options.BaseURL+"/admin/v1/memory-kind-migrations", wrapper.AdminCreateMemoryKindMigration)
+	router.DELETE(options.BaseURL+"/admin/v1/memory-kind-migrations/:id", wrapper.AdminCancelMemoryKindMigration)
+	router.GET(options.BaseURL+"/admin/v1/memory-kind-migrations/:id", wrapper.AdminGetMemoryKindMigration)
 	router.DELETE(options.BaseURL+"/admin/v1/memories/:id", wrapper.AdminDeleteMemory)
 	router.GET(options.BaseURL+"/admin/v1/memories/:id", wrapper.AdminGetMemory)
 	router.GET(options.BaseURL+"/v1/admin/entries/:id", wrapper.AdminGetEntry)
@@ -3438,6 +3882,321 @@ func (response AdminTriggerMemoryIndexdefaultJSONResponse) VisitAdminTriggerMemo
 	return err
 }
 
+type AdminListMemoryKindMigrationsRequestObject struct {
+	Params AdminListMemoryKindMigrationsParams
+}
+
+type AdminListMemoryKindMigrationsResponseObject interface {
+	VisitAdminListMemoryKindMigrationsResponse(w http.ResponseWriter) error
+}
+
+type AdminListMemoryKindMigrations200JSONResponse ListMemoryKindMigrationsResponse
+
+func (response AdminListMemoryKindMigrations200JSONResponse) VisitAdminListMemoryKindMigrationsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AdminListMemoryKindMigrationsdefaultJSONResponse struct {
+	Body       ErrorResponse
+	StatusCode int
+}
+
+func (response AdminListMemoryKindMigrationsdefaultJSONResponse) VisitAdminListMemoryKindMigrationsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AdminCreateMemoryKindMigrationRequestObject struct {
+	Params AdminCreateMemoryKindMigrationParams
+	Body   *AdminCreateMemoryKindMigrationJSONRequestBody
+}
+
+type AdminCreateMemoryKindMigrationResponseObject interface {
+	VisitAdminCreateMemoryKindMigrationResponse(w http.ResponseWriter) error
+}
+
+type AdminCreateMemoryKindMigration200JSONResponse MemoryKindMigration
+
+func (response AdminCreateMemoryKindMigration200JSONResponse) VisitAdminCreateMemoryKindMigrationResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AdminCreateMemoryKindMigration409JSONResponse struct{ ErrorJSONResponse }
+
+func (response AdminCreateMemoryKindMigration409JSONResponse) VisitAdminCreateMemoryKindMigrationResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(409)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AdminCreateMemoryKindMigrationdefaultJSONResponse struct {
+	Body       ErrorResponse
+	StatusCode int
+}
+
+func (response AdminCreateMemoryKindMigrationdefaultJSONResponse) VisitAdminCreateMemoryKindMigrationResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AdminCancelMemoryKindMigrationRequestObject struct {
+	Id     openapi_types.UUID `json:"id"`
+	Params AdminCancelMemoryKindMigrationParams
+}
+
+type AdminCancelMemoryKindMigrationResponseObject interface {
+	VisitAdminCancelMemoryKindMigrationResponse(w http.ResponseWriter) error
+}
+
+type AdminCancelMemoryKindMigration204Response struct {
+}
+
+func (response AdminCancelMemoryKindMigration204Response) VisitAdminCancelMemoryKindMigrationResponse(w http.ResponseWriter) error {
+	w.WriteHeader(204)
+	return nil
+}
+
+type AdminCancelMemoryKindMigration404JSONResponse struct{ NotFoundJSONResponse }
+
+func (response AdminCancelMemoryKindMigration404JSONResponse) VisitAdminCancelMemoryKindMigrationResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AdminCancelMemoryKindMigrationdefaultJSONResponse struct {
+	Body       ErrorResponse
+	StatusCode int
+}
+
+func (response AdminCancelMemoryKindMigrationdefaultJSONResponse) VisitAdminCancelMemoryKindMigrationResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AdminGetMemoryKindMigrationRequestObject struct {
+	Id     openapi_types.UUID `json:"id"`
+	Params AdminGetMemoryKindMigrationParams
+}
+
+type AdminGetMemoryKindMigrationResponseObject interface {
+	VisitAdminGetMemoryKindMigrationResponse(w http.ResponseWriter) error
+}
+
+type AdminGetMemoryKindMigration200JSONResponse MemoryKindMigration
+
+func (response AdminGetMemoryKindMigration200JSONResponse) VisitAdminGetMemoryKindMigrationResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AdminGetMemoryKindMigrationdefaultJSONResponse struct {
+	Body       ErrorResponse
+	StatusCode int
+}
+
+func (response AdminGetMemoryKindMigrationdefaultJSONResponse) VisitAdminGetMemoryKindMigrationResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AdminListMemoryKindVersionsRequestObject struct {
+	Params AdminListMemoryKindVersionsParams
+}
+
+type AdminListMemoryKindVersionsResponseObject interface {
+	VisitAdminListMemoryKindVersionsResponse(w http.ResponseWriter) error
+}
+
+type AdminListMemoryKindVersions200JSONResponse ListMemoryKindVersionsResponse
+
+func (response AdminListMemoryKindVersions200JSONResponse) VisitAdminListMemoryKindVersionsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AdminListMemoryKindVersionsdefaultJSONResponse struct {
+	Body       ErrorResponse
+	StatusCode int
+}
+
+func (response AdminListMemoryKindVersionsdefaultJSONResponse) VisitAdminListMemoryKindVersionsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AdminCreateMemoryKindVersionRequestObject struct {
+	Params AdminCreateMemoryKindVersionParams
+	Body   *AdminCreateMemoryKindVersionJSONRequestBody
+}
+
+type AdminCreateMemoryKindVersionResponseObject interface {
+	VisitAdminCreateMemoryKindVersionResponse(w http.ResponseWriter) error
+}
+
+type AdminCreateMemoryKindVersion200JSONResponse MemoryKindVersion
+
+func (response AdminCreateMemoryKindVersion200JSONResponse) VisitAdminCreateMemoryKindVersionResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AdminCreateMemoryKindVersion409JSONResponse struct{ ErrorJSONResponse }
+
+func (response AdminCreateMemoryKindVersion409JSONResponse) VisitAdminCreateMemoryKindVersionResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(409)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AdminCreateMemoryKindVersiondefaultJSONResponse struct {
+	Body       ErrorResponse
+	StatusCode int
+}
+
+func (response AdminCreateMemoryKindVersiondefaultJSONResponse) VisitAdminCreateMemoryKindVersionResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AdminGetMemoryKindVersionRequestObject struct {
+	Family  string `json:"family"`
+	Version string `json:"version"`
+	Params  AdminGetMemoryKindVersionParams
+}
+
+type AdminGetMemoryKindVersionResponseObject interface {
+	VisitAdminGetMemoryKindVersionResponse(w http.ResponseWriter) error
+}
+
+type AdminGetMemoryKindVersion200JSONResponse MemoryKindVersion
+
+func (response AdminGetMemoryKindVersion200JSONResponse) VisitAdminGetMemoryKindVersionResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AdminGetMemoryKindVersiondefaultJSONResponse struct {
+	Body       ErrorResponse
+	StatusCode int
+}
+
+func (response AdminGetMemoryKindVersiondefaultJSONResponse) VisitAdminGetMemoryKindVersionResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type AdminListMemoryNamespacesRequestObject struct {
 	Params AdminListMemoryNamespacesParams
 }
@@ -3466,77 +4225,6 @@ type AdminListMemoryNamespacesdefaultJSONResponse struct {
 }
 
 func (response AdminListMemoryNamespacesdefaultJSONResponse) VisitAdminListMemoryNamespacesResponse(w http.ResponseWriter) error {
-
-	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
-		return err
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(response.StatusCode)
-	_, err := buf.WriteTo(w)
-	return err
-}
-
-type AdminGetMemoryPoliciesRequestObject struct {
-}
-
-type AdminGetMemoryPoliciesResponseObject interface {
-	VisitAdminGetMemoryPoliciesResponse(w http.ResponseWriter) error
-}
-
-type AdminGetMemoryPolicies200JSONResponse MemoryPolicyBundle
-
-func (response AdminGetMemoryPolicies200JSONResponse) VisitAdminGetMemoryPoliciesResponse(w http.ResponseWriter) error {
-
-	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(response); err != nil {
-		return err
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(200)
-	_, err := buf.WriteTo(w)
-	return err
-}
-
-type AdminGetMemoryPoliciesdefaultJSONResponse struct {
-	Body       ErrorResponse
-	StatusCode int
-}
-
-func (response AdminGetMemoryPoliciesdefaultJSONResponse) VisitAdminGetMemoryPoliciesResponse(w http.ResponseWriter) error {
-
-	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
-		return err
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(response.StatusCode)
-	_, err := buf.WriteTo(w)
-	return err
-}
-
-type AdminPutMemoryPoliciesRequestObject struct {
-	Body *AdminPutMemoryPoliciesJSONRequestBody
-}
-
-type AdminPutMemoryPoliciesResponseObject interface {
-	VisitAdminPutMemoryPoliciesResponse(w http.ResponseWriter) error
-}
-
-type AdminPutMemoryPolicies204Response struct {
-}
-
-func (response AdminPutMemoryPolicies204Response) VisitAdminPutMemoryPoliciesResponse(w http.ResponseWriter) error {
-	w.WriteHeader(204)
-	return nil
-}
-
-type AdminPutMemoryPoliciesdefaultJSONResponse struct {
-	Body       ErrorResponse
-	StatusCode int
-}
-
-func (response AdminPutMemoryPoliciesdefaultJSONResponse) VisitAdminPutMemoryPoliciesResponse(w http.ResponseWriter) error {
 
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
@@ -5264,15 +5952,30 @@ type StrictServerInterface interface {
 	// AdminTriggerMemoryIndex Trigger one episodic memory indexing cycle
 	// (POST /admin/v1/memory-index/trigger)
 	AdminTriggerMemoryIndex(ctx context.Context, request AdminTriggerMemoryIndexRequestObject) (AdminTriggerMemoryIndexResponseObject, error)
+	// AdminListMemoryKindMigrations List memory schema migrations
+	// (GET /admin/v1/memory-kind-migrations)
+	AdminListMemoryKindMigrations(ctx context.Context, request AdminListMemoryKindMigrationsRequestObject) (AdminListMemoryKindMigrationsResponseObject, error)
+	// AdminCreateMemoryKindMigration Create a memory schema migration
+	// (POST /admin/v1/memory-kind-migrations)
+	AdminCreateMemoryKindMigration(ctx context.Context, request AdminCreateMemoryKindMigrationRequestObject) (AdminCreateMemoryKindMigrationResponseObject, error)
+	// AdminCancelMemoryKindMigration Request cancellation of a migration
+	// (DELETE /admin/v1/memory-kind-migrations/{id})
+	AdminCancelMemoryKindMigration(ctx context.Context, request AdminCancelMemoryKindMigrationRequestObject) (AdminCancelMemoryKindMigrationResponseObject, error)
+	// AdminGetMemoryKindMigration Get a memory schema migration
+	// (GET /admin/v1/memory-kind-migrations/{id})
+	AdminGetMemoryKindMigration(ctx context.Context, request AdminGetMemoryKindMigrationRequestObject) (AdminGetMemoryKindMigrationResponseObject, error)
+	// AdminListMemoryKindVersions List memory schema versions
+	// (GET /admin/v1/memory-kinds)
+	AdminListMemoryKindVersions(ctx context.Context, request AdminListMemoryKindVersionsRequestObject) (AdminListMemoryKindVersionsResponseObject, error)
+	// AdminCreateMemoryKindVersion Create an immutable memory schema version
+	// (POST /admin/v1/memory-kinds)
+	AdminCreateMemoryKindVersion(ctx context.Context, request AdminCreateMemoryKindVersionRequestObject) (AdminCreateMemoryKindVersionResponseObject, error)
+	// AdminGetMemoryKindVersion Get a memory schema version
+	// (GET /admin/v1/memory-kinds/{family}/{version})
+	AdminGetMemoryKindVersion(ctx context.Context, request AdminGetMemoryKindVersionRequestObject) (AdminGetMemoryKindVersionResponseObject, error)
 	// AdminListMemoryNamespaces List episodic memory namespaces across users
 	// (GET /admin/v1/memory-namespaces)
 	AdminListMemoryNamespaces(ctx context.Context, request AdminListMemoryNamespacesRequestObject) (AdminListMemoryNamespacesResponseObject, error)
-	// AdminGetMemoryPolicies Download active episodic memory policy bundle
-	// (GET /admin/v1/memory-policies)
-	AdminGetMemoryPolicies(ctx context.Context, request AdminGetMemoryPoliciesRequestObject) (AdminGetMemoryPoliciesResponseObject, error)
-	// AdminPutMemoryPolicies Upload episodic memory policy bundle
-	// (PUT /admin/v1/memory-policies)
-	AdminPutMemoryPolicies(ctx context.Context, request AdminPutMemoryPoliciesRequestObject) (AdminPutMemoryPoliciesResponseObject, error)
 	// AdminGetMemoryUsage Get episodic memory usage for a single key
 	// (GET /admin/v1/memory-usage)
 	AdminGetMemoryUsage(ctx context.Context, request AdminGetMemoryUsageRequestObject) (AdminGetMemoryUsageResponseObject, error)
@@ -5643,6 +6346,206 @@ func (sh *strictHandler) AdminTriggerMemoryIndex(ctx *gin.Context) {
 	}
 }
 
+// AdminListMemoryKindMigrations operation middleware
+func (sh *strictHandler) AdminListMemoryKindMigrations(ctx *gin.Context, params AdminListMemoryKindMigrationsParams) {
+	var request AdminListMemoryKindMigrationsRequestObject
+
+	request.Params = params
+
+	handler := func(ctx *gin.Context, request interface{}) (interface{}, error) {
+		return sh.ssi.AdminListMemoryKindMigrations(ctx, request.(AdminListMemoryKindMigrationsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "AdminListMemoryKindMigrations")
+	}
+
+	response, err := handler(ctx, request)
+
+	if err != nil {
+		sh.options.HandlerErrorFunc(ctx, err)
+	} else if validResponse, ok := response.(AdminListMemoryKindMigrationsResponseObject); ok {
+		if err := validResponse.VisitAdminListMemoryKindMigrationsResponse(ctx.Writer); err != nil {
+			sh.options.ResponseErrorHandlerFunc(ctx, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(ctx, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// AdminCreateMemoryKindMigration operation middleware
+func (sh *strictHandler) AdminCreateMemoryKindMigration(ctx *gin.Context, params AdminCreateMemoryKindMigrationParams) {
+	var request AdminCreateMemoryKindMigrationRequestObject
+
+	request.Params = params
+
+	var body AdminCreateMemoryKindMigrationJSONRequestBody
+	if err := ctx.ShouldBindJSON(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(ctx, err)
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx *gin.Context, request interface{}) (interface{}, error) {
+		return sh.ssi.AdminCreateMemoryKindMigration(ctx, request.(AdminCreateMemoryKindMigrationRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "AdminCreateMemoryKindMigration")
+	}
+
+	response, err := handler(ctx, request)
+
+	if err != nil {
+		sh.options.HandlerErrorFunc(ctx, err)
+	} else if validResponse, ok := response.(AdminCreateMemoryKindMigrationResponseObject); ok {
+		if err := validResponse.VisitAdminCreateMemoryKindMigrationResponse(ctx.Writer); err != nil {
+			sh.options.ResponseErrorHandlerFunc(ctx, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(ctx, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// AdminCancelMemoryKindMigration operation middleware
+func (sh *strictHandler) AdminCancelMemoryKindMigration(ctx *gin.Context, id openapi_types.UUID, params AdminCancelMemoryKindMigrationParams) {
+	var request AdminCancelMemoryKindMigrationRequestObject
+
+	request.Id = id
+	request.Params = params
+
+	handler := func(ctx *gin.Context, request interface{}) (interface{}, error) {
+		return sh.ssi.AdminCancelMemoryKindMigration(ctx, request.(AdminCancelMemoryKindMigrationRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "AdminCancelMemoryKindMigration")
+	}
+
+	response, err := handler(ctx, request)
+
+	if err != nil {
+		sh.options.HandlerErrorFunc(ctx, err)
+	} else if validResponse, ok := response.(AdminCancelMemoryKindMigrationResponseObject); ok {
+		if err := validResponse.VisitAdminCancelMemoryKindMigrationResponse(ctx.Writer); err != nil {
+			sh.options.ResponseErrorHandlerFunc(ctx, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(ctx, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// AdminGetMemoryKindMigration operation middleware
+func (sh *strictHandler) AdminGetMemoryKindMigration(ctx *gin.Context, id openapi_types.UUID, params AdminGetMemoryKindMigrationParams) {
+	var request AdminGetMemoryKindMigrationRequestObject
+
+	request.Id = id
+	request.Params = params
+
+	handler := func(ctx *gin.Context, request interface{}) (interface{}, error) {
+		return sh.ssi.AdminGetMemoryKindMigration(ctx, request.(AdminGetMemoryKindMigrationRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "AdminGetMemoryKindMigration")
+	}
+
+	response, err := handler(ctx, request)
+
+	if err != nil {
+		sh.options.HandlerErrorFunc(ctx, err)
+	} else if validResponse, ok := response.(AdminGetMemoryKindMigrationResponseObject); ok {
+		if err := validResponse.VisitAdminGetMemoryKindMigrationResponse(ctx.Writer); err != nil {
+			sh.options.ResponseErrorHandlerFunc(ctx, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(ctx, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// AdminListMemoryKindVersions operation middleware
+func (sh *strictHandler) AdminListMemoryKindVersions(ctx *gin.Context, params AdminListMemoryKindVersionsParams) {
+	var request AdminListMemoryKindVersionsRequestObject
+
+	request.Params = params
+
+	handler := func(ctx *gin.Context, request interface{}) (interface{}, error) {
+		return sh.ssi.AdminListMemoryKindVersions(ctx, request.(AdminListMemoryKindVersionsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "AdminListMemoryKindVersions")
+	}
+
+	response, err := handler(ctx, request)
+
+	if err != nil {
+		sh.options.HandlerErrorFunc(ctx, err)
+	} else if validResponse, ok := response.(AdminListMemoryKindVersionsResponseObject); ok {
+		if err := validResponse.VisitAdminListMemoryKindVersionsResponse(ctx.Writer); err != nil {
+			sh.options.ResponseErrorHandlerFunc(ctx, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(ctx, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// AdminCreateMemoryKindVersion operation middleware
+func (sh *strictHandler) AdminCreateMemoryKindVersion(ctx *gin.Context, params AdminCreateMemoryKindVersionParams) {
+	var request AdminCreateMemoryKindVersionRequestObject
+
+	request.Params = params
+
+	var body AdminCreateMemoryKindVersionJSONRequestBody
+	if err := ctx.ShouldBindJSON(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(ctx, err)
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx *gin.Context, request interface{}) (interface{}, error) {
+		return sh.ssi.AdminCreateMemoryKindVersion(ctx, request.(AdminCreateMemoryKindVersionRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "AdminCreateMemoryKindVersion")
+	}
+
+	response, err := handler(ctx, request)
+
+	if err != nil {
+		sh.options.HandlerErrorFunc(ctx, err)
+	} else if validResponse, ok := response.(AdminCreateMemoryKindVersionResponseObject); ok {
+		if err := validResponse.VisitAdminCreateMemoryKindVersionResponse(ctx.Writer); err != nil {
+			sh.options.ResponseErrorHandlerFunc(ctx, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(ctx, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// AdminGetMemoryKindVersion operation middleware
+func (sh *strictHandler) AdminGetMemoryKindVersion(ctx *gin.Context, family string, version string, params AdminGetMemoryKindVersionParams) {
+	var request AdminGetMemoryKindVersionRequestObject
+
+	request.Family = family
+	request.Version = version
+	request.Params = params
+
+	handler := func(ctx *gin.Context, request interface{}) (interface{}, error) {
+		return sh.ssi.AdminGetMemoryKindVersion(ctx, request.(AdminGetMemoryKindVersionRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "AdminGetMemoryKindVersion")
+	}
+
+	response, err := handler(ctx, request)
+
+	if err != nil {
+		sh.options.HandlerErrorFunc(ctx, err)
+	} else if validResponse, ok := response.(AdminGetMemoryKindVersionResponseObject); ok {
+		if err := validResponse.VisitAdminGetMemoryKindVersionResponse(ctx.Writer); err != nil {
+			sh.options.ResponseErrorHandlerFunc(ctx, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(ctx, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
 // AdminListMemoryNamespaces operation middleware
 func (sh *strictHandler) AdminListMemoryNamespaces(ctx *gin.Context, params AdminListMemoryNamespacesParams) {
 	var request AdminListMemoryNamespacesRequestObject
@@ -5662,61 +6565,6 @@ func (sh *strictHandler) AdminListMemoryNamespaces(ctx *gin.Context, params Admi
 		sh.options.HandlerErrorFunc(ctx, err)
 	} else if validResponse, ok := response.(AdminListMemoryNamespacesResponseObject); ok {
 		if err := validResponse.VisitAdminListMemoryNamespacesResponse(ctx.Writer); err != nil {
-			sh.options.ResponseErrorHandlerFunc(ctx, err)
-		}
-	} else if response != nil {
-		sh.options.ResponseErrorHandlerFunc(ctx, fmt.Errorf("unexpected response type: %T", response))
-	}
-}
-
-// AdminGetMemoryPolicies operation middleware
-func (sh *strictHandler) AdminGetMemoryPolicies(ctx *gin.Context) {
-	var request AdminGetMemoryPoliciesRequestObject
-
-	handler := func(ctx *gin.Context, request interface{}) (interface{}, error) {
-		return sh.ssi.AdminGetMemoryPolicies(ctx, request.(AdminGetMemoryPoliciesRequestObject))
-	}
-	for _, middleware := range sh.middlewares {
-		handler = middleware(handler, "AdminGetMemoryPolicies")
-	}
-
-	response, err := handler(ctx, request)
-
-	if err != nil {
-		sh.options.HandlerErrorFunc(ctx, err)
-	} else if validResponse, ok := response.(AdminGetMemoryPoliciesResponseObject); ok {
-		if err := validResponse.VisitAdminGetMemoryPoliciesResponse(ctx.Writer); err != nil {
-			sh.options.ResponseErrorHandlerFunc(ctx, err)
-		}
-	} else if response != nil {
-		sh.options.ResponseErrorHandlerFunc(ctx, fmt.Errorf("unexpected response type: %T", response))
-	}
-}
-
-// AdminPutMemoryPolicies operation middleware
-func (sh *strictHandler) AdminPutMemoryPolicies(ctx *gin.Context) {
-	var request AdminPutMemoryPoliciesRequestObject
-
-	var body AdminPutMemoryPoliciesJSONRequestBody
-	if err := ctx.ShouldBindJSON(&body); err != nil {
-		sh.options.RequestErrorHandlerFunc(ctx, err)
-		return
-	}
-	request.Body = &body
-
-	handler := func(ctx *gin.Context, request interface{}) (interface{}, error) {
-		return sh.ssi.AdminPutMemoryPolicies(ctx, request.(AdminPutMemoryPoliciesRequestObject))
-	}
-	for _, middleware := range sh.middlewares {
-		handler = middleware(handler, "AdminPutMemoryPolicies")
-	}
-
-	response, err := handler(ctx, request)
-
-	if err != nil {
-		sh.options.HandlerErrorFunc(ctx, err)
-	} else if validResponse, ok := response.(AdminPutMemoryPoliciesResponseObject); ok {
-		if err := validResponse.VisitAdminPutMemoryPoliciesResponse(ctx.Writer); err != nil {
 			sh.options.ResponseErrorHandlerFunc(ctx, err)
 		}
 	} else if response != nil {
@@ -6529,184 +7377,207 @@ func (sh *strictHandler) GetHealth(ctx *gin.Context) {
 // const string: with thousands of chunks the chained `+` fold is several
 // times slower for the Go compiler than parsing a slice literal.
 var swaggerSpec = []string{
-	"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",
+	"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",
 }
 
 // decodeSpec returns the embedded OpenAPI spec as raw JSON bytes,

@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS schema_metadata (
 );
 
 INSERT INTO schema_metadata (key, value, updated_at)
-VALUES ('core_schema_version', '1', CURRENT_TIMESTAMP)
+VALUES ('core_schema_version', '2', CURRENT_TIMESTAMP)
 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP;
 
 CREATE TABLE IF NOT EXISTS conversation_groups (
@@ -210,6 +210,50 @@ CREATE INDEX IF NOT EXISTS idx_attachments_user_id
 CREATE INDEX IF NOT EXISTS idx_attachments_created_at_id
     ON attachments(created_at DESC, id DESC);
 
+------------------------------------------------------------
+-- Memory Schema Versions, Defaults, and Migrations (Enhancement 115)
+-- Defined BEFORE memories and memory_vectors so FK references resolve on fresh boot.
+------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS memory_kind_versions (
+    name            TEXT PRIMARY KEY,
+    attribute_types TEXT NOT NULL DEFAULT '{}',
+    attributes_rego TEXT,
+    writable        INTEGER NOT NULL DEFAULT 1,
+    created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Mutable per-family defaults were removed. Clean up the obsolete version-2 table.
+DROP TABLE IF EXISTS memory_kind_defaults;
+
+CREATE TABLE IF NOT EXISTS memory_kind_migrations (
+    id                      TEXT PRIMARY KEY,
+    source                  TEXT NOT NULL REFERENCES memory_kind_versions(name),
+    target                  TEXT NOT NULL REFERENCES memory_kind_versions(name),
+    namespace_prefix        TEXT,    -- serialized namespace array JSON (NULL = no prefix restriction)
+    state                   TEXT NOT NULL,
+    cancel_requested        INTEGER NOT NULL DEFAULT 0,
+    migrated_count          INTEGER NOT NULL DEFAULT 0,
+    skipped_tombstone_count INTEGER NOT NULL DEFAULT 0,
+    vector_pending_count    INTEGER NOT NULL DEFAULT 0,
+    retry_count             INTEGER NOT NULL DEFAULT 0,
+    last_error_code         TEXT,
+    created_at              DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    started_at              DATETIME,
+    completed_at            DATETIME,
+    CHECK (source <> target),
+    CHECK (state IN ('queued', 'running', 'canceling', 'succeeded', 'failed', 'canceled'))
+);
+
+-- Partial unique index: at most one active migration per source version.
+CREATE UNIQUE INDEX IF NOT EXISTS memory_kind_migrations_active_source_idx
+    ON memory_kind_migrations (source)
+    WHERE state IN ('queued', 'running', 'canceling');
+
+------------------------------------------------------------
+-- Namespaced Episodic Memory
+------------------------------------------------------------
+
 CREATE TABLE IF NOT EXISTS memories (
     id TEXT PRIMARY KEY,
     namespace TEXT NOT NULL,
@@ -223,17 +267,26 @@ CREATE TABLE IF NOT EXISTS memories (
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     expires_at DATETIME,
     archived_at DATETIME,
-    indexed_at DATETIME
+    indexed_at DATETIME,
+    memory_kind TEXT NOT NULL REFERENCES memory_kind_versions(name) DEFAULT 'default/v1'
 );
 
 CREATE INDEX IF NOT EXISTS idx_memories_active_lookup
     ON memories(namespace, key, archived_at);
+CREATE UNIQUE INDEX IF NOT EXISTS memories_active_idx
+    ON memories(namespace, key) WHERE archived_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_memories_pending_index
     ON memories(indexed_at, archived_at);
 CREATE INDEX IF NOT EXISTS idx_memories_expires_at
     ON memories(expires_at) WHERE expires_at IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_memories_archived_at
     ON memories(archived_at) WHERE archived_at IS NOT NULL;
+
+-- Index for migration scans and kind-filtered queries.
+CREATE INDEX IF NOT EXISTS memories_kind_version_idx
+    ON memories (memory_kind, namespace, id);
+CREATE INDEX IF NOT EXISTS memories_kind_cursor_idx
+    ON memories (memory_kind, created_at, id);
 
 CREATE TABLE IF NOT EXISTS memory_usage_stats (
     namespace TEXT NOT NULL,
@@ -246,12 +299,17 @@ CREATE TABLE IF NOT EXISTS memory_usage_stats (
 CREATE INDEX IF NOT EXISTS idx_memory_usage_last_fetched
     ON memory_usage_stats(last_fetched_at DESC);
 
+-- memory_vectors stores vector embeddings for episodic memories.
+-- memory_kind is NOT NULL: every indexed vector carries an explicit schema reference.
+-- memory_revision is positive and always compared exactly with the primary row.
 CREATE TABLE IF NOT EXISTS memory_vectors (
     memory_id TEXT NOT NULL,
     field_name TEXT NOT NULL,
     namespace TEXT NOT NULL,
     policy_attributes TEXT,
     embedding BLOB NOT NULL,
+    memory_kind TEXT NOT NULL,  -- canonical schema name at time of indexing
+    memory_revision INTEGER NOT NULL CHECK (memory_revision > 0), -- exact primary revision at indexing
     PRIMARY KEY (memory_id, field_name)
 );
 

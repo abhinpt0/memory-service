@@ -63,11 +63,13 @@ CREATE INDEX IF NOT EXISTS idx_entry_embeddings_model
 ------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS memory_vectors (
-    memory_id         UUID  NOT NULL,
-    field_name        TEXT  NOT NULL,  -- embedded field name, e.g. "text"
-    namespace         TEXT  NOT NULL,  -- RS-encoded namespace (redundant copy for prefix filtering)
-    policy_attributes JSONB,           -- redundant copy of OPA-extracted attributes for filtering
-    embedding         vector NOT NULL, -- dimension from configured embedding model
+    memory_id         UUID   NOT NULL,
+    field_name        TEXT   NOT NULL,  -- embedded field name, e.g. "text"
+    namespace         TEXT   NOT NULL,  -- RS-encoded namespace (redundant copy for prefix filtering)
+    policy_attributes JSONB,            -- redundant copy of OPA-extracted attributes for filtering
+    embedding         vector NOT NULL,  -- dimension from configured embedding model
+    memory_kind       TEXT NOT NULL,    -- canonical schema name at time of indexing; always non-empty
+    memory_revision   BIGINT NOT NULL CHECK (memory_revision > 0), -- exact primary revision at indexing
     PRIMARY KEY (memory_id, field_name)
 );
 

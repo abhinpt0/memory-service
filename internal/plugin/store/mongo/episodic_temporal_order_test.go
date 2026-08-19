@@ -27,6 +27,7 @@ func TestMongoTemporalAttributeRangeOrder(t *testing.T) {
 		Key:              "mem-earlier",
 		Value:            map[string]interface{}{"statement": "earlier fact"},
 		PolicyAttributes: map[string]interface{}{"observedAt": tsEarlier},
+		MemoryKind:       "default/v1",
 	})
 	require.NoError(t, err)
 
@@ -35,6 +36,7 @@ func TestMongoTemporalAttributeRangeOrder(t *testing.T) {
 		Key:              "mem-later",
 		Value:            map[string]interface{}{"statement": "later fact"},
 		PolicyAttributes: map[string]interface{}{"observedAt": tsLater},
+		MemoryKind:       "default/v1",
 	})
 	require.NoError(t, err)
 
@@ -44,7 +46,7 @@ func TestMongoTemporalAttributeRangeOrder(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	items, err := store.SearchMemories(ctx, ns, filter, 10, registryepisodic.ArchiveFilterExclude)
+	items, err := store.SearchMemories(ctx, registryepisodic.MemorySearchQuery{NamespacePrefix: ns, Filter: filter, Limit: 10, Archived: registryepisodic.ArchiveFilterExclude})
 	require.NoError(t, err)
 	require.Len(t, items, 1, "expected only the later memory to match $gte tsLater")
 	require.Equal(t, "mem-later", items[0].Key)
@@ -55,7 +57,7 @@ func TestMongoTemporalAttributeRangeOrder(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	items2, err := store.SearchMemories(ctx, ns, filter2, 10, registryepisodic.ArchiveFilterExclude)
+	items2, err := store.SearchMemories(ctx, registryepisodic.MemorySearchQuery{NamespacePrefix: ns, Filter: filter2, Limit: 10, Archived: registryepisodic.ArchiveFilterExclude})
 	require.NoError(t, err)
 	require.Len(t, items2, 1, "expected only the earlier memory to match $lte tsEarlier")
 	require.Equal(t, "mem-earlier", items2[0].Key)

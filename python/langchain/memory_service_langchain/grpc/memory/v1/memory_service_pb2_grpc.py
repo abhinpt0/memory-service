@@ -2405,6 +2405,336 @@ class AdminMemoriesService(object):
             _registered_method=True)
 
 
+class AdminMemoryKindServiceStub(object):
+    """Missing associated documentation comment in .proto file."""
+
+    def __init__(self, channel):
+        """Constructor.
+
+        Args:
+            channel: A grpc.Channel.
+        """
+        self.CreateMemoryKindVersion = channel.unary_unary(
+                '/memory.v1.AdminMemoryKindService/CreateMemoryKindVersion',
+                request_serializer=memory_dot_v1_dot_memory__service__pb2.CreateMemoryKindVersionRequest.SerializeToString,
+                response_deserializer=memory_dot_v1_dot_memory__service__pb2.MemoryKindVersion.FromString,
+                _registered_method=True)
+        self.ListMemoryKindVersions = channel.unary_unary(
+                '/memory.v1.AdminMemoryKindService/ListMemoryKindVersions',
+                request_serializer=memory_dot_v1_dot_memory__service__pb2.ListMemoryKindVersionsRequest.SerializeToString,
+                response_deserializer=memory_dot_v1_dot_memory__service__pb2.ListMemoryKindVersionsResponse.FromString,
+                _registered_method=True)
+        self.GetMemoryKindVersion = channel.unary_unary(
+                '/memory.v1.AdminMemoryKindService/GetMemoryKindVersion',
+                request_serializer=memory_dot_v1_dot_memory__service__pb2.GetMemoryKindVersionRequest.SerializeToString,
+                response_deserializer=memory_dot_v1_dot_memory__service__pb2.MemoryKindVersion.FromString,
+                _registered_method=True)
+        self.CreateMemoryKindMigration = channel.unary_unary(
+                '/memory.v1.AdminMemoryKindService/CreateMemoryKindMigration',
+                request_serializer=memory_dot_v1_dot_memory__service__pb2.CreateMemoryKindMigrationRequest.SerializeToString,
+                response_deserializer=memory_dot_v1_dot_memory__service__pb2.MemoryKindMigration.FromString,
+                _registered_method=True)
+        self.ListMemoryKindMigrations = channel.unary_unary(
+                '/memory.v1.AdminMemoryKindService/ListMemoryKindMigrations',
+                request_serializer=memory_dot_v1_dot_memory__service__pb2.ListMemoryKindMigrationsRequest.SerializeToString,
+                response_deserializer=memory_dot_v1_dot_memory__service__pb2.ListMemoryKindMigrationsResponse.FromString,
+                _registered_method=True)
+        self.GetMemoryKindMigration = channel.unary_unary(
+                '/memory.v1.AdminMemoryKindService/GetMemoryKindMigration',
+                request_serializer=memory_dot_v1_dot_memory__service__pb2.GetMemoryKindMigrationRequest.SerializeToString,
+                response_deserializer=memory_dot_v1_dot_memory__service__pb2.MemoryKindMigration.FromString,
+                _registered_method=True)
+        self.CancelMemoryKindMigration = channel.unary_unary(
+                '/memory.v1.AdminMemoryKindService/CancelMemoryKindMigration',
+                request_serializer=memory_dot_v1_dot_memory__service__pb2.CancelMemoryKindMigrationRequest.SerializeToString,
+                response_deserializer=google_dot_protobuf_dot_empty__pb2.Empty.FromString,
+                _registered_method=True)
+
+
+class AdminMemoryKindServiceServicer(object):
+    """Missing associated documentation comment in .proto file."""
+
+    def CreateMemoryKindVersion(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ListMemoryKindVersions(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetMemoryKindVersion(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def CreateMemoryKindMigration(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ListMemoryKindMigrations(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetMemoryKindMigration(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def CancelMemoryKindMigration(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+
+def add_AdminMemoryKindServiceServicer_to_server(servicer, server):
+    rpc_method_handlers = {
+            'CreateMemoryKindVersion': grpc.unary_unary_rpc_method_handler(
+                    servicer.CreateMemoryKindVersion,
+                    request_deserializer=memory_dot_v1_dot_memory__service__pb2.CreateMemoryKindVersionRequest.FromString,
+                    response_serializer=memory_dot_v1_dot_memory__service__pb2.MemoryKindVersion.SerializeToString,
+            ),
+            'ListMemoryKindVersions': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListMemoryKindVersions,
+                    request_deserializer=memory_dot_v1_dot_memory__service__pb2.ListMemoryKindVersionsRequest.FromString,
+                    response_serializer=memory_dot_v1_dot_memory__service__pb2.ListMemoryKindVersionsResponse.SerializeToString,
+            ),
+            'GetMemoryKindVersion': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetMemoryKindVersion,
+                    request_deserializer=memory_dot_v1_dot_memory__service__pb2.GetMemoryKindVersionRequest.FromString,
+                    response_serializer=memory_dot_v1_dot_memory__service__pb2.MemoryKindVersion.SerializeToString,
+            ),
+            'CreateMemoryKindMigration': grpc.unary_unary_rpc_method_handler(
+                    servicer.CreateMemoryKindMigration,
+                    request_deserializer=memory_dot_v1_dot_memory__service__pb2.CreateMemoryKindMigrationRequest.FromString,
+                    response_serializer=memory_dot_v1_dot_memory__service__pb2.MemoryKindMigration.SerializeToString,
+            ),
+            'ListMemoryKindMigrations': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListMemoryKindMigrations,
+                    request_deserializer=memory_dot_v1_dot_memory__service__pb2.ListMemoryKindMigrationsRequest.FromString,
+                    response_serializer=memory_dot_v1_dot_memory__service__pb2.ListMemoryKindMigrationsResponse.SerializeToString,
+            ),
+            'GetMemoryKindMigration': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetMemoryKindMigration,
+                    request_deserializer=memory_dot_v1_dot_memory__service__pb2.GetMemoryKindMigrationRequest.FromString,
+                    response_serializer=memory_dot_v1_dot_memory__service__pb2.MemoryKindMigration.SerializeToString,
+            ),
+            'CancelMemoryKindMigration': grpc.unary_unary_rpc_method_handler(
+                    servicer.CancelMemoryKindMigration,
+                    request_deserializer=memory_dot_v1_dot_memory__service__pb2.CancelMemoryKindMigrationRequest.FromString,
+                    response_serializer=google_dot_protobuf_dot_empty__pb2.Empty.SerializeToString,
+            ),
+    }
+    generic_handler = grpc.method_handlers_generic_handler(
+            'memory.v1.AdminMemoryKindService', rpc_method_handlers)
+    server.add_generic_rpc_handlers((generic_handler,))
+    server.add_registered_method_handlers('memory.v1.AdminMemoryKindService', rpc_method_handlers)
+
+
+ # This class is part of an EXPERIMENTAL API.
+class AdminMemoryKindService(object):
+    """Missing associated documentation comment in .proto file."""
+
+    @staticmethod
+    def CreateMemoryKindVersion(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/memory.v1.AdminMemoryKindService/CreateMemoryKindVersion',
+            memory_dot_v1_dot_memory__service__pb2.CreateMemoryKindVersionRequest.SerializeToString,
+            memory_dot_v1_dot_memory__service__pb2.MemoryKindVersion.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ListMemoryKindVersions(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/memory.v1.AdminMemoryKindService/ListMemoryKindVersions',
+            memory_dot_v1_dot_memory__service__pb2.ListMemoryKindVersionsRequest.SerializeToString,
+            memory_dot_v1_dot_memory__service__pb2.ListMemoryKindVersionsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetMemoryKindVersion(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/memory.v1.AdminMemoryKindService/GetMemoryKindVersion',
+            memory_dot_v1_dot_memory__service__pb2.GetMemoryKindVersionRequest.SerializeToString,
+            memory_dot_v1_dot_memory__service__pb2.MemoryKindVersion.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def CreateMemoryKindMigration(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/memory.v1.AdminMemoryKindService/CreateMemoryKindMigration',
+            memory_dot_v1_dot_memory__service__pb2.CreateMemoryKindMigrationRequest.SerializeToString,
+            memory_dot_v1_dot_memory__service__pb2.MemoryKindMigration.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ListMemoryKindMigrations(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/memory.v1.AdminMemoryKindService/ListMemoryKindMigrations',
+            memory_dot_v1_dot_memory__service__pb2.ListMemoryKindMigrationsRequest.SerializeToString,
+            memory_dot_v1_dot_memory__service__pb2.ListMemoryKindMigrationsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetMemoryKindMigration(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/memory.v1.AdminMemoryKindService/GetMemoryKindMigration',
+            memory_dot_v1_dot_memory__service__pb2.GetMemoryKindMigrationRequest.SerializeToString,
+            memory_dot_v1_dot_memory__service__pb2.MemoryKindMigration.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def CancelMemoryKindMigration(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/memory.v1.AdminMemoryKindService/CancelMemoryKindMigration',
+            memory_dot_v1_dot_memory__service__pb2.CancelMemoryKindMigrationRequest.SerializeToString,
+            google_dot_protobuf_dot_empty__pb2.Empty.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+
 class ResponseRecorderServiceStub(object):
     """Missing associated documentation comment in .proto file."""
 

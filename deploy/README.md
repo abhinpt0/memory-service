@@ -6,6 +6,7 @@ Deployment configuration and infrastructure resources for running the Memory Ser
 
 - **dev/** - Local development configs like `air.toml`
 - **docker/** - Dockerfiles for utility images plus local Docker Compose config like `prometheus.yml`
+- **episodic-policies/** - Policy import bundles; the cognition bundle is packaged into the distributed image
 - **keycloak/** - Keycloak realm configuration and database init scripts for OIDC/authentication
 - **kustomize/** - Kustomize overlays for Kubernetes deployment with composable components
 - **localstack/** - LocalStack init scripts for local S3-compatible storage

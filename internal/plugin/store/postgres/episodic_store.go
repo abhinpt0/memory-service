@@ -16,7 +16,6 @@ import (
 	"github.com/chirino/memory-service/internal/episodic"
 	episodicqdrant "github.com/chirino/memory-service/internal/plugin/store/episodicqdrant"
 	registryepisodic "github.com/chirino/memory-service/internal/registry/episodic"
-	"github.com/chirino/memory-service/internal/txscope"
 	"github.com/google/uuid"
 	pgvec "github.com/pgvector/pgvector-go"
 	"gorm.io/driver/postgres"
@@ -59,17 +58,18 @@ func init() {
 
 // postgresEpisodicStore implements registryepisodic.EpisodicStore using GORM + PostgreSQL.
 type postgresEpisodicStore struct {
-	db     *gorm.DB
-	s      *PostgresStore // for encrypt/decrypt helpers
-	qdrant *episodicqdrant.Client
+	db                    *gorm.DB
+	s                     *PostgresStore // for encrypt/decrypt helpers
+	qdrant                *episodicqdrant.Client
+	putAfterRevisionCheck func() // test-only synchronization hook
 }
 
 func (e *postgresEpisodicStore) InReadTx(ctx context.Context, fn func(context.Context) error) error {
-	return fn(txscope.WithIntent(ctx, txscope.IntentRead))
+	return e.s.InReadTx(ctx, fn)
 }
 
 func (e *postgresEpisodicStore) InWriteTx(ctx context.Context, fn func(context.Context) error) error {
-	return fn(txscope.WithIntent(ctx, txscope.IntentWrite))
+	return e.s.InWriteTx(ctx, fn)
 }
 
 // memoryRow is the GORM-level row for the memories table.
@@ -87,6 +87,7 @@ type memoryRow struct {
 	ExpiresAt        *time.Time             `gorm:"column:expires_at"`
 	ArchivedAt       *time.Time             `gorm:"column:archived_at"`
 	IndexedAt        *time.Time             `gorm:"column:indexed_at"`
+	MemoryKind       string                 `gorm:"column:memory_kind"` // always non-empty
 }
 
 func (memoryRow) TableName() string { return "memories" }
@@ -195,7 +196,12 @@ func (e *postgresEpisodicStore) PutMemory(ctx context.Context, req registryepiso
 
 	var kind int16
 	revision := int64(1)
-	err = e.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	// Use the scoped write handle so this inner transaction shares the outer scope.
+	scopedDB, dbErr := e.s.writeDBFor(ctx, "put memory")
+	if dbErr != nil {
+		return nil, dbErr
+	}
+	err = scopedDB.Transaction(func(tx *gorm.DB) error {
 		var active []memoryRow
 		if err := tx.Raw(`
 			SELECT *
@@ -212,6 +218,27 @@ func (e *postgresEpisodicStore) PutMemory(ctx context.Context, req registryepiso
 				return registryepisodic.ErrMemoryRevisionConflict
 			}
 		}
+		if expected := req.AuthorizedPredecessor; expected != nil {
+			if !expected.Exists {
+				if len(active) != 0 {
+					return registryepisodic.ErrMemoryRevisionConflict
+				}
+			} else if len(active) != 1 || active[0].ID != expected.ID || active[0].Revision != expected.Revision {
+				return registryepisodic.ErrMemoryRevisionConflict
+			}
+		}
+		predecessor := req.AuthorizedPredecessor
+		if predecessor == nil && req.ExpectedRevision != nil {
+			// Bind the later archive to the exact row whose revision was checked.
+			// Under READ COMMITTED a namespace/key-only update could otherwise
+			// archive a concurrently committed replacement.
+			predecessor = &registryepisodic.MemoryPredecessorExpectation{
+				Exists: true, ID: active[0].ID, Revision: active[0].Revision,
+			}
+		}
+		if req.ExpectedRevision != nil && e.putAfterRevisionCheck != nil {
+			e.putAfterRevisionCheck()
+		}
 		if len(active) > 0 {
 			revision = active[0].Revision + 1
 		}
@@ -220,21 +247,40 @@ func (e *postgresEpisodicStore) PutMemory(ctx context.Context, req registryepiso
 		// Set deleted_reason=0 (superseded by update) and reset indexed_at so the indexer
 		// removes the old vector entry.
 		deletedReason := int16(0)
-		result := tx.Exec(`
-			UPDATE memories
-			SET archived_at = ?, indexed_at = NULL, deleted_reason = ?
-			WHERE namespace = ? AND key = ? AND archived_at IS NULL`,
-			now, deletedReason, nsEncoded, req.Key,
-		)
+		var result *gorm.DB
+		switch expected := predecessor; {
+		case expected != nil && !expected.Exists:
+			result = tx
+		case expected != nil:
+			result = tx.Exec(`
+				UPDATE memories
+				SET archived_at = ?, indexed_at = NULL, deleted_reason = ?, revision = revision + 1
+				WHERE id = ? AND revision = ? AND archived_at IS NULL`,
+				now, deletedReason, expected.ID, expected.Revision,
+			)
+		default:
+			result = tx.Exec(`
+				UPDATE memories
+				SET archived_at = ?, indexed_at = NULL, deleted_reason = ?, revision = revision + 1
+				WHERE namespace = ? AND key = ? AND archived_at IS NULL`,
+				now, deletedReason, nsEncoded, req.Key,
+			)
+		}
 		if result.Error != nil {
 			return fmt.Errorf("archive previous row: %w", result.Error)
+		}
+		if predecessor != nil && predecessor.Exists && result.RowsAffected != 1 {
+			return registryepisodic.ErrMemoryRevisionConflict
 		}
 		// kind=0 (add) if no previous row existed, kind=1 (update) if one was archived.
 		if result.RowsAffected > 0 {
 			kind = 1
 		}
 
-		// Insert the new row.
+		// Insert the new row. MemoryKind must be non-empty (resolved before PutMemory is called).
+		if req.MemoryKind == "" {
+			return fmt.Errorf("internal error: MemoryKind must be resolved before PutMemory")
+		}
 		row := memoryRow{
 			ID:               newID,
 			Namespace:        nsEncoded,
@@ -246,9 +292,16 @@ func (e *postgresEpisodicStore) PutMemory(ctx context.Context, req registryepiso
 			Revision:         revision,
 			CreatedAt:        now,
 			ExpiresAt:        expiresAt,
+			MemoryKind:       req.MemoryKind,
 			// IndexedAt NULL = pending vector sync
 		}
-		return tx.Create(&row).Error
+		if err := tx.Create(&row).Error; err != nil {
+			if isUniqueViolation(err) {
+				return registryepisodic.ErrMemoryRevisionConflict
+			}
+			return err
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, err
@@ -259,13 +312,61 @@ func (e *postgresEpisodicStore) PutMemory(ctx context.Context, req registryepiso
 		Namespace:  req.Namespace,
 		Key:        req.Key,
 		Attributes: req.PolicyAttributes,
+		MemoryKind: req.MemoryKind,
 		CreatedAt:  now,
 		ExpiresAt:  expiresAt,
 		Revision:   revision,
 	}, nil
 }
 
-// GetMemory retrieves the current memory for (namespace, key).
+// GetMemoryRowKind returns the canonical kind of the row matching (namespace, key) and archive filter
+// without loading the value. Used for pre-authz kind lookup. Uses the scoped transaction handle.
+func (e *postgresEpisodicStore) GetMemoryRowKind(ctx context.Context, namespace []string, key string, archived registryepisodic.ArchiveFilter) (string, bool, error) {
+	nsEncoded, err := e.encodeNS(namespace)
+	if err != nil {
+		return "", false, err
+	}
+	whereClause := "namespace = ? AND key = ? AND " + postgresMemoryArchiveWhere("memories", archived)
+	args := []interface{}{nsEncoded, key}
+	var kind string
+	result := e.s.dbFor(ctx).Raw(
+		`SELECT memory_kind FROM memories WHERE `+whereClause+` ORDER BY created_at DESC, id DESC LIMIT 1 FOR UPDATE`,
+		args...,
+	).Scan(&kind)
+	if result.Error != nil {
+		return "", false, fmt.Errorf("get memory kind: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return "", false, nil
+	}
+	return kind, true, nil
+}
+
+func (e *postgresEpisodicStore) GetMemoryPredecessor(ctx context.Context, namespace []string, key string) (*registryepisodic.MemoryPredecessor, error) {
+	nsEncoded, err := e.encodeNS(namespace)
+	if err != nil {
+		return nil, err
+	}
+	var row struct {
+		ID         uuid.UUID `gorm:"column:id"`
+		Revision   int64     `gorm:"column:revision"`
+		MemoryKind string    `gorm:"column:memory_kind"`
+	}
+	result := e.s.dbFor(ctx).Raw(`
+		SELECT id, revision, memory_kind
+		FROM memories
+		WHERE namespace = ? AND key = ? AND archived_at IS NULL
+		ORDER BY created_at DESC, id DESC
+		LIMIT 1`, nsEncoded, key).Scan(&row)
+	if result.Error != nil {
+		return nil, fmt.Errorf("get memory predecessor: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return nil, nil
+	}
+	return &registryepisodic.MemoryPredecessor{ID: row.ID, Revision: row.Revision, MemoryKind: row.MemoryKind}, nil
+}
+
 func (e *postgresEpisodicStore) GetMemory(ctx context.Context, namespace []string, key string, archived registryepisodic.ArchiveFilter) (*registryepisodic.MemoryItem, error) {
 	nsEncoded, err := e.encodeNS(namespace)
 	if err != nil {
@@ -273,10 +374,10 @@ func (e *postgresEpisodicStore) GetMemory(ctx context.Context, namespace []strin
 	}
 
 	var rows []memoryRow
-	result := e.db.WithContext(ctx).Raw(`
+	result := e.s.dbFor(ctx).Raw(`
 		SELECT *
 		FROM memories
-		WHERE namespace = ? AND key = ?
+		WHERE namespace = ? AND key = ? AND `+postgresMemoryArchiveWhere("memories", archived)+`
 		ORDER BY created_at DESC, id DESC
 		LIMIT 1`,
 		nsEncoded, key,
@@ -288,9 +389,6 @@ func (e *postgresEpisodicStore) GetMemory(ctx context.Context, namespace []strin
 		return nil, nil
 	}
 	row := rows[0]
-	if !matchesMemoryArchiveFilter(row.ArchivedAt, row.DeletedReason, archived) {
-		return nil, nil
-	}
 	return e.rowToItem(row, namespace)
 }
 
@@ -337,7 +435,11 @@ func (e *postgresEpisodicStore) IncrementMemoryLoads(ctx context.Context, keys [
 		SET fetch_count = memory_usage_stats.fetch_count + EXCLUDED.fetch_count,
 			last_fetched_at = GREATEST(memory_usage_stats.last_fetched_at, EXCLUDED.last_fetched_at)`
 
-	return e.db.WithContext(ctx).Exec(query, args...).Error
+	db, dbErr := e.s.writeDBFor(ctx, "increment memory loads")
+	if dbErr != nil {
+		return dbErr
+	}
+	return db.Exec(query, args...).Error
 }
 
 func (e *postgresEpisodicStore) GetMemoryUsage(ctx context.Context, namespace []string, key string) (*registryepisodic.MemoryUsage, error) {
@@ -347,7 +449,7 @@ func (e *postgresEpisodicStore) GetMemoryUsage(ctx context.Context, namespace []
 	}
 
 	var row memoryUsageRow
-	result := e.db.WithContext(ctx).
+	result := e.s.dbFor(ctx).
 		Where("namespace = ? AND key = ?", nsEncoded, key).
 		Limit(1).
 		Find(&row)
@@ -370,7 +472,7 @@ func (e *postgresEpisodicStore) ListTopMemoryUsage(ctx context.Context, req regi
 	}
 	limit = config.ClampPageSize(ctx, limit)
 
-	q := e.db.WithContext(ctx).Table("memory_usage_stats")
+	q := e.s.dbFor(ctx).Table("memory_usage_stats")
 	if len(req.Prefix) > 0 {
 		nsEncoded, err := e.encodeNS(req.Prefix)
 		if err != nil {
@@ -423,7 +525,11 @@ func (e *postgresEpisodicStore) ArchiveMemory(ctx context.Context, namespace []s
 		where += " AND revision = ?"
 		args = append(args, *expectedRevision)
 	}
-	result := e.db.WithContext(ctx).Exec(`
+	db, dbErr := e.s.writeDBFor(ctx, "archive memory")
+	if dbErr != nil {
+		return dbErr
+	}
+	result := db.Exec(`
 		UPDATE memories
 		SET archived_at = NOW(), indexed_at = NULL, deleted_reason = ?, revision = revision + 1
 		WHERE `+where,
@@ -439,20 +545,22 @@ func (e *postgresEpisodicStore) ArchiveMemory(ctx context.Context, namespace []s
 }
 
 // SearchMemories performs attribute-filter-only search within the namespace prefix.
-func (e *postgresEpisodicStore) SearchMemories(ctx context.Context, namespacePrefix []string, filter registryepisodic.AttributeFilter, limit int, archived registryepisodic.ArchiveFilter) ([]registryepisodic.MemoryItem, error) {
-	nsEncoded, err := e.encodeNS(namespacePrefix)
+func (e *postgresEpisodicStore) SearchMemories(ctx context.Context, sq registryepisodic.MemorySearchQuery) ([]registryepisodic.MemoryItem, error) {
+	nsEncoded, err := e.encodeNS(sq.NamespacePrefix)
 	if err != nil {
 		return nil, err
 	}
 
-	q := e.db.WithContext(ctx).
+	archiveWhere := postgresMemoryArchiveWhere("candidate", sq.Archived)
+	q := e.s.dbFor(ctx).
 		Table("memories AS m").
 		Select("m.*").
 		Joins(`
 			JOIN (
 				SELECT namespace, key, MAX(created_at) AS max_created_at
-				FROM memories
-				WHERE namespace = ? OR namespace LIKE ?
+					FROM memories AS candidate
+					WHERE (namespace = ? OR namespace LIKE ?)
+					  AND `+archiveWhere+`
 				GROUP BY namespace, key
 			) latest
 			ON m.namespace = latest.namespace
@@ -460,15 +568,32 @@ func (e *postgresEpisodicStore) SearchMemories(ctx context.Context, namespacePre
 			AND m.created_at = latest.max_created_at`,
 			nsEncoded, episodic.NamespacePrefixPattern(nsEncoded),
 		).
-		Where(postgresMemoryArchiveWhere("m", archived)).
-		Order("m.created_at DESC, m.id DESC").
-		Limit(limit)
+		Where(postgresMemoryArchiveWhere("m", sq.Archived)).
+		Limit(sq.Limit)
 
-	if !filter.Empty() {
-		clause, args := buildSQLFilter(filter)
+	if !sq.Filter.Empty() {
+		clause, args := buildSQLFilter(sq.Filter)
 		if clause != "" {
 			q = q.Where(clause, args...)
 		}
+	}
+	if sq.MemoryKind != "" {
+		if strings.Contains(sq.MemoryKind, "/") {
+			q = q.Where("m.memory_kind = ?", sq.MemoryKind)
+		} else {
+			safeFamily := escapeSQLLike(sq.MemoryKind)
+			q = q.Where("m.memory_kind LIKE ? ESCAPE '\\'", safeFamily+"/%")
+		}
+	}
+	if sq.Sort != nil {
+		dir := "ASC"
+		if strings.ToLower(sq.Sort.Direction) == "desc" {
+			dir = "DESC"
+		}
+		field := sq.Sort.Field
+		q = q.Order(fmt.Sprintf("%s %s NULLS LAST, m.created_at DESC, m.id DESC", postgresAttrSortExpr(field, sq.Sort.Type), dir))
+	} else {
+		q = q.Order("m.created_at DESC, m.id DESC")
 	}
 
 	var rows []memoryRow
@@ -492,7 +617,8 @@ func (e *postgresEpisodicStore) SearchMemories(ctx context.Context, namespacePre
 // ListNamespaces returns distinct current namespaces under the given prefix.
 func (e *postgresEpisodicStore) ListNamespaces(ctx context.Context, req registryepisodic.ListNamespacesRequest) ([][]string, error) {
 	var rawNS []string
-	q := e.db.WithContext(ctx).Table("memories AS m").Select("DISTINCT m.namespace")
+	q := e.s.dbFor(ctx).Table("memories AS m").Select("DISTINCT m.namespace")
+	archiveWhere := postgresMemoryArchiveWhere("candidate", req.Archived)
 	if len(req.Prefix) > 0 {
 		nsEncoded, err := e.encodeNS(req.Prefix)
 		if err != nil {
@@ -501,8 +627,9 @@ func (e *postgresEpisodicStore) ListNamespaces(ctx context.Context, req registry
 		q = q.Joins(`
 			JOIN (
 				SELECT namespace, key, MAX(created_at) AS max_created_at
-				FROM memories
-				WHERE namespace = ? OR namespace LIKE ?
+					FROM memories AS candidate
+					WHERE (namespace = ? OR namespace LIKE ?)
+					  AND `+archiveWhere+`
 				GROUP BY namespace, key
 			) latest
 			ON m.namespace = latest.namespace
@@ -514,7 +641,8 @@ func (e *postgresEpisodicStore) ListNamespaces(ctx context.Context, req registry
 		q = q.Joins(`
 			JOIN (
 				SELECT namespace, key, MAX(created_at) AS max_created_at
-				FROM memories
+					FROM memories AS candidate
+					WHERE ` + archiveWhere + `
 				GROUP BY namespace, key
 			) latest
 			ON m.namespace = latest.namespace
@@ -522,6 +650,16 @@ func (e *postgresEpisodicStore) ListNamespaces(ctx context.Context, req registry
 			AND m.created_at = latest.max_created_at`)
 	}
 	q = q.Where(postgresMemoryArchiveWhere("m", req.Archived))
+	if req.MemoryKind != "" {
+		if strings.Contains(req.MemoryKind, "/") {
+			q = q.Where("m.memory_kind = ?", req.MemoryKind)
+		} else {
+			q = q.Where("m.memory_kind LIKE ? ESCAPE '\\'", escapeSQLLike(req.MemoryKind)+"/%")
+		}
+	}
+	if filterSQL, filterArgs := buildSQLFilter(req.Filter); filterSQL != "" {
+		q = q.Where(strings.ReplaceAll(filterSQL, "policy_attributes", "m.policy_attributes"), filterArgs...)
+	}
 	result := q.Pluck("namespace", &rawNS)
 	if result.Error != nil {
 		return nil, fmt.Errorf("list namespaces: %w", result.Error)
@@ -558,7 +696,7 @@ func (e *postgresEpisodicStore) ListNamespaces(ctx context.Context, req registry
 // or remove vectors for expired/superseded rows based on deleted_reason.
 func (e *postgresEpisodicStore) FindMemoriesPendingIndexing(ctx context.Context, limit int) ([]registryepisodic.PendingMemory, error) {
 	var rows []memoryRow
-	if err := e.db.WithContext(ctx).
+	if err := e.s.dbFor(ctx).
 		Where("indexed_at IS NULL").
 		Limit(limit).
 		Find(&rows).Error; err != nil {
@@ -572,6 +710,8 @@ func (e *postgresEpisodicStore) FindMemoriesPendingIndexing(ctx context.Context,
 			PolicyAttributes: row.PolicyAttributes,
 			IndexedContent:   row.IndexedContent,
 			ArchivedAt:       row.ArchivedAt,
+			MemoryKind:       row.MemoryKind,
+			Revision:         row.Revision,
 		}
 		if row.DeletedReason != nil {
 			value := int32(*row.DeletedReason)
@@ -584,7 +724,11 @@ func (e *postgresEpisodicStore) FindMemoriesPendingIndexing(ctx context.Context,
 
 // SetMemoryIndexedAt marks a memory as indexed.
 func (e *postgresEpisodicStore) SetMemoryIndexedAt(ctx context.Context, memoryID uuid.UUID, indexedAt time.Time) error {
-	return e.db.WithContext(ctx).Exec(
+	db, dbErr := e.s.writeDBFor(ctx, "set memory indexed at")
+	if dbErr != nil {
+		return dbErr
+	}
+	return db.Exec(
 		"UPDATE memories SET indexed_at = ? WHERE id = ?", indexedAt, memoryID,
 	).Error
 }
@@ -597,18 +741,26 @@ func (e *postgresEpisodicStore) UpsertMemoryVectors(ctx context.Context, items [
 	if e.qdrant != nil {
 		return e.qdrant.UpsertMemoryVectors(ctx, items)
 	}
-	tx := e.db.WithContext(ctx)
+	tx, dbErr := e.s.writeDBFor(ctx, "upsert memory vectors")
+	if dbErr != nil {
+		return dbErr
+	}
 	for _, item := range items {
 		vec := pgvec.NewVector(item.Embedding)
+		if item.MemoryKind == "" {
+			return fmt.Errorf("internal error: MemoryVectorUpsert.MemoryKind must be non-empty for memory %s", item.MemoryID)
+		}
 		if err := tx.Exec(`
-			INSERT INTO memory_vectors (memory_id, field_name, namespace, policy_attributes, embedding)
-			VALUES (?, ?, ?, ?, ?::vector)
+			INSERT INTO memory_vectors (memory_id, field_name, namespace, policy_attributes, embedding, memory_kind, memory_revision)
+			VALUES (?, ?, ?, ?, ?::vector, ?, ?)
 			ON CONFLICT (memory_id, field_name)
 			DO UPDATE SET
 			  namespace = EXCLUDED.namespace,
 			  policy_attributes = EXCLUDED.policy_attributes,
-			  embedding = EXCLUDED.embedding`,
-			item.MemoryID, item.FieldName, item.Namespace, item.PolicyAttributes, vec,
+			  embedding = EXCLUDED.embedding,
+			  memory_kind = EXCLUDED.memory_kind,
+			  memory_revision = EXCLUDED.memory_revision`,
+			item.MemoryID, item.FieldName, item.Namespace, item.PolicyAttributes, vec, item.MemoryKind, item.MemoryRevision,
 		).Error; err != nil {
 			return fmt.Errorf("upsert memory vector %s/%s: %w", item.MemoryID, item.FieldName, err)
 		}
@@ -621,16 +773,20 @@ func (e *postgresEpisodicStore) DeleteMemoryVectors(ctx context.Context, memoryI
 	if e.qdrant != nil {
 		return e.qdrant.DeleteMemoryVectors(ctx, memoryID)
 	}
-	return e.db.WithContext(ctx).Exec(
+	db, dbErr := e.s.writeDBFor(ctx, "delete memory vectors")
+	if dbErr != nil {
+		return dbErr
+	}
+	return db.Exec(
 		"DELETE FROM memory_vectors WHERE memory_id = ?", memoryID,
 	).Error
 }
 
 // SearchMemoryVectors performs ANN search via pgvector (raw SQL).
 // This is a fallback; the indexer service calls the vector store directly for ANN.
-func (e *postgresEpisodicStore) SearchMemoryVectors(ctx context.Context, namespacePrefix string, embedding []float32, filter registryepisodic.AttributeFilter, limit int, archived registryepisodic.ArchiveFilter) ([]registryepisodic.MemoryVectorSearch, error) {
+func (e *postgresEpisodicStore) SearchMemoryVectors(ctx context.Context, namespacePrefix string, embedding []float32, filter registryepisodic.AttributeFilter, memoryKind string, limit int, archived registryepisodic.ArchiveFilter) ([]registryepisodic.MemoryVectorSearch, error) {
 	if e.qdrant != nil {
-		return e.qdrant.SearchMemoryVectors(ctx, namespacePrefix, embedding, filter, limit, archived)
+		return e.qdrant.SearchMemoryVectors(ctx, namespacePrefix, embedding, filter, memoryKind, limit, archived)
 	}
 	if limit <= 0 {
 		return nil, nil
@@ -653,18 +809,29 @@ func (e *postgresEpisodicStore) SearchMemoryVectors(ctx context.Context, namespa
 			args = append(args, filterArgs...)
 		}
 	}
+	if memoryKind != "" {
+		if strings.Contains(memoryKind, "/") {
+			whereFilter += " AND m.memory_kind = ?"
+			args = append(args, memoryKind)
+		} else {
+			whereFilter += " AND m.memory_kind LIKE ? ESCAPE '\\'"
+			args = append(args, escapeSQLLike(memoryKind)+"/%")
+		}
+	}
 	args = append(args, limit)
 
 	query := `
 		SELECT memory_id, MAX(1 - (embedding <=> ?::vector)) AS score
 		FROM memory_vectors mv
 		JOIN memories m ON m.id = mv.memory_id
+		            AND mv.memory_revision = m.revision
+		            AND mv.memory_kind = m.memory_kind
 		WHERE ` + postgresMemoryArchiveWhere("m", archived) + namespaceWhere + whereFilter + `
 		GROUP BY memory_id
 		ORDER BY score DESC
 		LIMIT ?`
 
-	rows, err := e.db.WithContext(ctx).Raw(query, args...).Rows()
+	rows, err := e.s.dbFor(ctx).Raw(query, args...).Rows()
 	if err != nil {
 		return nil, fmt.Errorf("search memory vectors: %w", err)
 	}
@@ -676,6 +843,8 @@ func (e *postgresEpisodicStore) SearchMemoryVectors(ctx context.Context, namespa
 		if err := rows.Scan(&item.MemoryID, &item.Score); err != nil {
 			return nil, fmt.Errorf("scan memory vectors: %w", err)
 		}
+		// SQL JOIN already enforced revision and schema freshness — skip client checks.
+		item.PrimaryValidated = true
 		out = append(out, item)
 	}
 	return out, nil
@@ -687,7 +856,7 @@ func (e *postgresEpisodicStore) GetMemoriesByIDs(ctx context.Context, ids []uuid
 		return nil, nil
 	}
 	var rows []memoryRow
-	if err := e.db.WithContext(ctx).
+	if err := e.s.dbFor(ctx).
 		Where("id IN ?", ids).
 		Find(&rows).Error; err != nil {
 		return nil, fmt.Errorf("get memories by ids: %w", err)
@@ -710,10 +879,14 @@ func (e *postgresEpisodicStore) GetMemoriesByIDs(ctx context.Context, ids []uuid
 
 // ExpireMemories archives memories whose TTL has elapsed.
 func (e *postgresEpisodicStore) ExpireMemories(ctx context.Context) (int64, error) {
+	db, dbErr := e.s.writeDBFor(ctx, "expire memories")
+	if dbErr != nil {
+		return 0, dbErr
+	}
 	deletedReason := int16(2)
-	result := e.db.WithContext(ctx).Exec(`
+	result := db.Exec(`
 		UPDATE memories
-		SET archived_at = NOW(), indexed_at = NULL, deleted_reason = ?
+		SET archived_at = NOW(), indexed_at = NULL, deleted_reason = ?, revision = revision + 1
 		WHERE expires_at <= NOW() AND archived_at IS NULL`,
 		deletedReason,
 	)
@@ -723,7 +896,11 @@ func (e *postgresEpisodicStore) ExpireMemories(ctx context.Context) (int64, erro
 // HardDeleteEvictableUpdates hard-deletes rows with deleted_reason=0 (superseded by update)
 // that have been re-indexed (indexed_at IS NOT NULL). Returns the number deleted.
 func (e *postgresEpisodicStore) HardDeleteEvictableUpdates(ctx context.Context, limit int) (int64, error) {
-	result := e.db.WithContext(ctx).Exec(`
+	db, dbErr := e.s.writeDBFor(ctx, "hard delete evictable updates")
+	if dbErr != nil {
+		return 0, dbErr
+	}
+	result := db.Exec(`
 		DELETE FROM memories
 		WHERE id IN (
 			SELECT id FROM memories
@@ -737,9 +914,16 @@ func (e *postgresEpisodicStore) HardDeleteEvictableUpdates(ctx context.Context, 
 // TombstoneDeletedMemories clears encrypted data from rows with deleted_reason IN (1,2)
 // that have been re-indexed (indexed_at IS NOT NULL). Returns the number tombstoned.
 func (e *postgresEpisodicStore) TombstoneDeletedMemories(ctx context.Context, limit int) (int64, error) {
-	result := e.db.WithContext(ctx).Exec(`
+	db, dbErr := e.s.writeDBFor(ctx, "tombstone deleted memories")
+	if dbErr != nil {
+		return 0, dbErr
+	}
+	result := db.Exec(`
 		UPDATE memories
-		SET value_encrypted = NULL
+		SET value_encrypted = NULL,
+		    policy_attributes = '{}'::jsonb,
+		    revision = revision + 1,
+		    indexed_at = NULL
 		WHERE id IN (
 			SELECT id FROM memories
 			WHERE deleted_reason IN (1, 2) AND indexed_at IS NOT NULL AND value_encrypted IS NOT NULL
@@ -752,7 +936,11 @@ func (e *postgresEpisodicStore) TombstoneDeletedMemories(ctx context.Context, li
 // HardDeleteExpiredTombstones hard-deletes tombstone rows older than olderThan.
 // Returns the number deleted.
 func (e *postgresEpisodicStore) HardDeleteExpiredTombstones(ctx context.Context, olderThan time.Time, limit int) (int64, error) {
-	result := e.db.WithContext(ctx).Exec(`
+	db, dbErr := e.s.writeDBFor(ctx, "hard delete expired tombstones")
+	if dbErr != nil {
+		return 0, dbErr
+	}
+	result := db.Exec(`
 		DELETE FROM memories
 		WHERE id IN (
 			SELECT id FROM memories
@@ -833,7 +1021,8 @@ func (e *postgresEpisodicStore) ListMemoryEvents(ctx context.Context, req regist
 			SELECT id, namespace, key,
 				CASE kind WHEN 0 THEN 'add' ELSE 'update' END AS event_kind,
 				created_at AS occurred_at,
-				value_encrypted, policy_attributes, expires_at
+				value_encrypted, policy_attributes, expires_at,
+				memory_kind
 			FROM memories WHERE kind IN (`+ph+`)`)
 		args = append(args, writeKinds...)
 	}
@@ -843,7 +1032,8 @@ func (e *postgresEpisodicStore) ListMemoryEvents(ctx context.Context, req regist
 			SELECT id, namespace, key,
 				'update' AS event_kind,
 				archived_at AS occurred_at,
-				value_encrypted, policy_attributes, expires_at
+				value_encrypted, policy_attributes, expires_at,
+				memory_kind
 			FROM memories WHERE deleted_reason = 1`)
 	}
 	if includeExpired {
@@ -851,7 +1041,8 @@ func (e *postgresEpisodicStore) ListMemoryEvents(ctx context.Context, req regist
 			SELECT id, namespace, key,
 				'expired' AS event_kind,
 				archived_at AS occurred_at,
-				NULL::bytea AS value_encrypted, NULL::jsonb AS policy_attributes, expires_at
+				NULL::bytea AS value_encrypted, NULL::jsonb AS policy_attributes, expires_at,
+				memory_kind
 			FROM memories WHERE deleted_reason = 2`)
 	}
 
@@ -875,9 +1066,22 @@ func (e *postgresEpisodicStore) ListMemoryEvents(ctx context.Context, req regist
 		outerWhere += " AND e.occurred_at < ?"
 		outerArgs = append(outerArgs, req.Before)
 	}
+	if req.MemoryKind != "" {
+		if strings.Contains(req.MemoryKind, "/") {
+			outerWhere += " AND e.memory_kind = ?"
+			outerArgs = append(outerArgs, req.MemoryKind)
+		} else {
+			outerWhere += " AND e.memory_kind LIKE ? ESCAPE '\\'"
+			outerArgs = append(outerArgs, escapeSQLLike(req.MemoryKind)+"/%")
+		}
+	}
+	if filterSQL, filterArgs := buildSQLFilter(req.Filter); filterSQL != "" {
+		outerWhere += " AND " + strings.ReplaceAll(filterSQL, "policy_attributes", "e.policy_attributes")
+		outerArgs = append(outerArgs, filterArgs...)
+	}
 
 	finalSQL := fmt.Sprintf(`
-		SELECT e.id, e.namespace, e.key, e.event_kind, e.occurred_at, e.value_encrypted, e.policy_attributes, e.expires_at
+		SELECT e.id, e.namespace, e.key, e.event_kind, e.occurred_at, e.value_encrypted, e.policy_attributes, e.expires_at, e.memory_kind
 		FROM (%s) e
 		WHERE %s%s
 		ORDER BY e.occurred_at ASC, e.id ASC
@@ -897,9 +1101,10 @@ func (e *postgresEpisodicStore) ListMemoryEvents(ctx context.Context, req regist
 		ValueEncrypted []byte     `gorm:"column:value_encrypted"`
 		PolicyAttrsRaw []byte     `gorm:"column:policy_attributes"`
 		ExpiresAt      *time.Time `gorm:"column:expires_at"`
+		MemoryKind     string     `gorm:"column:memory_kind"`
 	}
 	var rows []scanRow
-	if err := e.db.WithContext(ctx).Raw(finalSQL, allArgs...).Scan(&rows).Error; err != nil {
+	if err := e.s.dbFor(ctx).Raw(finalSQL, allArgs...).Scan(&rows).Error; err != nil {
 		return nil, fmt.Errorf("list memory events: %w", err)
 	}
 
@@ -938,6 +1143,7 @@ func (e *postgresEpisodicStore) ListMemoryEvents(ctx context.Context, req regist
 			Value:      value,
 			Attributes: attrs,
 			ExpiresAt:  row.ExpiresAt,
+			MemoryKind: row.MemoryKind,
 		})
 	}
 
@@ -958,7 +1164,7 @@ func (e *postgresEpisodicStore) ListMemoryEvents(ctx context.Context, req regist
 // AdminGetMemoryByID retrieves any memory by UUID.
 func (e *postgresEpisodicStore) AdminGetMemoryByID(ctx context.Context, memoryID uuid.UUID) (*registryepisodic.MemoryItem, error) {
 	var row memoryRow
-	result := e.db.WithContext(ctx).Where("id = ?", memoryID).Limit(1).Find(&row)
+	result := e.s.dbFor(ctx).Where("id = ?", memoryID).Limit(1).Find(&row)
 	if result.Error != nil {
 		return nil, result.Error
 	}
@@ -971,13 +1177,17 @@ func (e *postgresEpisodicStore) AdminGetMemoryByID(ctx context.Context, memoryID
 
 // AdminForceDeleteMemory hard-deletes any memory by UUID.
 func (e *postgresEpisodicStore) AdminForceDeleteMemory(ctx context.Context, memoryID uuid.UUID) error {
-	return e.db.WithContext(ctx).Exec("DELETE FROM memories WHERE id = ?", memoryID).Error
+	db, dbErr := e.s.writeDBFor(ctx, "admin force delete memory")
+	if dbErr != nil {
+		return dbErr
+	}
+	return db.Exec("DELETE FROM memories WHERE id = ?", memoryID).Error
 }
 
 // AdminCountPendingIndexing returns the number of memories pending vector sync.
 func (e *postgresEpisodicStore) AdminCountPendingIndexing(ctx context.Context) (int64, error) {
 	var count int64
-	err := e.db.WithContext(ctx).
+	err := e.s.dbFor(ctx).
 		Table("memories").
 		Where("indexed_at IS NULL").
 		Count(&count).Error
@@ -992,7 +1202,7 @@ func (e *postgresEpisodicStore) AdminListMemories(ctx context.Context, query reg
 	}
 	limit = config.ClampPageSize(ctx, limit)
 
-	q, err := e.adminLatestMemoryQuery(ctx, query.NamespacePrefix)
+	q, err := e.adminLatestMemoryQuery(ctx, query.NamespacePrefix, query.Archived)
 	if err != nil {
 		return registryepisodic.AdminMemoryPage{}, err
 	}
@@ -1014,6 +1224,20 @@ func (e *postgresEpisodicStore) AdminListMemories(ctx context.Context, query reg
 			q = q.Where("(m.created_at < ? OR (m.created_at = ? AND m.id < ?))", cur.CreatedAt, cur.CreatedAt, cur.ID)
 		}
 	}
+	if query.MemoryKind != "" {
+		if strings.Contains(query.MemoryKind, "/") {
+			q = q.Where("m.memory_kind = ?", query.MemoryKind)
+		} else {
+			safeFamily := escapeSQLLike(query.MemoryKind)
+			q = q.Where("m.memory_kind LIKE ? ESCAPE '\\'", safeFamily+"/%")
+		}
+	}
+	if !query.Filter.Empty() {
+		clause, args := buildSQLFilter(query.Filter)
+		if clause != "" {
+			q = q.Where(clause, args...)
+		}
+	}
 
 	var rows []memoryRow
 	if err := q.Order("m.created_at DESC, m.id DESC").Limit(limit + 1).Find(&rows).Error; err != nil {
@@ -1029,7 +1253,7 @@ func (e *postgresEpisodicStore) AdminSearchMemories(ctx context.Context, query r
 		limit = 10
 	}
 	limit = config.ClampPageSize(ctx, limit)
-	q, err := e.adminLatestMemoryQuery(ctx, query.NamespacePrefix)
+	q, err := e.adminLatestMemoryQuery(ctx, query.NamespacePrefix, query.Archived)
 	if err != nil {
 		return nil, err
 	}
@@ -1043,8 +1267,26 @@ func (e *postgresEpisodicStore) AdminSearchMemories(ctx context.Context, query r
 			q = q.Where(clause, args...)
 		}
 	}
+	if query.MemoryKind != "" {
+		if strings.Contains(query.MemoryKind, "/") {
+			q = q.Where("m.memory_kind = ?", query.MemoryKind)
+		} else {
+			safeFamily := escapeSQLLike(query.MemoryKind)
+			q = q.Where("m.memory_kind LIKE ? ESCAPE '\\'", safeFamily+"/%")
+		}
+	}
+	if query.Sort != nil {
+		dir := "ASC"
+		if strings.ToLower(query.Sort.Direction) == "desc" {
+			dir = "DESC"
+		}
+		field := query.Sort.Field
+		q = q.Order(fmt.Sprintf("%s %s NULLS LAST, m.created_at DESC, m.id DESC", postgresAttrSortExpr(field, query.Sort.Type), dir))
+	} else {
+		q = q.Order("m.created_at DESC, m.id DESC")
+	}
 	var rows []memoryRow
-	if err := q.Order("m.created_at DESC, m.id DESC").Limit(limit).Find(&rows).Error; err != nil {
+	if err := q.Limit(limit).Find(&rows).Error; err != nil {
 		return nil, fmt.Errorf("admin search memories: %w", err)
 	}
 	items := make([]registryepisodic.MemoryItem, 0, len(rows))
@@ -1091,8 +1333,9 @@ func (e *postgresEpisodicStore) AdminListNamespaces(ctx context.Context, query r
 	return page, nil
 }
 
-func (e *postgresEpisodicStore) adminLatestMemoryQuery(ctx context.Context, namespacePrefix []string) (*gorm.DB, error) {
-	q := e.db.WithContext(ctx).Table("memories AS m")
+func (e *postgresEpisodicStore) adminLatestMemoryQuery(ctx context.Context, namespacePrefix []string, archived registryepisodic.ArchiveFilter) (*gorm.DB, error) {
+	q := e.s.dbFor(ctx).Table("memories AS m")
+	archiveWhere := postgresMemoryArchiveWhere("candidate", archived)
 	if len(namespacePrefix) > 0 {
 		nsEncoded, err := e.encodeNS(namespacePrefix)
 		if err != nil {
@@ -1101,8 +1344,9 @@ func (e *postgresEpisodicStore) adminLatestMemoryQuery(ctx context.Context, name
 		q = q.Joins(`
 			JOIN (
 				SELECT namespace, key, MAX(created_at) AS max_created_at
-				FROM memories
-				WHERE namespace = ? OR namespace LIKE ?
+				FROM memories AS candidate
+				WHERE (namespace = ? OR namespace LIKE ?)
+				  AND `+archiveWhere+`
 				GROUP BY namespace, key
 			) latest
 			ON m.namespace = latest.namespace
@@ -1114,7 +1358,8 @@ func (e *postgresEpisodicStore) adminLatestMemoryQuery(ctx context.Context, name
 		q = q.Joins(`
 			JOIN (
 				SELECT namespace, key, MAX(created_at) AS max_created_at
-				FROM memories
+				FROM memories AS candidate
+				WHERE ` + archiveWhere + `
 				GROUP BY namespace, key
 			) latest
 			ON m.namespace = latest.namespace
@@ -1200,6 +1445,7 @@ func (e *postgresEpisodicStore) rowToItem(row memoryRow, namespace []string) (*r
 		Key:        row.Key,
 		Value:      value,
 		Attributes: row.PolicyAttributes,
+		MemoryKind: row.MemoryKind,
 		CreatedAt:  row.CreatedAt,
 		ExpiresAt:  row.ExpiresAt,
 		ArchivedAt: row.ArchivedAt,
@@ -1252,4 +1498,31 @@ func buildSQLFilter(filter registryepisodic.AttributeFilter) (string, []interfac
 		return "", nil
 	}
 	return strings.Join(clauses, " AND "), args
+}
+
+// postgresAttrSortExpr returns the JSONB-extraction expression for an ORDER BY clause,
+// with an appropriate type cast based on the declared attribute type.
+// The field name is pre-validated by ValidateAttributeFilterField (only [A-Za-z0-9_.-]).
+func postgresAttrSortExpr(field, attrType string) string {
+	switch attrType {
+	case "number":
+		return fmt.Sprintf(`(policy_attributes->>'%s')::double precision`, field)
+	case "boolean":
+		return fmt.Sprintf(`(policy_attributes->>'%s')::boolean`, field)
+	case "timestamp":
+		return fmt.Sprintf(`(policy_attributes->>'%s')::timestamptz`, field)
+	default:
+		// string, string[], or unknown — binary text collation
+		return fmt.Sprintf(`(policy_attributes->>'%s') COLLATE "C"`, field)
+	}
+}
+
+// escapeSQLLike escapes SQL LIKE wildcard characters ('%' and '_') and the
+// escape character itself ('\') so that family names with those bytes cannot
+// be used as wildcards in family-prefix patterns.
+func escapeSQLLike(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `%`, `\%`)
+	s = strings.ReplaceAll(s, `_`, `\_`)
+	return s
 }

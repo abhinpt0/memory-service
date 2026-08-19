@@ -2,15 +2,111 @@ package episodic
 
 import (
 	"context"
+	_ "embed"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 
-	"github.com/charmbracelet/log"
 	"github.com/open-policy-agent/opa/v1/rego"
 )
+
+// KindIntersection is the typed result of IntersectKindSelectors.
+// Empty=true means the caller and policy selectors are incompatible and no
+// memories can possibly match. Callers must check Empty before querying the
+// store and return an empty result set immediately without any store query.
+// When Empty=false, Selector is the effective kind selector to pass to the store
+// (empty string means "all kinds").
+type KindIntersection struct {
+	Selector string
+	Empty    bool
+}
+
+// ValidateKindSelector validates a user-supplied kind selector string.
+// Valid values are: "" (empty = all kinds), a family name (e.g. "default"),
+// or a canonical exact name (e.g. "default/v1").
+// Returns an error if the selector is non-empty but malformed.
+func ValidateKindSelector(sel string) error {
+	sel = strings.TrimSpace(sel)
+	if sel == "" {
+		return nil // empty = all kinds
+	}
+	if strings.Contains(sel, "/") {
+		_, _, err := ParseCanonicalKindName(sel)
+		if err != nil {
+			return fmt.Errorf("invalid kind selector %q: %w", sel, err)
+		}
+		return nil
+	}
+	// Family selector.
+	if !isValidSchemaComponent(sel) {
+		return fmt.Errorf("invalid kind selector %q: must be 1–63 lowercase letters/digits/hyphens starting with a letter", sel)
+	}
+	return nil
+}
+
+// IntersectKindSelectors computes the narrowing intersection of a caller kind
+// selector and a policy kind selector.
+//
+// Both inputs must already be trimmed and valid. Callers should validate the
+// caller selector with ValidateKindSelector before calling this function.
+//
+// Rules (policy never broadens):
+//   - callerSel == "" && policySel == ""  → {Selector: "", Empty: false} (no restriction)
+//   - callerSel == "" && policySel != ""  → {policySel, false} (policy restricts caller)
+//   - callerSel != "" && policySel == ""  → {callerSel, false} (no policy restriction)
+//   - equal strings                        → {callerSel, false}
+//   - both exact, same string             → {callerSel, false}
+//   - both exact, different               → {Empty: true}
+//   - callerSel exact, policySel family:
+//     caller family == policy              → {callerSel, false}
+//     different                            → {Empty: true}
+//   - callerSel family, policySel exact:
+//     policy family == caller              → {policySel, false}
+//     different                            → {Empty: true}
+//   - both family, equal                  → {callerSel, false}
+//   - both family, different              → {Empty: true}
+func IntersectKindSelectors(callerSel, policySel string) KindIntersection {
+	callerSel = strings.TrimSpace(callerSel)
+	policySel = strings.TrimSpace(policySel)
+
+	if policySel == "" {
+		return KindIntersection{Selector: callerSel} // no policy restriction → keep caller
+	}
+	if callerSel == "" {
+		return KindIntersection{Selector: policySel} // no caller restriction → apply policy
+	}
+	if callerSel == policySel {
+		return KindIntersection{Selector: callerSel} // identical → no change
+	}
+
+	callerIsExact := strings.Contains(callerSel, "/")
+	policyIsExact := strings.Contains(policySel, "/")
+
+	if callerIsExact && policyIsExact {
+		// Both exact — must be identical (already checked above).
+		return KindIntersection{Empty: true}
+	}
+	if callerIsExact && !policyIsExact {
+		// Caller is exact "family/version", policy is family.
+		callerFamily := callerSel[:strings.Index(callerSel, "/")]
+		if callerFamily == policySel {
+			return KindIntersection{Selector: callerSel} // policy allows whole family; exact is within it
+		}
+		return KindIntersection{Empty: true}
+	}
+	if !callerIsExact && policyIsExact {
+		// Caller is family, policy is exact "family/version".
+		policyFamily := policySel[:strings.Index(policySel, "/")]
+		if policyFamily == callerSel {
+			return KindIntersection{Selector: policySel} // narrow to exact within caller's family
+		}
+		return KindIntersection{Empty: true}
+	}
+	// Both are family selectors — already checked equality above.
+	return KindIntersection{Empty: true}
+}
 
 // PolicyContext contains the caller's identity for OPA policy evaluation.
 type PolicyContext struct {
@@ -25,215 +121,97 @@ type AuthzDecision struct {
 	Reason string `json:"reason,omitempty"`
 }
 
-// PolicyEngine evaluates the three OPA policies for episodic memory:
+// PolicyEngine evaluates the two immutable OPA policies for episodic memory:
 //  1. Authz policy — controls read/write/delete access per (namespace, key).
-//  2. Attribute extraction policy — extracts plaintext policy_attributes from request context.
-//  3. Search filter injection policy — narrows namespace_prefix + adds attribute_filter constraints.
+//  2. Search filter injection policy — narrows namespace_prefix + adds attribute_filter constraints.
+//
+// Attribute projection is now handled per-memory by the stored MemoryKindVersion
+// and is not part of the global PolicyEngine.
 type PolicyEngine struct {
 	mu           sync.RWMutex
 	authz        *rego.PreparedEvalQuery
-	attrExtract  *rego.PreparedEvalQuery
 	filterInject *rego.PreparedEvalQuery
 	authzSrc     string
-	attrSrc      string
 	filterSrc    string
-}
-
-// PolicyBundle contains source text for the three episodic Rego policies.
-type PolicyBundle struct {
-	Authz      string `json:"authz"`
-	Attributes string `json:"attributes"`
-	Filter     string `json:"filter"`
 }
 
 // Default built-in Rego policies (used when no policy directory is configured).
 
-const defaultAuthzRego = `
-package memories.authz
+//go:embed default-v1/authz.rego
+var defaultAuthzRego string
 
-default decision = {"allow": false, "reason": "access denied"}
+//go:embed default-v1/filter.rego
+var defaultFilterInjectRego string
 
-# Users may access their own namespace subtree.
-# For writes, also enforce a max index field count.
-decision = {"allow": true} if {
-    input.namespace[0] == "user"
-    input.namespace[1] == input.context.user_id
-    input.operation != "write"
-}
-
-decision = {"allow": true} if {
-    input.operation == "write"
-    input.namespace[0] == "user"
-    input.namespace[1] == input.context.user_id
-    count(object.keys(input.index)) <= 8
-}
-
-decision = {"allow": false, "reason": "too many index fields (max 8)"} if {
-    input.operation == "write"
-    input.namespace[0] == "user"
-    input.namespace[1] == input.context.user_id
-    count(object.keys(input.index)) > 8
-}
-
-`
-
-const defaultAttrExtractRego = `
-package memories.attributes
-
-# Persist namespace root + owner as plaintext attributes for search filtering.
-default attributes = {}
-
-attributes = {"namespace": input.namespace[0], "sub": input.namespace[1]} if {
-    count(input.namespace) >= 2
-}
-`
-
-const defaultFilterInjectRego = `
-package memories.filter
-
-# Non-admin callers are constrained to their own user subtree.
-# If the request is already narrower under user/<user>, keep it.
-namespace_prefix := input.namespace_prefix if {
-    is_admin
-}
-namespace_prefix := input.namespace_prefix if {
-    not is_admin
-    starts_with(input.namespace_prefix, user_prefix)
-}
-namespace_prefix := user_prefix if {
-    not is_admin
-    not starts_with(input.namespace_prefix, user_prefix)
-}
-
-user_prefix := ["user", input.context.user_id]
-
-starts_with(ns, prefix) if {
-    count(prefix) == 0
-}
-starts_with(ns, prefix) if {
-    count(ns) >= count(prefix)
-    not mismatch(ns, prefix)
-}
-mismatch(ns, prefix) if {
-    some i
-    i < count(prefix)
-    ns[i] != prefix[i]
-}
-
-is_admin if {
-    "admin" in input.context.jwt_claims.roles
-}
-
-attribute_filter := {} if {
-    is_admin
-}
-attribute_filter := {"namespace": "user", "sub": input.context.user_id} if {
-    not is_admin
-}
-`
-
-// NewPolicyEngine creates a PolicyEngine. If policyDir is non-empty, policies are
-// loaded from that directory; otherwise the built-in defaults are used.
-func NewPolicyEngine(ctx context.Context, policyDir string) (*PolicyEngine, error) {
+// NewPolicyEngine creates a PolicyEngine. A policy import directory may contain
+// both authz.rego and filter.rego at its root to replace the built-in global
+// policies. When neither file is present, the built-in policies are used. Other
+// Rego files are assets for manifest-based policy types and are not loaded here.
+func NewPolicyEngine(ctx context.Context, policyImportDir string) (*PolicyEngine, error) {
 	e := &PolicyEngine{}
-	if err := e.load(ctx, policyDir); err != nil {
+	if err := e.load(ctx, policyImportDir); err != nil {
 		return nil, err
 	}
 	return e, nil
 }
 
-func regoSource(policyDir, filename, fallback string) string {
-	if policyDir == "" {
-		return fallback
-	}
-	data, err := os.ReadFile(filepath.Join(policyDir, filename))
+func regoSource(policyImportDir, filename string) (string, error) {
+	data, err := os.ReadFile(filepath.Join(policyImportDir, filename))
 	if err != nil {
-		log.Warn("Policy file not found, using built-in default", "file", filename, "err", err)
-		return fallback
+		return "", fmt.Errorf("policy import directory requires %s: %w", filename, err)
 	}
-	return string(data)
+	return string(data), nil
 }
 
-func (e *PolicyEngine) load(ctx context.Context, policyDir string) error {
-	authzSrc := regoSource(policyDir, "authz.rego", defaultAuthzRego)
-	attrSrc := regoSource(policyDir, "attributes.rego", defaultAttrExtractRego)
-	filterSrc := regoSource(policyDir, "filter.rego", defaultFilterInjectRego)
+func (e *PolicyEngine) load(ctx context.Context, policyImportDir string) error {
+	policyImportDir = strings.TrimSpace(policyImportDir)
+	authzSrc, filterSrc := defaultAuthzRego, defaultFilterInjectRego
+	if policyImportDir != "" {
+		entries, err := os.ReadDir(policyImportDir)
+		if err != nil {
+			return fmt.Errorf("read policy import directory: %w", err)
+		}
+		hasAuthz, hasFilter := false, false
+		for _, entry := range entries {
+			if entry.IsDir() || filepath.Ext(entry.Name()) != ".rego" {
+				continue
+			}
+			switch entry.Name() {
+			case "authz.rego":
+				hasAuthz = true
+			case "filter.rego":
+				hasFilter = true
+			}
+		}
+		if hasAuthz || hasFilter {
+			if !hasAuthz {
+				return fmt.Errorf("policy import directory requires authz.rego when filter.rego is present")
+			}
+			if !hasFilter {
+				return fmt.Errorf("policy import directory requires filter.rego when authz.rego is present")
+			}
+			authzSrc, err = regoSource(policyImportDir, "authz.rego")
+			if err != nil {
+				return err
+			}
+			filterSrc, err = regoSource(policyImportDir, "filter.rego")
+			if err != nil {
+				return err
+			}
+		}
+	}
 
 	var err error
-
 	e.authz, err = prepareQuery(ctx, authzSrc, "data.memories.authz.decision")
 	if err != nil {
 		return fmt.Errorf("episodic: load authz policy: %w", err)
-	}
-	e.attrExtract, err = prepareQuery(ctx, attrSrc, "data.memories.attributes.attributes")
-	if err != nil {
-		return fmt.Errorf("episodic: load attribute extraction policy: %w", err)
 	}
 	e.filterInject, err = prepareQuery(ctx, filterSrc, "data.memories.filter")
 	if err != nil {
 		return fmt.Errorf("episodic: load filter injection policy: %w", err)
 	}
 	e.authzSrc = authzSrc
-	e.attrSrc = attrSrc
 	e.filterSrc = filterSrc
-	return nil
-}
-
-// Reload hot-reloads policies from policyDir. Thread-safe.
-func (e *PolicyEngine) Reload(ctx context.Context, policyDir string) error {
-	next := &PolicyEngine{}
-	if err := next.load(ctx, policyDir); err != nil {
-		return err
-	}
-	e.mu.Lock()
-	e.authz = next.authz
-	e.attrExtract = next.attrExtract
-	e.filterInject = next.filterInject
-	e.mu.Unlock()
-	return nil
-}
-
-// Bundle returns the currently active policy sources.
-func (e *PolicyEngine) Bundle() PolicyBundle {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	return PolicyBundle{
-		Authz:      e.authzSrc,
-		Attributes: e.attrSrc,
-		Filter:     e.filterSrc,
-	}
-}
-
-// ReplaceBundle validates and hot-swaps policies from source text.
-func (e *PolicyEngine) ReplaceBundle(ctx context.Context, bundle PolicyBundle) error {
-	authzSrc := strings.TrimSpace(bundle.Authz)
-	attrSrc := strings.TrimSpace(bundle.Attributes)
-	filterSrc := strings.TrimSpace(bundle.Filter)
-	if authzSrc == "" || attrSrc == "" || filterSrc == "" {
-		return fmt.Errorf("authz, attributes, and filter policies are required")
-	}
-
-	authz, err := prepareQuery(ctx, authzSrc, "data.memories.authz.decision")
-	if err != nil {
-		return fmt.Errorf("episodic: compile authz policy: %w", err)
-	}
-	attr, err := prepareQuery(ctx, attrSrc, "data.memories.attributes.attributes")
-	if err != nil {
-		return fmt.Errorf("episodic: compile attribute extraction policy: %w", err)
-	}
-	filter, err := prepareQuery(ctx, filterSrc, "data.memories.filter")
-	if err != nil {
-		return fmt.Errorf("episodic: compile filter injection policy: %w", err)
-	}
-
-	e.mu.Lock()
-	e.authz = authz
-	e.attrExtract = attr
-	e.filterInject = filter
-	e.authzSrc = authzSrc
-	e.attrSrc = attrSrc
-	e.filterSrc = filterSrc
-	e.mu.Unlock()
 	return nil
 }
 
@@ -250,7 +228,11 @@ func prepareQuery(ctx context.Context, src, query string) (*rego.PreparedEvalQue
 }
 
 // EvaluateAuthz evaluates the authz policy and returns the decision.
-func (e *PolicyEngine) EvaluateAuthz(ctx context.Context, operation string, namespace []string, key string, value map[string]interface{}, index map[string]string, pc PolicyContext) (AuthzDecision, error) {
+// kind is the resolved exact canonical memory kind (e.g. "default/v1").
+// It is passed as input.kind so authz policies can restrict access by kind.
+// For read/update it is the kind stored on the row; for write it is the
+// resolved write kind (before persistence).
+func (e *PolicyEngine) EvaluateAuthz(ctx context.Context, operation string, namespace []string, key string, value map[string]interface{}, index map[string]string, kind string, pc PolicyContext) (AuthzDecision, error) {
 	e.mu.RLock()
 	q := *e.authz
 	e.mu.RUnlock()
@@ -259,6 +241,7 @@ func (e *PolicyEngine) EvaluateAuthz(ctx context.Context, operation string, name
 		"operation": operation,
 		"namespace": namespace,
 		"key":       key,
+		"kind":      kind,
 		"context":   policyContextToMap(pc),
 	}
 	if operation == "write" {
@@ -292,45 +275,17 @@ func (e *PolicyEngine) EvaluateAuthz(ctx context.Context, operation string, name
 
 // IsAllowed evaluates the authz policy and returns true if the operation is allowed.
 func (e *PolicyEngine) IsAllowed(ctx context.Context, operation string, namespace []string, key string, pc PolicyContext) (bool, error) {
-	decision, err := e.EvaluateAuthz(ctx, operation, namespace, key, nil, nil, pc)
+	decision, err := e.EvaluateAuthz(ctx, operation, namespace, key, nil, nil, "", pc)
 	if err != nil {
 		return false, err
 	}
 	return decision.Allow, nil
 }
 
-// ExtractAttributes evaluates the attribute extraction policy and returns the
-// plaintext policy_attributes to store alongside the memory.
-func (e *PolicyEngine) ExtractAttributes(ctx context.Context, namespace []string, key string, value map[string]interface{}, index map[string]string, pc PolicyContext) (map[string]interface{}, error) {
-	e.mu.RLock()
-	q := *e.attrExtract
-	e.mu.RUnlock()
-
-	input := map[string]interface{}{
-		"namespace": namespace,
-		"key":       key,
-		"value":     value,
-		"index":     index,
-		"context":   policyContextToMap(pc),
-	}
-	results, err := q.Eval(ctx, rego.EvalInput(input))
-	if err != nil {
-		return nil, fmt.Errorf("episodic attr extract eval: %w", err)
-	}
-	if len(results) == 0 || len(results[0].Expressions) == 0 {
-		return map[string]interface{}{}, nil
-	}
-	extracted, _ := results[0].Expressions[0].Value.(map[string]interface{})
-	if extracted == nil {
-		return map[string]interface{}{}, nil
-	}
-	return extracted, nil
-}
-
 // InjectFilter evaluates the search filter injection policy and returns the
 // effective namespace_prefix and merged attribute_filter to use for search.
 func (e *PolicyEngine) InjectFilter(ctx context.Context, nsPrefix []string, filter map[string]interface{}, pc PolicyContext) ([]string, map[string]interface{}, error) {
-	effectivePrefix, policyFilter, err := e.InjectFilterParts(ctx, nsPrefix, filter, pc)
+	effectivePrefix, policyFilter, _, err := e.InjectFilterPartsWithKind(ctx, nsPrefix, filter, "", pc)
 	if err != nil {
 		return nsPrefix, filter, err
 	}
@@ -346,9 +301,24 @@ func (e *PolicyEngine) InjectFilter(ctx context.Context, nsPrefix []string, filt
 
 // InjectFilterParts evaluates the search filter injection policy and returns
 // the effective namespace_prefix plus policy-supplied attribute_filter without
-// merging it into the caller filter. Search paths that need to preserve
-// duplicate caller/policy constraints should normalize both filters together.
+// merging it into the caller filter.  The caller kind selector is not passed
+// through this variant; use InjectFilterPartsWithKind when kind restriction is needed.
 func (e *PolicyEngine) InjectFilterParts(ctx context.Context, nsPrefix []string, filter map[string]interface{}, pc PolicyContext) ([]string, map[string]interface{}, error) {
+	effectivePrefix, policyFilter, _, err := e.InjectFilterPartsWithKind(ctx, nsPrefix, filter, "", pc)
+	return effectivePrefix, policyFilter, err
+}
+
+// InjectFilterPartsWithKind evaluates the search filter injection policy and returns:
+//   - effectivePrefix: narrowed namespace prefix
+//   - policyFilter:    policy-injected attribute_filter (not yet merged with caller)
+//   - ki:              KindIntersection of callerKind and the optional policy kind output
+//
+// filter.rego may include a "kind" field in its output document; if present it
+// must be a valid kind selector string and is intersected with callerKind using
+// IntersectKindSelectors.  A non-string or malformed policy kind output returns an
+// internal error.  The built-in default policy does not output "kind", so
+// ki.Selector == callerKind and ki.Empty == false for all built-in policy users.
+func (e *PolicyEngine) InjectFilterPartsWithKind(ctx context.Context, nsPrefix []string, filter map[string]interface{}, callerKind string, pc PolicyContext) (effectivePrefix []string, policyFilter map[string]interface{}, ki KindIntersection, err error) {
 	e.mu.RLock()
 	q := *e.filterInject
 	e.mu.RUnlock()
@@ -356,33 +326,90 @@ func (e *PolicyEngine) InjectFilterParts(ctx context.Context, nsPrefix []string,
 	input := map[string]interface{}{
 		"namespace_prefix": nsPrefix,
 		"filter":           filter,
+		"kind":             callerKind,
 		"context":          policyContextToMap(pc),
 	}
-	results, err := q.Eval(ctx, rego.EvalInput(input))
-	if err != nil {
-		return nsPrefix, nil, fmt.Errorf("episodic filter inject eval: %w", err)
+	results, evalErr := q.Eval(ctx, rego.EvalInput(input))
+	if evalErr != nil {
+		return nsPrefix, nil, KindIntersection{Selector: callerKind}, fmt.Errorf("episodic filter inject eval: %w", evalErr)
 	}
 	if len(results) == 0 || len(results[0].Expressions) == 0 {
-		return nsPrefix, nil, nil
+		return nsPrefix, nil, KindIntersection{Selector: callerKind}, nil
 	}
-	m, _ := results[0].Expressions[0].Value.(map[string]interface{})
-	if m == nil {
-		return nsPrefix, nil, nil
+	m, ok := results[0].Expressions[0].Value.(map[string]interface{})
+	if !ok || m == nil {
+		return nsPrefix, nil, KindIntersection{Selector: callerKind},
+			fmt.Errorf("episodic policy error: filter.rego result must be an object, got %T", results[0].Expressions[0].Value)
 	}
 
 	// Extract effective namespace_prefix.
-	effectivePrefix := nsPrefix
+	effectivePrefix = nsPrefix
 	if raw, ok := m["namespace_prefix"]; ok {
-		effectivePrefix = toStringSlice(raw)
-	}
-
-	policyFilter := make(map[string]interface{})
-	if af, ok := m["attribute_filter"].(map[string]interface{}); ok {
-		for k, v := range af {
-			policyFilter[k] = v
+		var valid bool
+		effectivePrefix, valid = strictStringSlice(raw)
+		if !valid {
+			return nsPrefix, nil, KindIntersection{Selector: callerKind},
+				fmt.Errorf("episodic policy error: filter.rego 'namespace_prefix' output must be an array of strings, got %T", raw)
 		}
 	}
-	return effectivePrefix, policyFilter, nil
+
+	outFilter := make(map[string]interface{})
+	if rawAF, present := m["attribute_filter"]; present {
+		af, valid := rawAF.(map[string]interface{})
+		if !valid || af == nil {
+			return nsPrefix, nil, KindIntersection{Selector: callerKind},
+				fmt.Errorf("episodic policy error: filter.rego 'attribute_filter' output must be an object, got %T", rawAF)
+		}
+		for k, v := range af {
+			outFilter[k] = v
+		}
+	}
+
+	// Extract optional policy kind narrowing.
+	// If "kind" is present in the policy output it must be a non-empty string
+	// that passes ValidateKindSelector; anything else is a policy error.
+	// A present-but-empty string (after trim) is also an error: omit the key to
+	// express "no restriction" rather than returning an empty string.
+	policyKind := ""
+	if rawPK, hasPK := m["kind"]; hasPK {
+		pk, ok := rawPK.(string)
+		if !ok {
+			return nsPrefix, nil, KindIntersection{Selector: callerKind},
+				fmt.Errorf("episodic policy error: filter.rego 'kind' output must be a non-empty string, got %T", rawPK)
+		}
+		pk = strings.TrimSpace(pk)
+		if pk == "" {
+			return nsPrefix, nil, KindIntersection{Selector: callerKind},
+				fmt.Errorf("episodic policy error: filter.rego 'kind' output must be non-empty when present (omit the key to express no restriction)")
+		}
+		if err2 := ValidateKindSelector(pk); err2 != nil {
+			return nsPrefix, nil, KindIntersection{Selector: callerKind},
+				fmt.Errorf("episodic policy error: malformed filter.rego 'kind' output: %w", err2)
+		}
+		policyKind = pk
+	}
+	ki = IntersectKindSelectors(callerKind, policyKind)
+
+	return effectivePrefix, outFilter, ki, nil
+}
+
+func strictStringSlice(v interface{}) ([]string, bool) {
+	switch values := v.(type) {
+	case []string:
+		return append([]string(nil), values...), true
+	case []interface{}:
+		out := make([]string, len(values))
+		for i, value := range values {
+			text, ok := value.(string)
+			if !ok {
+				return nil, false
+			}
+			out[i] = text
+		}
+		return out, true
+	default:
+		return nil, false
+	}
 }
 
 func policyContextToMap(pc PolicyContext) map[string]interface{} {

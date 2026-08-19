@@ -308,6 +308,7 @@ func BuildServer(ctx context.Context, cfg *config.Config) (*Server, error) {
 	go evictionSvc.Start(ctx)
 
 	taskProc := service.NewTaskProcessor(store, vectorStore)
+	taskProc.SetEpisodicStore(episodicStore, encSvc)
 	go taskProc.Start(ctx)
 
 	attachmentCleanup := service.NewAttachmentCleanupService(store, attachStore, cfg.AttachmentCleanupInterval)
@@ -411,6 +412,11 @@ func BuildServer(ctx context.Context, cfg *config.Config) (*Server, error) {
 		RateLimiter:    rateLimiter,
 	})
 	pb.RegisterAdminCheckpointServiceServer(grpcServer, &grpcserver.AdminCheckpointServer{Store: store})
+	pb.RegisterAdminMemoryKindServiceServer(grpcServer, &grpcserver.AdminMemoryKindServer{
+		Store:     episodicStore,
+		MainStore: store,
+		Config:    cfg,
+	})
 
 	builtServer.Config = cfg
 	builtServer.Store = store
@@ -546,9 +552,12 @@ func initEpisodic(ctx context.Context, cfg *config.Config) (registryepisodic.Epi
 		return nil, nil, nil
 	}
 
-	policy, err := episodic.NewPolicyEngine(ctx, cfg.EpisodicPolicyDir)
+	policy, err := episodic.NewPolicyEngine(ctx, cfg.PolicyImportDir)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to initialize episodic OPA policy engine: %w", err)
+	}
+	if err := episodic.ImportKindVersions(ctx, eStore, cfg.PolicyImportDir); err != nil {
+		return nil, nil, fmt.Errorf("failed to import episodic memory kinds: %w", err)
 	}
 	return eStore, policy, nil
 }

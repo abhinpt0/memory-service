@@ -15,6 +15,7 @@ require (
 	github.com/cucumber/godog v0.15.1
 	github.com/dgraph-io/ristretto/v2 v2.4.2
 	github.com/getkin/kin-openapi v0.144.0
+	github.com/ghodss/yaml v1.0.0
 	github.com/gin-gonic/gin v1.12.0
 	github.com/go-task/task/v3 v3.52.0
 	github.com/google/uuid v1.6.0
@@ -299,6 +300,7 @@ require (
 	google.golang.org/api v0.287.0 // indirect
 	google.golang.org/genproto v0.0.0-20260630182238-925bb5da69e7 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260630182238-925bb5da69e7 // indirect
+	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	mvdan.cc/sh/moreinterp v0.0.0-20260120230322-19def062a997 // indirect
 	mvdan.cc/sh/v3 v3.13.2-0.20260613075524-2255122b577b // indirect

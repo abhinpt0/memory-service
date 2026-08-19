@@ -64,6 +64,10 @@ export type AdminMemoryItem = {
   attributes?: {
     [key: string]: unknown;
   };
+  /**
+   * Canonical schema name for this memory row (e.g. "default/v1"). Always non-empty.
+   */
+  kind: string;
   score?: number;
   /**
    * Attribution — purposes (or texts) of all queries that matched this item. Present only in multi-query responses.
@@ -108,6 +112,12 @@ export type AdminSearchMemoriesRequest = {
   limit?: number;
   justification?: string;
   as_user_id?: string;
+  /**
+   * Optional schema selector. An exact canonical name searches that version only.
+   * A family name searches all versions in that family. Omission searches all schemas.
+   */
+  kind?: string;
+  sort?: MemoryAttributeSort;
 };
 
 export type AdminSearchMemoriesResponse = {
@@ -118,24 +128,110 @@ export type AdminMemoryNamespace = {
   segments?: Array<string>;
 };
 
+/**
+ * One-field typed sort for attribute-only memory searches. Rejected when query or queries
+ * is present (semantic results are ordered by similarity score).
+ */
+export type MemoryAttributeSort = {
+  /**
+   * The attribute name to sort by. Must be declared in the selected schema(s).
+   */
+  field: string;
+  direction?: "asc" | "desc";
+};
+
 export type AdminListMemoryNamespacesResponse = {
   namespaces?: Array<AdminMemoryNamespace>;
   afterCursor?: string;
 };
 
-export type MemoryPolicyBundle = {
+export type MemoryKindVersion = {
   /**
-   * Rego source for `package memories.authz`.
+   * Canonical schema name (family/version), e.g. "customer-profile/v2".
    */
-  authz: string;
+  name?: string;
   /**
-   * Rego source for `package memories.attributes`.
+   * Declared type for each attribute the Rego program may return. Allowed type values: string, number, boolean, timestamp, string[].
    */
-  attributes: string;
+  attributes?: {
+    [key: string]: string;
+  };
   /**
-   * Rego source for `package memories.filter`.
+   * OPA Rego source for `package memories.attributes`. Present on definition endpoints only.
    */
-  filter: string;
+  projectionRego?: string;
+  /**
+   * When false the version is not writable (e.g. a deprecated version set to read-only).
+   */
+  writable?: boolean;
+  createdAt?: string;
+};
+
+export type CreateMemoryKindVersionRequest = {
+  /**
+   * Canonical schema name (family/version).
+   */
+  name: string;
+  attributes: {
+    [key: string]: string;
+  };
+  /**
+   * OPA Rego source for `package memories.attributes`.
+   */
+  projectionRego: string;
+  /**
+   * Whether new writes may use this immutable version. Defaults to true when omitted.
+   */
+  writable?: boolean;
+};
+
+export type ListMemoryKindVersionsResponse = {
+  items?: Array<MemoryKindVersion>;
+};
+
+export type MemoryKindMigration = {
+  id?: string;
+  /**
+   * Source schema version canonical name.
+   */
+  source?: string;
+  /**
+   * Target schema version canonical name.
+   */
+  target?: string;
+  /**
+   * Optional namespace scope restriction.
+   */
+  namespace_prefix?: Array<string>;
+  state?: "queued" | "running" | "canceling" | "succeeded" | "failed" | "canceled";
+  cancel_requested?: boolean;
+  migrated_count?: number;
+  skipped_tombstone_count?: number;
+  vector_pending_count?: number;
+  retry_count?: number;
+  last_error_code?: string;
+  created_at?: string;
+  started_at?: string;
+  completed_at?: string;
+};
+
+export type CreateMemoryKindMigrationRequest = {
+  /**
+   * Source schema version canonical name.
+   */
+  source: string;
+  /**
+   * Target schema version canonical name.
+   */
+  target: string;
+  /**
+   * Optional namespace scope restriction.
+   */
+  namespace_prefix?: Array<string>;
+};
+
+export type ListMemoryKindMigrationsResponse = {
+  items?: Array<MemoryKindMigration>;
 };
 
 export type MemoryIndexStatusResponse = {
@@ -579,6 +675,11 @@ export type PutMemoryRequest = {
    * Optional optimistic concurrency revision expected for the active memory.
    */
   expected_revision?: number;
+  /**
+   * Optional exact canonical schema name ("profile/v2"). Omission always uses
+   * the fixed built-in "default/v1" kind.
+   */
+  kind?: string;
 };
 
 export type MemoryWriteResult = {
@@ -588,6 +689,10 @@ export type MemoryWriteResult = {
   attributes?: {
     [key: string]: unknown;
   };
+  /**
+   * Exact canonical schema name used for this write (e.g. "default/v1").
+   */
+  kind: string;
   createdAt?: string;
   expiresAt?: string;
   revision?: number;
@@ -662,6 +767,14 @@ export type AdminListMemoriesData = {
     includeUsage?: boolean;
     limit?: number;
     afterCursor?: string;
+    /**
+     * Optional memory kind selector. Exact canonical name (e.g. default/v1), family name (e.g. default), or omit for all kinds.
+     */
+    kind?: string;
+    /**
+     * Optional JSON-encoded projected-attribute filter object (same format as AdminSearch filter body field).
+     */
+    filter?: string;
     justification?: string;
   };
   url: "/admin/v1/memories";
@@ -813,55 +926,234 @@ export type AdminListMemoryNamespacesResponses = {
 export type AdminListMemoryNamespacesResponse2 =
   AdminListMemoryNamespacesResponses[keyof AdminListMemoryNamespacesResponses];
 
-export type AdminGetMemoryPoliciesData = {
+export type AdminListMemoryKindVersionsData = {
   body?: never;
   path?: never;
-  query?: never;
-  url: "/admin/v1/memory-policies";
+  query?: {
+    /**
+     * Filter by schema family name.
+     */
+    family?: string;
+    justification?: string;
+  };
+  url: "/admin/v1/memory-kinds";
 };
 
-export type AdminGetMemoryPoliciesErrors = {
+export type AdminListMemoryKindVersionsErrors = {
   /**
    * Error response
    */
   default: ErrorResponse;
 };
 
-export type AdminGetMemoryPoliciesError = AdminGetMemoryPoliciesErrors[keyof AdminGetMemoryPoliciesErrors];
+export type AdminListMemoryKindVersionsError =
+  AdminListMemoryKindVersionsErrors[keyof AdminListMemoryKindVersionsErrors];
 
-export type AdminGetMemoryPoliciesResponses = {
+export type AdminListMemoryKindVersionsResponses = {
   /**
-   * Current episodic policy bundle.
+   * List of schema versions.
    */
-  200: MemoryPolicyBundle;
+  200: ListMemoryKindVersionsResponse;
 };
 
-export type AdminGetMemoryPoliciesResponse = AdminGetMemoryPoliciesResponses[keyof AdminGetMemoryPoliciesResponses];
+export type AdminListMemoryKindVersionsResponse =
+  AdminListMemoryKindVersionsResponses[keyof AdminListMemoryKindVersionsResponses];
 
-export type AdminPutMemoryPoliciesData = {
-  body: MemoryPolicyBundle;
+export type AdminCreateMemoryKindVersionData = {
+  body: CreateMemoryKindVersionRequest;
   path?: never;
-  query?: never;
-  url: "/admin/v1/memory-policies";
+  query?: {
+    justification?: string;
+  };
+  url: "/admin/v1/memory-kinds";
 };
 
-export type AdminPutMemoryPoliciesErrors = {
+export type AdminCreateMemoryKindVersionErrors = {
+  /**
+   * Error response
+   */
+  409: ErrorResponse;
   /**
    * Error response
    */
   default: ErrorResponse;
 };
 
-export type AdminPutMemoryPoliciesError = AdminPutMemoryPoliciesErrors[keyof AdminPutMemoryPoliciesErrors];
+export type AdminCreateMemoryKindVersionError =
+  AdminCreateMemoryKindVersionErrors[keyof AdminCreateMemoryKindVersionErrors];
 
-export type AdminPutMemoryPoliciesResponses = {
+export type AdminCreateMemoryKindVersionResponses = {
   /**
-   * Policies updated.
+   * Schema version created or already existed.
+   */
+  200: MemoryKindVersion;
+};
+
+export type AdminCreateMemoryKindVersionResponse =
+  AdminCreateMemoryKindVersionResponses[keyof AdminCreateMemoryKindVersionResponses];
+
+export type AdminGetMemoryKindVersionData = {
+  body?: never;
+  path: {
+    family: string;
+    version: string;
+  };
+  query?: {
+    justification?: string;
+  };
+  url: "/admin/v1/memory-kinds/{family}/{version}";
+};
+
+export type AdminGetMemoryKindVersionErrors = {
+  /**
+   * Error response
+   */
+  default: ErrorResponse;
+};
+
+export type AdminGetMemoryKindVersionError = AdminGetMemoryKindVersionErrors[keyof AdminGetMemoryKindVersionErrors];
+
+export type AdminGetMemoryKindVersionResponses = {
+  /**
+   * Schema version.
+   */
+  200: MemoryKindVersion;
+};
+
+export type AdminGetMemoryKindVersionResponse =
+  AdminGetMemoryKindVersionResponses[keyof AdminGetMemoryKindVersionResponses];
+
+export type AdminListMemoryKindMigrationsData = {
+  body?: never;
+  path?: never;
+  query?: {
+    /**
+     * Filter by state (queued, running, canceling, succeeded, failed, canceled).
+     */
+    state?: string;
+    justification?: string;
+  };
+  url: "/admin/v1/memory-kind-migrations";
+};
+
+export type AdminListMemoryKindMigrationsErrors = {
+  /**
+   * Error response
+   */
+  default: ErrorResponse;
+};
+
+export type AdminListMemoryKindMigrationsError =
+  AdminListMemoryKindMigrationsErrors[keyof AdminListMemoryKindMigrationsErrors];
+
+export type AdminListMemoryKindMigrationsResponses = {
+  /**
+   * List of migrations.
+   */
+  200: ListMemoryKindMigrationsResponse;
+};
+
+export type AdminListMemoryKindMigrationsResponse =
+  AdminListMemoryKindMigrationsResponses[keyof AdminListMemoryKindMigrationsResponses];
+
+export type AdminCreateMemoryKindMigrationData = {
+  body: CreateMemoryKindMigrationRequest;
+  path?: never;
+  query?: {
+    justification?: string;
+  };
+  url: "/admin/v1/memory-kind-migrations";
+};
+
+export type AdminCreateMemoryKindMigrationErrors = {
+  /**
+   * Error response
+   */
+  409: ErrorResponse;
+  /**
+   * Error response
+   */
+  default: ErrorResponse;
+};
+
+export type AdminCreateMemoryKindMigrationError =
+  AdminCreateMemoryKindMigrationErrors[keyof AdminCreateMemoryKindMigrationErrors];
+
+export type AdminCreateMemoryKindMigrationResponses = {
+  /**
+   * Migration created.
+   */
+  200: MemoryKindMigration;
+};
+
+export type AdminCreateMemoryKindMigrationResponse =
+  AdminCreateMemoryKindMigrationResponses[keyof AdminCreateMemoryKindMigrationResponses];
+
+export type AdminCancelMemoryKindMigrationData = {
+  body?: never;
+  path: {
+    id: string;
+  };
+  query?: {
+    justification?: string;
+  };
+  url: "/admin/v1/memory-kind-migrations/{id}";
+};
+
+export type AdminCancelMemoryKindMigrationErrors = {
+  /**
+   * Resource not found
+   */
+  404: ErrorResponse;
+  /**
+   * Error response
+   */
+  default: ErrorResponse;
+};
+
+export type AdminCancelMemoryKindMigrationError =
+  AdminCancelMemoryKindMigrationErrors[keyof AdminCancelMemoryKindMigrationErrors];
+
+export type AdminCancelMemoryKindMigrationResponses = {
+  /**
+   * Cancellation requested.
    */
   204: void;
 };
 
-export type AdminPutMemoryPoliciesResponse = AdminPutMemoryPoliciesResponses[keyof AdminPutMemoryPoliciesResponses];
+export type AdminCancelMemoryKindMigrationResponse =
+  AdminCancelMemoryKindMigrationResponses[keyof AdminCancelMemoryKindMigrationResponses];
+
+export type AdminGetMemoryKindMigrationData = {
+  body?: never;
+  path: {
+    id: string;
+  };
+  query?: {
+    justification?: string;
+  };
+  url: "/admin/v1/memory-kind-migrations/{id}";
+};
+
+export type AdminGetMemoryKindMigrationErrors = {
+  /**
+   * Error response
+   */
+  default: ErrorResponse;
+};
+
+export type AdminGetMemoryKindMigrationError =
+  AdminGetMemoryKindMigrationErrors[keyof AdminGetMemoryKindMigrationErrors];
+
+export type AdminGetMemoryKindMigrationResponses = {
+  /**
+   * Migration status.
+   */
+  200: MemoryKindMigration;
+};
+
+export type AdminGetMemoryKindMigrationResponse =
+  AdminGetMemoryKindMigrationResponses[keyof AdminGetMemoryKindMigrationResponses];
 
 export type AdminDeleteMemoryData = {
   body?: never;

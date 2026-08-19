@@ -100,6 +100,7 @@ type memoryRow struct {
 	ExpiresAt        *time.Time             `gorm:"column:expires_at"`
 	ArchivedAt       *time.Time             `gorm:"column:archived_at"`
 	IndexedAt        *time.Time             `gorm:"column:indexed_at"`
+	MemoryKind       string                 `gorm:"column:memory_kind"` // always non-empty
 }
 
 func (memoryRow) TableName() string { return "memories" }
@@ -225,6 +226,21 @@ func (e *sqliteEpisodicStore) PutMemory(ctx context.Context, req registryepisodi
 				return registryepisodic.ErrMemoryRevisionConflict
 			}
 		}
+		if expected := req.AuthorizedPredecessor; expected != nil {
+			if !expected.Exists {
+				if len(active) != 0 {
+					return registryepisodic.ErrMemoryRevisionConflict
+				}
+			} else if len(active) != 1 || active[0].ID != expected.ID || active[0].Revision != expected.Revision {
+				return registryepisodic.ErrMemoryRevisionConflict
+			}
+		}
+		predecessor := req.AuthorizedPredecessor
+		if predecessor == nil && req.ExpectedRevision != nil {
+			predecessor = &registryepisodic.MemoryPredecessorExpectation{
+				Exists: true, ID: active[0].ID, Revision: active[0].Revision,
+			}
+		}
 		if len(active) > 0 {
 			revision = active[0].Revision + 1
 		}
@@ -233,21 +249,40 @@ func (e *sqliteEpisodicStore) PutMemory(ctx context.Context, req registryepisodi
 		// Set deleted_reason=0 (superseded by update) and reset indexed_at so the indexer
 		// removes the old vector entry.
 		deletedReason := int16(0)
-		result := tx.Exec(`
-			UPDATE memories
-			SET archived_at = ?, indexed_at = NULL, deleted_reason = ?
-			WHERE namespace = ? AND key = ? AND archived_at IS NULL`,
-			now, deletedReason, nsEncoded, req.Key,
-		)
+		var result *gorm.DB
+		switch expected := predecessor; {
+		case expected != nil && !expected.Exists:
+			result = tx
+		case expected != nil:
+			result = tx.Exec(`
+				UPDATE memories
+				SET archived_at = ?, indexed_at = NULL, deleted_reason = ?, revision = revision + 1
+				WHERE id = ? AND revision = ? AND archived_at IS NULL`,
+				now, deletedReason, expected.ID.String(), expected.Revision,
+			)
+		default:
+			result = tx.Exec(`
+				UPDATE memories
+				SET archived_at = ?, indexed_at = NULL, deleted_reason = ?, revision = revision + 1
+				WHERE namespace = ? AND key = ? AND archived_at IS NULL`,
+				now, deletedReason, nsEncoded, req.Key,
+			)
+		}
 		if result.Error != nil {
 			return fmt.Errorf("archive previous row: %w", result.Error)
+		}
+		if predecessor != nil && predecessor.Exists && result.RowsAffected != 1 {
+			return registryepisodic.ErrMemoryRevisionConflict
 		}
 		// kind=0 (add) if no previous row existed, kind=1 (update) if one was archived.
 		if result.RowsAffected > 0 {
 			kind = 1
 		}
 
-		// Insert the new row.
+		// Insert the new row. MemoryKind must be non-empty (resolved before PutMemory is called).
+		if req.MemoryKind == "" {
+			return fmt.Errorf("internal error: MemoryKind must be resolved before PutMemory")
+		}
 		row := memoryRow{
 			ID:               newID,
 			Namespace:        nsEncoded,
@@ -259,9 +294,16 @@ func (e *sqliteEpisodicStore) PutMemory(ctx context.Context, req registryepisodi
 			Revision:         revision,
 			CreatedAt:        now,
 			ExpiresAt:        expiresAt,
+			MemoryKind:       req.MemoryKind,
 			// IndexedAt NULL = pending vector sync
 		}
-		return tx.Create(&row).Error
+		if err := tx.Create(&row).Error; err != nil {
+			if _, ok := sqliteUniqueViolation(err); ok {
+				return registryepisodic.ErrMemoryRevisionConflict
+			}
+			return err
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, err
@@ -272,13 +314,60 @@ func (e *sqliteEpisodicStore) PutMemory(ctx context.Context, req registryepisodi
 		Namespace:  req.Namespace,
 		Key:        req.Key,
 		Attributes: req.PolicyAttributes,
+		MemoryKind: req.MemoryKind,
 		CreatedAt:  now,
 		ExpiresAt:  expiresAt,
 		Revision:   revision,
 	}, nil
 }
 
-// GetMemory retrieves the active memory for (namespace, key).
+// GetMemoryRowKind returns the canonical kind for (namespace, key) without loading the value.
+func (e *sqliteEpisodicStore) GetMemoryRowKind(ctx context.Context, namespace []string, key string, archived registryepisodic.ArchiveFilter) (string, bool, error) {
+	nsEncoded, err := e.encodeNS(namespace)
+	if err != nil {
+		return "", false, err
+	}
+	whereClause := "namespace = ? AND key = ? AND " + sqliteMemoryArchiveWhere("memories", archived)
+	args := []interface{}{nsEncoded, key}
+	var kind string
+	result := e.dbFor(ctx).Raw(
+		`SELECT memory_kind FROM memories WHERE `+whereClause+` ORDER BY created_at DESC, id DESC LIMIT 1`,
+		args...,
+	).Scan(&kind)
+	if result.Error != nil {
+		return "", false, fmt.Errorf("get memory kind: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return "", false, nil
+	}
+	return kind, true, nil
+}
+
+func (e *sqliteEpisodicStore) GetMemoryPredecessor(ctx context.Context, namespace []string, key string) (*registryepisodic.MemoryPredecessor, error) {
+	nsEncoded, err := e.encodeNS(namespace)
+	if err != nil {
+		return nil, err
+	}
+	var row struct {
+		ID         uuid.UUID `gorm:"column:id"`
+		Revision   int64     `gorm:"column:revision"`
+		MemoryKind string    `gorm:"column:memory_kind"`
+	}
+	result := e.dbFor(ctx).Raw(`
+		SELECT id, revision, memory_kind
+		FROM memories
+		WHERE namespace = ? AND key = ? AND archived_at IS NULL
+		ORDER BY created_at DESC, id DESC
+		LIMIT 1`, nsEncoded, key).Scan(&row)
+	if result.Error != nil {
+		return nil, fmt.Errorf("get memory predecessor: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return nil, nil
+	}
+	return &registryepisodic.MemoryPredecessor{ID: row.ID, Revision: row.Revision, MemoryKind: row.MemoryKind}, nil
+}
+
 func (e *sqliteEpisodicStore) GetMemory(ctx context.Context, namespace []string, key string, archived registryepisodic.ArchiveFilter) (*registryepisodic.MemoryItem, error) {
 	nsEncoded, err := e.encodeNS(namespace)
 	if err != nil {
@@ -289,7 +378,7 @@ func (e *sqliteEpisodicStore) GetMemory(ctx context.Context, namespace []string,
 	result := e.dbFor(ctx).Raw(`
 		SELECT *
 		FROM memories
-		WHERE namespace = ? AND key = ?
+		WHERE namespace = ? AND key = ? AND `+sqliteMemoryArchiveWhere("memories", archived)+`
 		ORDER BY created_at DESC, id DESC
 		LIMIT 1`,
 		nsEncoded, key,
@@ -301,9 +390,6 @@ func (e *sqliteEpisodicStore) GetMemory(ctx context.Context, namespace []string,
 		return nil, nil
 	}
 	row := rows[0]
-	if !matchesMemoryArchiveFilter(row.ArchivedAt, row.DeletedReason, archived) {
-		return nil, nil
-	}
 	return e.rowToItem(row, namespace)
 }
 
@@ -455,20 +541,22 @@ func (e *sqliteEpisodicStore) ArchiveMemory(ctx context.Context, namespace []str
 }
 
 // SearchMemories performs attribute-filter-only search within the namespace prefix.
-func (e *sqliteEpisodicStore) SearchMemories(ctx context.Context, namespacePrefix []string, filter registryepisodic.AttributeFilter, limit int, archived registryepisodic.ArchiveFilter) ([]registryepisodic.MemoryItem, error) {
-	nsEncoded, err := e.encodeNS(namespacePrefix)
+func (e *sqliteEpisodicStore) SearchMemories(ctx context.Context, sq registryepisodic.MemorySearchQuery) ([]registryepisodic.MemoryItem, error) {
+	nsEncoded, err := e.encodeNS(sq.NamespacePrefix)
 	if err != nil {
 		return nil, err
 	}
 
+	archiveWhere := sqliteMemoryArchiveWhere("candidate", sq.Archived)
 	q := e.dbFor(ctx).
 		Table("memories AS m").
 		Select("m.*").
 		Joins(`
 			JOIN (
 				SELECT namespace, key, MAX(created_at) AS max_created_at
-				FROM memories
-				WHERE namespace = ? OR namespace LIKE ?
+					FROM memories AS candidate
+					WHERE (namespace = ? OR namespace LIKE ?)
+					  AND `+archiveWhere+`
 				GROUP BY namespace, key
 			) latest
 			ON m.namespace = latest.namespace
@@ -476,15 +564,37 @@ func (e *sqliteEpisodicStore) SearchMemories(ctx context.Context, namespacePrefi
 			AND m.created_at = latest.max_created_at`,
 			nsEncoded, episodic.NamespacePrefixPattern(nsEncoded),
 		).
-		Where(sqliteMemoryArchiveWhere("m", archived)).
-		Order("m.created_at DESC, m.id DESC").
-		Limit(limit)
+		Where(sqliteMemoryArchiveWhere("m", sq.Archived)).
+		Limit(sq.Limit)
 
-	if !filter.Empty() {
-		clause, args := buildSQLFilter(filter)
+	if !sq.Filter.Empty() {
+		clause, args := buildSQLFilter(sq.Filter)
 		if clause != "" {
 			q = q.Where(clause, args...)
 		}
+	}
+	if sq.MemoryKind != "" {
+		if strings.Contains(sq.MemoryKind, "/") {
+			q = q.Where("m.memory_kind = ?", sq.MemoryKind)
+		} else {
+			safeFamily := escapeSQLLike(sq.MemoryKind)
+			q = q.Where("m.memory_kind LIKE ? ESCAPE '\\'", safeFamily+"/%")
+		}
+	}
+	if sq.Sort != nil {
+		dir := "ASC"
+		if strings.ToLower(sq.Sort.Direction) == "desc" {
+			dir = "DESC"
+		}
+		field := sq.Sort.Field
+		// SQLite: NULLS LAST is only valid on newer versions; use CASE for portability.
+		sortExpr := sqliteAttrSortExpr(field, sq.Sort.Type)
+		q = q.Order(fmt.Sprintf(
+			`CASE WHEN json_extract(policy_attributes, '$."%s"') IS NULL THEN 1 ELSE 0 END, %s %s, m.created_at DESC, m.id DESC`,
+			field, sortExpr, dir,
+		))
+	} else {
+		q = q.Order("m.created_at DESC, m.id DESC")
 	}
 
 	var rows []memoryRow
@@ -509,6 +619,7 @@ func (e *sqliteEpisodicStore) SearchMemories(ctx context.Context, namespacePrefi
 func (e *sqliteEpisodicStore) ListNamespaces(ctx context.Context, req registryepisodic.ListNamespacesRequest) ([][]string, error) {
 	var rawNS []string
 	q := e.dbFor(ctx).Table("memories AS m").Select("DISTINCT m.namespace")
+	archiveWhere := sqliteMemoryArchiveWhere("candidate", req.Archived)
 	if len(req.Prefix) > 0 {
 		nsEncoded, err := e.encodeNS(req.Prefix)
 		if err != nil {
@@ -517,8 +628,9 @@ func (e *sqliteEpisodicStore) ListNamespaces(ctx context.Context, req registryep
 		q = q.Joins(`
 			JOIN (
 				SELECT namespace, key, MAX(created_at) AS max_created_at
-				FROM memories
-				WHERE namespace = ? OR namespace LIKE ?
+					FROM memories AS candidate
+					WHERE (namespace = ? OR namespace LIKE ?)
+					  AND `+archiveWhere+`
 				GROUP BY namespace, key
 			) latest
 			ON m.namespace = latest.namespace
@@ -530,7 +642,8 @@ func (e *sqliteEpisodicStore) ListNamespaces(ctx context.Context, req registryep
 		q = q.Joins(`
 			JOIN (
 				SELECT namespace, key, MAX(created_at) AS max_created_at
-				FROM memories
+					FROM memories AS candidate
+					WHERE ` + archiveWhere + `
 				GROUP BY namespace, key
 			) latest
 			ON m.namespace = latest.namespace
@@ -538,6 +651,16 @@ func (e *sqliteEpisodicStore) ListNamespaces(ctx context.Context, req registryep
 			AND m.created_at = latest.max_created_at`)
 	}
 	q = q.Where(sqliteMemoryArchiveWhere("m", req.Archived))
+	if req.MemoryKind != "" {
+		if strings.Contains(req.MemoryKind, "/") {
+			q = q.Where("m.memory_kind = ?", req.MemoryKind)
+		} else {
+			q = q.Where("m.memory_kind LIKE ? ESCAPE '\\'", escapeSQLLike(req.MemoryKind)+"/%")
+		}
+	}
+	if filterSQL, filterArgs := buildSQLFilter(req.Filter); filterSQL != "" {
+		q = q.Where(strings.ReplaceAll(filterSQL, "policy_attributes", "m.policy_attributes"), filterArgs...)
+	}
 	result := q.Pluck("namespace", &rawNS)
 	if result.Error != nil {
 		return nil, fmt.Errorf("list namespaces: %w", result.Error)
@@ -588,6 +711,8 @@ func (e *sqliteEpisodicStore) FindMemoriesPendingIndexing(ctx context.Context, l
 			PolicyAttributes: row.PolicyAttributes,
 			IndexedContent:   row.IndexedContent,
 			ArchivedAt:       row.ArchivedAt,
+			MemoryKind:       row.MemoryKind,
+			Revision:         row.Revision,
 		}
 		if row.DeletedReason != nil {
 			value := int32(*row.DeletedReason)
@@ -626,15 +751,20 @@ func (e *sqliteEpisodicStore) UpsertMemoryVectors(ctx context.Context, items []r
 		if err != nil {
 			return fmt.Errorf("marshal memory vector attributes %s/%s: %w", item.MemoryID, item.FieldName, err)
 		}
+		if item.MemoryKind == "" {
+			return fmt.Errorf("internal error: MemoryVectorUpsert.MemoryKind must be non-empty for memory %s", item.MemoryID)
+		}
 		if err := tx.Exec(`
-			INSERT INTO memory_vectors (memory_id, field_name, namespace, policy_attributes, embedding)
-			VALUES (?, ?, ?, ?, ?)
+			INSERT INTO memory_vectors (memory_id, field_name, namespace, policy_attributes, embedding, memory_kind, memory_revision)
+			VALUES (?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT (memory_id, field_name)
 			DO UPDATE SET
 			  namespace = excluded.namespace,
 			  policy_attributes = excluded.policy_attributes,
-			  embedding = excluded.embedding`,
-			item.MemoryID, item.FieldName, item.Namespace, policyAttributes, vectorBlob,
+			  embedding = excluded.embedding,
+			  memory_kind = excluded.memory_kind,
+			  memory_revision = excluded.memory_revision`,
+			item.MemoryID, item.FieldName, item.Namespace, policyAttributes, vectorBlob, item.MemoryKind, item.MemoryRevision,
 		).Error; err != nil {
 			return fmt.Errorf("upsert memory vector %s/%s: %w", item.MemoryID, item.FieldName, err)
 		}
@@ -657,9 +787,9 @@ func (e *sqliteEpisodicStore) DeleteMemoryVectors(ctx context.Context, memoryID 
 
 // SearchMemoryVectors performs ANN search via pgvector (raw SQL).
 // This is a fallback; the indexer service calls the vector store directly for ANN.
-func (e *sqliteEpisodicStore) SearchMemoryVectors(ctx context.Context, namespacePrefix string, embedding []float32, filter registryepisodic.AttributeFilter, limit int, archived registryepisodic.ArchiveFilter) ([]registryepisodic.MemoryVectorSearch, error) {
+func (e *sqliteEpisodicStore) SearchMemoryVectors(ctx context.Context, namespacePrefix string, embedding []float32, filter registryepisodic.AttributeFilter, memoryKind string, limit int, archived registryepisodic.ArchiveFilter) ([]registryepisodic.MemoryVectorSearch, error) {
 	if e.qdrant != nil {
-		return e.qdrant.SearchMemoryVectors(ctx, namespacePrefix, embedding, filter, limit, archived)
+		return e.qdrant.SearchMemoryVectors(ctx, namespacePrefix, embedding, filter, memoryKind, limit, archived)
 	}
 	if !e.localVectorEnabled() || limit <= 0 {
 		return nil, registryepisodic.ErrSemanticSearchUnavailable
@@ -685,12 +815,23 @@ func (e *sqliteEpisodicStore) SearchMemoryVectors(ctx context.Context, namespace
 			args = append(args, filterArgs...)
 		}
 	}
+	if memoryKind != "" {
+		if strings.Contains(memoryKind, "/") {
+			whereFilter += " AND m.memory_kind = ?"
+			args = append(args, memoryKind)
+		} else {
+			whereFilter += " AND m.memory_kind LIKE ? ESCAPE '\\'"
+			args = append(args, escapeSQLLike(memoryKind)+"/%")
+		}
+	}
 	args = append(args, limit)
 
 	query := `
 		SELECT mv.memory_id, MAX(1.0 - vec_distance_cosine(mv.embedding, ?)) AS score
 		FROM memory_vectors mv
 		JOIN memories m ON m.id = mv.memory_id
+		              AND mv.memory_revision = m.revision
+		              AND mv.memory_kind = m.memory_kind
 		WHERE ` + sqliteMemoryArchiveWhere("m", archived) + namespaceWhere + whereFilter + `
 		GROUP BY mv.memory_id
 		ORDER BY score DESC, memory_id ASC
@@ -708,6 +849,8 @@ func (e *sqliteEpisodicStore) SearchMemoryVectors(ctx context.Context, namespace
 		if err := rows.Scan(&item.MemoryID, &item.Score); err != nil {
 			return nil, fmt.Errorf("scan memory vectors: %w", err)
 		}
+		// SQL JOIN already enforced revision and schema freshness — skip client checks.
+		item.PrimaryValidated = true
 		out = append(out, item)
 	}
 	return out, nil
@@ -746,7 +889,7 @@ func (e *sqliteEpisodicStore) ExpireMemories(ctx context.Context) (int64, error)
 	now := time.Now().UTC()
 	result := e.writeDBFor(ctx, "sqlite episodic store expire memories").Exec(`
 		UPDATE memories
-		SET archived_at = ?, indexed_at = NULL, deleted_reason = ?
+		SET archived_at = ?, indexed_at = NULL, deleted_reason = ?, revision = revision + 1
 		WHERE expires_at <= ? AND archived_at IS NULL`,
 		now, deletedReason, now,
 	)
@@ -772,7 +915,10 @@ func (e *sqliteEpisodicStore) HardDeleteEvictableUpdates(ctx context.Context, li
 func (e *sqliteEpisodicStore) TombstoneDeletedMemories(ctx context.Context, limit int) (int64, error) {
 	result := e.writeDBFor(ctx, "sqlite episodic store tombstone deleted memories").Exec(`
 		UPDATE memories
-		SET value_encrypted = NULL
+		SET value_encrypted = NULL,
+		    policy_attributes = '{}',
+		    revision = revision + 1,
+		    indexed_at = NULL
 		WHERE id IN (
 			SELECT id FROM memories
 			WHERE deleted_reason IN (1, 2) AND indexed_at IS NOT NULL AND value_encrypted IS NOT NULL
@@ -866,7 +1012,8 @@ func (e *sqliteEpisodicStore) ListMemoryEvents(ctx context.Context, req registry
 			SELECT id, namespace, key,
 				CASE kind WHEN 0 THEN 'add' ELSE 'update' END AS event_kind,
 				created_at AS occurred_at,
-				value_encrypted, policy_attributes, expires_at
+				value_encrypted, policy_attributes, expires_at,
+				memory_kind
 			FROM memories WHERE kind IN (`+ph+`)`)
 		args = append(args, writeKinds...)
 	}
@@ -876,7 +1023,8 @@ func (e *sqliteEpisodicStore) ListMemoryEvents(ctx context.Context, req registry
 			SELECT id, namespace, key,
 				'update' AS event_kind,
 				archived_at AS occurred_at,
-				value_encrypted, policy_attributes, expires_at
+				value_encrypted, policy_attributes, expires_at,
+				memory_kind
 			FROM memories WHERE deleted_reason = 1`)
 	}
 	if includeExpired {
@@ -884,7 +1032,8 @@ func (e *sqliteEpisodicStore) ListMemoryEvents(ctx context.Context, req registry
 			SELECT id, namespace, key,
 				'expired' AS event_kind,
 				archived_at AS occurred_at,
-				CAST(NULL AS BLOB) AS value_encrypted, CAST(NULL AS TEXT) AS policy_attributes, expires_at
+				CAST(NULL AS BLOB) AS value_encrypted, CAST(NULL AS TEXT) AS policy_attributes, expires_at,
+				memory_kind
 			FROM memories WHERE deleted_reason = 2`)
 	}
 
@@ -908,9 +1057,22 @@ func (e *sqliteEpisodicStore) ListMemoryEvents(ctx context.Context, req registry
 		outerWhere += " AND e.occurred_at < ?"
 		outerArgs = append(outerArgs, req.Before)
 	}
+	if req.MemoryKind != "" {
+		if strings.Contains(req.MemoryKind, "/") {
+			outerWhere += " AND e.memory_kind = ?"
+			outerArgs = append(outerArgs, req.MemoryKind)
+		} else {
+			outerWhere += " AND e.memory_kind LIKE ? ESCAPE '\\'"
+			outerArgs = append(outerArgs, escapeSQLLike(req.MemoryKind)+"/%")
+		}
+	}
+	if filterSQL, filterArgs := buildSQLFilter(req.Filter); filterSQL != "" {
+		outerWhere += " AND " + strings.ReplaceAll(filterSQL, "policy_attributes", "e.policy_attributes")
+		outerArgs = append(outerArgs, filterArgs...)
+	}
 
 	finalSQL := fmt.Sprintf(`
-		SELECT e.id, e.namespace, e.key, e.event_kind, e.occurred_at, e.value_encrypted, e.policy_attributes, e.expires_at
+		SELECT e.id, e.namespace, e.key, e.event_kind, e.occurred_at, e.value_encrypted, e.policy_attributes, e.expires_at, e.memory_kind
 		FROM (%s) e
 		WHERE %s%s
 		ORDER BY e.occurred_at ASC, e.id ASC
@@ -930,6 +1092,7 @@ func (e *sqliteEpisodicStore) ListMemoryEvents(ctx context.Context, req registry
 		ValueEncrypted []byte     `gorm:"column:value_encrypted"`
 		PolicyAttrsRaw []byte     `gorm:"column:policy_attributes"`
 		ExpiresAt      *time.Time `gorm:"column:expires_at"`
+		MemoryKind     string     `gorm:"column:memory_kind"`
 	}
 	var rows []scanRow
 	if err := e.dbFor(ctx).Raw(finalSQL, allArgs...).Scan(&rows).Error; err != nil {
@@ -971,6 +1134,7 @@ func (e *sqliteEpisodicStore) ListMemoryEvents(ctx context.Context, req registry
 			Value:      value,
 			Attributes: attrs,
 			ExpiresAt:  row.ExpiresAt,
+			MemoryKind: row.MemoryKind,
 		})
 	}
 
@@ -1024,7 +1188,7 @@ func (e *sqliteEpisodicStore) AdminListMemories(ctx context.Context, query regis
 		limit = 50
 	}
 	limit = config.ClampPageSize(ctx, limit)
-	q, err := e.adminLatestMemoryQuery(ctx, query.NamespacePrefix)
+	q, err := e.adminLatestMemoryQuery(ctx, query.NamespacePrefix, query.Archived)
 	if err != nil {
 		return registryepisodic.AdminMemoryPage{}, err
 	}
@@ -1046,6 +1210,20 @@ func (e *sqliteEpisodicStore) AdminListMemories(ctx context.Context, query regis
 			q = q.Where("(m.created_at < ? OR (m.created_at = ? AND m.id < ?))", cur.CreatedAt, cur.CreatedAt, cur.ID)
 		}
 	}
+	if query.MemoryKind != "" {
+		if strings.Contains(query.MemoryKind, "/") {
+			q = q.Where("m.memory_kind = ?", query.MemoryKind)
+		} else {
+			safeFamily := escapeSQLLike(query.MemoryKind)
+			q = q.Where("m.memory_kind LIKE ? ESCAPE '\\'", safeFamily+"/%")
+		}
+	}
+	if !query.Filter.Empty() {
+		clause, args := buildSQLFilter(query.Filter)
+		if clause != "" {
+			q = q.Where(clause, args...)
+		}
+	}
 	var rows []memoryRow
 	if err := q.Order("m.created_at DESC, m.id DESC").Limit(limit + 1).Find(&rows).Error; err != nil {
 		return registryepisodic.AdminMemoryPage{}, fmt.Errorf("admin list memories: %w", err)
@@ -1060,7 +1238,7 @@ func (e *sqliteEpisodicStore) AdminSearchMemories(ctx context.Context, query reg
 		limit = 10
 	}
 	limit = config.ClampPageSize(ctx, limit)
-	q, err := e.adminLatestMemoryQuery(ctx, query.NamespacePrefix)
+	q, err := e.adminLatestMemoryQuery(ctx, query.NamespacePrefix, query.Archived)
 	if err != nil {
 		return nil, err
 	}
@@ -1074,8 +1252,31 @@ func (e *sqliteEpisodicStore) AdminSearchMemories(ctx context.Context, query reg
 			q = q.Where(clause, args...)
 		}
 	}
+	if query.MemoryKind != "" {
+		if strings.Contains(query.MemoryKind, "/") {
+			q = q.Where("m.memory_kind = ?", query.MemoryKind)
+		} else {
+			safeFamily := escapeSQLLike(query.MemoryKind)
+			q = q.Where("m.memory_kind LIKE ? ESCAPE '\\'", safeFamily+"/%")
+		}
+	}
+	if query.Sort != nil {
+		dir := "ASC"
+		if strings.ToLower(query.Sort.Direction) == "desc" {
+			dir = "DESC"
+		}
+		field := query.Sort.Field
+		// SQLite: NULLS LAST via CASE; COLLATE BINARY for deterministic string ordering.
+		sortExpr := sqliteAttrSortExpr(field, query.Sort.Type)
+		q = q.Order(fmt.Sprintf(
+			`CASE WHEN json_extract(policy_attributes, '$."%s"') IS NULL THEN 1 ELSE 0 END, %s %s, m.created_at DESC, m.id DESC`,
+			field, sortExpr, dir,
+		))
+	} else {
+		q = q.Order("m.created_at DESC, m.id DESC")
+	}
 	var rows []memoryRow
-	if err := q.Order("m.created_at DESC, m.id DESC").Limit(limit).Find(&rows).Error; err != nil {
+	if err := q.Limit(limit).Find(&rows).Error; err != nil {
 		return nil, fmt.Errorf("admin search memories: %w", err)
 	}
 	items := make([]registryepisodic.MemoryItem, 0, len(rows))
@@ -1122,8 +1323,9 @@ func (e *sqliteEpisodicStore) AdminListNamespaces(ctx context.Context, query reg
 	return page, nil
 }
 
-func (e *sqliteEpisodicStore) adminLatestMemoryQuery(ctx context.Context, namespacePrefix []string) (*gorm.DB, error) {
+func (e *sqliteEpisodicStore) adminLatestMemoryQuery(ctx context.Context, namespacePrefix []string, archived registryepisodic.ArchiveFilter) (*gorm.DB, error) {
 	q := e.dbFor(ctx).Table("memories AS m")
+	archiveWhere := sqliteMemoryArchiveWhere("candidate", archived)
 	if len(namespacePrefix) > 0 {
 		nsEncoded, err := e.encodeNS(namespacePrefix)
 		if err != nil {
@@ -1132,8 +1334,9 @@ func (e *sqliteEpisodicStore) adminLatestMemoryQuery(ctx context.Context, namesp
 		q = q.Joins(`
 			JOIN (
 				SELECT namespace, key, MAX(created_at) AS max_created_at
-				FROM memories
-				WHERE namespace = ? OR namespace LIKE ?
+				FROM memories AS candidate
+				WHERE (namespace = ? OR namespace LIKE ?)
+				  AND `+archiveWhere+`
 				GROUP BY namespace, key
 			) latest
 			ON m.namespace = latest.namespace
@@ -1145,7 +1348,8 @@ func (e *sqliteEpisodicStore) adminLatestMemoryQuery(ctx context.Context, namesp
 		q = q.Joins(`
 			JOIN (
 				SELECT namespace, key, MAX(created_at) AS max_created_at
-				FROM memories
+				FROM memories AS candidate
+				WHERE ` + archiveWhere + `
 				GROUP BY namespace, key
 			) latest
 			ON m.namespace = latest.namespace
@@ -1231,6 +1435,7 @@ func (e *sqliteEpisodicStore) rowToItem(row memoryRow, namespace []string) (*reg
 		Key:        row.Key,
 		Value:      value,
 		Attributes: row.PolicyAttributes,
+		MemoryKind: row.MemoryKind,
 		CreatedAt:  row.CreatedAt,
 		ExpiresAt:  row.ExpiresAt,
 		ArchivedAt: row.ArchivedAt,
@@ -1341,4 +1546,33 @@ func sqliteNumericScalar(v interface{}) interface{} {
 	default:
 		return t
 	}
+}
+
+// sqliteAttrSortExpr returns the json_extract expression for an ORDER BY clause,
+// with type-appropriate extraction for the declared attribute type.
+// The field name is pre-validated by ValidateAttributeFilterField (only [A-Za-z0-9_.-]).
+func sqliteAttrSortExpr(field, attrType string) string {
+	switch attrType {
+	case "number":
+		// Cast to REAL for numeric ordering (avoids lexical comparison of 10 vs 2).
+		return fmt.Sprintf(`CAST(json_extract(policy_attributes, '$."%s"') AS REAL)`, field)
+	case "boolean":
+		return fmt.Sprintf(`CAST(json_extract(policy_attributes, '$."%s"') AS INTEGER)`, field)
+	case "timestamp":
+		// Timestamps are stored as canonical UTC RFC 3339 — text comparison is correct.
+		return fmt.Sprintf(`json_extract(policy_attributes, '$."%s"')`, field)
+	default:
+		// string, string[], or unknown — binary text collation
+		return fmt.Sprintf(`json_extract(policy_attributes, '$."%s"') COLLATE BINARY`, field)
+	}
+}
+
+// escapeSQLLike escapes SQL LIKE wildcard characters ('%' and '_') and the
+// escape character itself ('\') so that family names with those bytes cannot
+// be used as wildcards in family-prefix patterns.
+func escapeSQLLike(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `%`, `\%`)
+	s = strings.ReplaceAll(s, `_`, `\_`)
+	return s
 }

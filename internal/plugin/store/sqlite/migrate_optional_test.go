@@ -4,6 +4,7 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
 
@@ -13,6 +14,26 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
+
+func TestSQLiteMigratorRejectsVersionOneAndRequiresReset(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "memory.db")
+	legacy, err := sql.Open("sqlite3", dbPath)
+	require.NoError(t, err)
+	_, err = legacy.Exec(`
+		CREATE TABLE schema_metadata (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL,
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);
+		INSERT INTO schema_metadata(key, value) VALUES ('core_schema_version', '1');
+	`)
+	require.NoError(t, err)
+	require.NoError(t, legacy.Close())
+
+	cfg := &config.Config{DatastoreType: "sqlite", DBURL: dbPath, DatastoreMigrateAtStart: true}
+	err = (&sqliteMigrator{}).Migrate(config.WithContext(context.Background(), cfg))
+	require.ErrorContains(t, err, "reset the datastore")
+}
 
 func TestSQLiteMigratorCreatesCoreTablesWithoutOptionalExtensions(t *testing.T) {
 	t.Parallel()
@@ -30,7 +51,7 @@ func TestSQLiteMigratorCreatesCoreTablesWithoutOptionalExtensions(t *testing.T) 
 	require.NoError(t, err)
 	var schemaVersion string
 	require.NoError(t, db.Raw("SELECT value FROM schema_metadata WHERE key = ?", "core_schema_version").Scan(&schemaVersion).Error)
-	require.Equal(t, "1", schemaVersion)
+	require.Equal(t, "2", schemaVersion)
 
 	for _, table := range []string{
 		"schema_metadata",
@@ -51,6 +72,33 @@ func TestSQLiteMigratorCreatesCoreTablesWithoutOptionalExtensions(t *testing.T) 
 		require.NoError(t, err, table)
 		require.Equal(t, int64(1), count, table)
 	}
+}
+
+func TestSQLiteMigratorDropsObsoleteMemoryKindDefaults(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{
+		DatastoreType:           "sqlite",
+		DBURL:                   filepath.Join(t.TempDir(), "memory.db"),
+		DatastoreMigrateAtStart: true,
+	}
+	ctx := config.WithContext(context.Background(), cfg)
+	require.NoError(t, (&sqliteMigrator{}).Migrate(ctx))
+
+	db, _, err := SharedDB(ctx)
+	require.NoError(t, err)
+	require.NoError(t, db.Exec(`CREATE TABLE memory_kind_defaults (
+		family TEXT PRIMARY KEY,
+		memory_kind TEXT NOT NULL
+	)`).Error)
+
+	require.NoError(t, (&sqliteMigrator{}).Migrate(ctx))
+	var count int64
+	require.NoError(t, db.Raw(
+		"SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
+		"memory_kind_defaults",
+	).Scan(&count).Error)
+	require.Zero(t, count)
 }
 
 func TestSQLiteMigratorRejectsEarlierSchemaVersion(t *testing.T) {
@@ -105,7 +153,7 @@ func TestSQLiteEpisodicVectorsNoOpWhenExtensionUnavailable(t *testing.T) {
 	}}))
 	require.NoError(t, store.DeleteMemoryVectors(context.Background(), uuid.New()))
 
-	results, err := store.SearchMemoryVectors(context.Background(), "users\x1e123", []float32{1, 0}, registryepisodic.AttributeFilter{}, 10, registryepisodic.ArchiveFilterExclude)
+	results, err := store.SearchMemoryVectors(context.Background(), "users\x1e123", []float32{1, 0}, registryepisodic.AttributeFilter{}, "", 10, registryepisodic.ArchiveFilterExclude)
 	require.ErrorIs(t, err, registryepisodic.ErrSemanticSearchUnavailable)
 	require.Empty(t, results)
 }

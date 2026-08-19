@@ -214,8 +214,13 @@ func registerAPIRoutes(router *gin.Engine, auth gin.HandlerFunc, authenticatedRa
 	register(http.MethodGet, "/admin/v1/memory-index/status", adminWrapper.AdminGetMemoryIndexStatus)
 	register(http.MethodPost, "/admin/v1/memory-index/trigger", adminWrapper.AdminTriggerMemoryIndex)
 	register(http.MethodGet, "/admin/v1/memory-namespaces", adminWrapper.AdminListMemoryNamespaces)
-	register(http.MethodGet, "/admin/v1/memory-policies", adminWrapper.AdminGetMemoryPolicies)
-	register(http.MethodPut, "/admin/v1/memory-policies", adminWrapper.AdminPutMemoryPolicies)
+	register(http.MethodPost, "/admin/v1/memory-kinds", adminWrapper.AdminCreateMemoryKindVersion)
+	register(http.MethodGet, "/admin/v1/memory-kinds", adminWrapper.AdminListMemoryKindVersions)
+	register(http.MethodGet, "/admin/v1/memory-kinds/:family/:version", adminWrapper.AdminGetMemoryKindVersion)
+	register(http.MethodPost, "/admin/v1/memory-kind-migrations", adminWrapper.AdminCreateMemoryKindMigration)
+	register(http.MethodGet, "/admin/v1/memory-kind-migrations", adminWrapper.AdminListMemoryKindMigrations)
+	register(http.MethodGet, "/admin/v1/memory-kind-migrations/:id", adminWrapper.AdminGetMemoryKindMigration)
+	register(http.MethodDelete, "/admin/v1/memory-kind-migrations/:id", adminWrapper.AdminCancelMemoryKindMigration)
 	register(http.MethodGet, "/admin/v1/memory-usage", adminWrapper.AdminGetMemoryUsage)
 	register(http.MethodGet, "/admin/v1/memory-usage/top", adminWrapper.AdminListTopMemoryUsage)
 	register(http.MethodDelete, "/admin/v1/memories/:id", adminWrapper.AdminDeleteMemory)
@@ -534,17 +539,47 @@ func (p *proxyAdminServer) AdminTriggerMemoryIndex(c *gin.Context) {
 	}
 	routememories.HandleAdminTriggerMemoryIndex(c, p.episodicIndexer)
 }
-func (p *proxyAdminServer) AdminGetMemoryPolicies(c *gin.Context) {
-	if !p.authorize(c, security.PermissionAdminMemoriesRead) {
-		return
-	}
-	routememories.HandleAdminGetMemoryPolicies(c, p.episodicPolicy)
-}
-func (p *proxyAdminServer) AdminPutMemoryPolicies(c *gin.Context) {
+func (p *proxyAdminServer) AdminCreateMemoryKindVersion(c *gin.Context, _ generatedadmin.AdminCreateMemoryKindVersionParams) {
 	if !p.authorize(c, security.PermissionAdminMemoriesWrite) {
 		return
 	}
-	routememories.HandleAdminPutMemoryPolicies(c, p.episodicPolicy, p.cfg)
+	routememories.HandleAdminCreateMemoryKindVersion(c, p.episodicStore)
+}
+func (p *proxyAdminServer) AdminListMemoryKindVersions(c *gin.Context, _ generatedadmin.AdminListMemoryKindVersionsParams) {
+	if !p.authorize(c, security.PermissionAdminMemoriesRead) {
+		return
+	}
+	routememories.HandleAdminListMemoryKindVersions(c, p.episodicStore)
+}
+func (p *proxyAdminServer) AdminGetMemoryKindVersion(c *gin.Context, family string, version string, _ generatedadmin.AdminGetMemoryKindVersionParams) {
+	if !p.authorize(c, security.PermissionAdminMemoriesRead) {
+		return
+	}
+	routememories.HandleAdminGetMemoryKindVersion(c, p.episodicStore, family, version)
+}
+func (p *proxyAdminServer) AdminCreateMemoryKindMigration(c *gin.Context, _ generatedadmin.AdminCreateMemoryKindMigrationParams) {
+	if !p.authorize(c, security.PermissionAdminMemoriesWrite) {
+		return
+	}
+	routememories.HandleAdminCreateMemoryKindMigration(c, p.episodicStore, p.store)
+}
+func (p *proxyAdminServer) AdminListMemoryKindMigrations(c *gin.Context, _ generatedadmin.AdminListMemoryKindMigrationsParams) {
+	if !p.authorize(c, security.PermissionAdminMemoriesRead) {
+		return
+	}
+	routememories.HandleAdminListMemoryKindMigrations(c, p.episodicStore)
+}
+func (p *proxyAdminServer) AdminGetMemoryKindMigration(c *gin.Context, id openapi_types.UUID, _ generatedadmin.AdminGetMemoryKindMigrationParams) {
+	if !p.authorize(c, security.PermissionAdminMemoriesRead) {
+		return
+	}
+	routememories.HandleAdminGetMemoryKindMigration(c, p.episodicStore, id)
+}
+func (p *proxyAdminServer) AdminCancelMemoryKindMigration(c *gin.Context, id openapi_types.UUID, _ generatedadmin.AdminCancelMemoryKindMigrationParams) {
+	if !p.authorize(c, security.PermissionAdminMemoriesWrite) {
+		return
+	}
+	routememories.HandleAdminCancelMemoryKindMigration(c, p.episodicStore, id)
 }
 func (p *proxyAdminServer) AdminGetMemoryUsage(c *gin.Context, _ generatedadmin.AdminGetMemoryUsageParams) {
 	if !p.authorize(c, security.PermissionAdminMemoriesRead) {

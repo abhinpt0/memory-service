@@ -10,6 +10,7 @@ import (
 
 	"github.com/chirino/memory-service/internal/config"
 	"github.com/chirino/memory-service/internal/episodic"
+	"github.com/chirino/memory-service/internal/model"
 	registryepisodic "github.com/chirino/memory-service/internal/registry/episodic"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -56,9 +57,10 @@ func TestSQLiteEpisodicStoreUsesConfiguredPageLimit(t *testing.T) {
 	err := store.InWriteTx(ctx, func(writeCtx context.Context) error {
 		for _, key := range []string{"first", "second"} {
 			if _, err := store.PutMemory(writeCtx, registryepisodic.PutMemoryRequest{
-				Namespace: []string{"users", "alice"},
-				Key:       key,
-				Value:     map[string]interface{}{"key": key},
+				Namespace:  []string{"users", "alice"},
+				Key:        key,
+				Value:      map[string]interface{}{"key": key},
+				MemoryKind: "default/v1",
 			}); err != nil {
 				return err
 			}
@@ -84,6 +86,7 @@ func TestSQLiteEpisodicStoreUsesConfiguredPageLimit(t *testing.T) {
 		return nil
 	})
 	require.NoError(t, err)
+
 }
 
 func TestSQLiteEpisodicStoreCRUDUsageSearchAndEvents(t *testing.T) {
@@ -101,6 +104,7 @@ func TestSQLiteEpisodicStoreCRUDUsageSearchAndEvents(t *testing.T) {
 			Index:            map[string]string{"summary": "Alice profile"},
 			TTLSeconds:       60,
 			PolicyAttributes: map[string]interface{}{"tenant": "acme", "score": 10.0, "enabled": true},
+			MemoryKind:       "default/v1",
 		})
 		if err != nil {
 			return err
@@ -114,6 +118,7 @@ func TestSQLiteEpisodicStoreCRUDUsageSearchAndEvents(t *testing.T) {
 			Value:            map[string]interface{}{"name": "Alice", "role": "owner"},
 			Index:            map[string]string{"summary": "Alice updated profile"},
 			PolicyAttributes: map[string]interface{}{"tenant": "acme", "score": 12.0, "enabled": true},
+			MemoryKind:       "default/v1",
 		})
 		if err != nil {
 			return err
@@ -152,7 +157,7 @@ func TestSQLiteEpisodicStoreCRUDUsageSearchAndEvents(t *testing.T) {
 			"score":   map[string]interface{}{"$gte": 11.0},
 		})
 		require.NoError(t, err)
-		items, err := store.SearchMemories(readCtx, []string{"users"}, filter, 10, registryepisodic.ArchiveFilterExclude)
+		items, err := store.SearchMemories(readCtx, registryepisodic.MemorySearchQuery{NamespacePrefix: []string{"users"}, Filter: filter, Limit: 10, Archived: registryepisodic.ArchiveFilterExclude})
 		require.NoError(t, err)
 		require.Len(t, items, 1)
 		require.Equal(t, "profile", items[0].Key)
@@ -197,6 +202,58 @@ func TestSQLiteEpisodicStoreCRUDUsageSearchAndEvents(t *testing.T) {
 		return nil
 	})
 	require.NoError(t, err)
+
+	// Recreate the key with a different kind. archived=only must still select the
+	// archived historical row (and therefore its kind), not the newer active row.
+	err = store.InWriteTx(ctx, func(writeCtx context.Context) error {
+		if _, err := store.CreateMemoryKindVersion(writeCtx, model.MemoryKindVersion{
+			Name: "other/v1", AttributeTypes: map[string]string{}, Writable: true, CreatedAt: time.Now().UTC(),
+		}); err != nil {
+			return err
+		}
+		_, err := store.PutMemory(writeCtx, registryepisodic.PutMemoryRequest{
+			Namespace: []string{"users", "alice"}, Key: "profile",
+			Value: map[string]interface{}{"role": "new"}, MemoryKind: "other/v1",
+		})
+		return err
+	})
+	require.NoError(t, err)
+	err = store.InReadTx(ctx, func(readCtx context.Context) error {
+		kind, found, err := store.GetMemoryRowKind(readCtx, []string{"users", "alice"}, "profile", registryepisodic.ArchiveFilterOnly)
+		require.NoError(t, err)
+		require.True(t, found)
+		item, err := store.GetMemory(readCtx, []string{"users", "alice"}, "profile", registryepisodic.ArchiveFilterOnly)
+		require.NoError(t, err)
+		require.NotNil(t, item)
+		require.Equal(t, kind, item.MemoryKind)
+		require.Equal(t, "default/v1", item.MemoryKind)
+
+		archivedPage, err := store.AdminListMemories(readCtx, registryepisodic.AdminMemoryQuery{
+			NamespacePrefix: []string{"users", "alice"}, Archived: registryepisodic.ArchiveFilterOnly, Limit: 10,
+		})
+		require.NoError(t, err)
+		require.Len(t, archivedPage.Items, 1)
+		require.Equal(t, "owner", archivedPage.Items[0].Value["role"])
+
+		filter, err := registryepisodic.NormalizeAttributeFilters(map[string]interface{}{"tenant": "acme"})
+		require.NoError(t, err)
+		archivedSearch, err := store.AdminSearchMemories(readCtx, registryepisodic.AdminMemorySearchQuery{
+			NamespacePrefix: []string{"users", "alice"}, Archived: registryepisodic.ArchiveFilterOnly,
+			Filter: filter, Limit: 10,
+		})
+		require.NoError(t, err)
+		require.Len(t, archivedSearch, 1)
+		require.Equal(t, "owner", archivedSearch[0].Value["role"])
+
+		includedPage, err := store.AdminListMemories(readCtx, registryepisodic.AdminMemoryQuery{
+			NamespacePrefix: []string{"users", "alice"}, Archived: registryepisodic.ArchiveFilterInclude, Limit: 10,
+		})
+		require.NoError(t, err)
+		require.Len(t, includedPage.Items, 1)
+		require.Equal(t, "new", includedPage.Items[0].Value["role"])
+		return nil
+	})
+	require.NoError(t, err)
 }
 
 func TestSQLiteEpisodicStoreRevisionConflicts(t *testing.T) {
@@ -207,9 +264,10 @@ func TestSQLiteEpisodicStoreRevisionConflicts(t *testing.T) {
 
 	err := store.InWriteTx(ctx, func(writeCtx context.Context) error {
 		result, err := store.PutMemory(writeCtx, registryepisodic.PutMemoryRequest{
-			Namespace: []string{"users", "alice"},
-			Key:       "profile",
-			Value:     map[string]interface{}{"name": "Alice"},
+			Namespace:  []string{"users", "alice"},
+			Key:        "profile",
+			Value:      map[string]interface{}{"name": "Alice"},
+			MemoryKind: "default/v1",
 		})
 		require.NoError(t, err)
 		revision = result.Revision
@@ -225,6 +283,7 @@ func TestSQLiteEpisodicStoreRevisionConflicts(t *testing.T) {
 			Key:              "profile",
 			Value:            map[string]interface{}{"name": "Alice stale"},
 			ExpectedRevision: &stale,
+			MemoryKind:       "default/v1",
 		})
 		return err
 	})
@@ -236,6 +295,7 @@ func TestSQLiteEpisodicStoreRevisionConflicts(t *testing.T) {
 			Key:              "profile",
 			Value:            map[string]interface{}{"name": "Alice current"},
 			ExpectedRevision: &revision,
+			MemoryKind:       "default/v1",
 		})
 		require.NoError(t, err)
 		revision = result.Revision
@@ -278,6 +338,7 @@ func TestSQLiteEpisodicStoreVectorSearch(t *testing.T) {
 			Value:            map[string]interface{}{"name": "First"},
 			Index:            map[string]string{"summary": "first"},
 			PolicyAttributes: map[string]interface{}{"tenant": "acme", "rank": 9.0},
+			MemoryKind:       "default/v1",
 		})
 		if err != nil {
 			return err
@@ -290,6 +351,7 @@ func TestSQLiteEpisodicStoreVectorSearch(t *testing.T) {
 			Value:            map[string]interface{}{"name": "Second"},
 			Index:            map[string]string{"summary": "second"},
 			PolicyAttributes: map[string]interface{}{"tenant": "other", "rank": 1.0},
+			MemoryKind:       "default/v1",
 		})
 		if err != nil {
 			return err
@@ -326,6 +388,8 @@ func TestSQLiteEpisodicStoreVectorSearch(t *testing.T) {
 				Namespace:        item.Namespace,
 				PolicyAttributes: item.PolicyAttributes,
 				Embedding:        embeddings[item.ID.String()],
+				MemoryKind:       item.MemoryKind,
+				MemoryRevision:   item.Revision,
 			}}); err != nil {
 				return err
 			}
@@ -346,7 +410,7 @@ func TestSQLiteEpisodicStoreVectorSearch(t *testing.T) {
 			"rank":   map[string]interface{}{"$gte": 5.0},
 		})
 		require.NoError(t, err)
-		results, err := store.SearchMemoryVectors(readCtx, namespacePrefix, []float32{1, 0}, filter, 10, registryepisodic.ArchiveFilterExclude)
+		results, err := store.SearchMemoryVectors(readCtx, namespacePrefix, []float32{1, 0}, filter, "", 10, registryepisodic.ArchiveFilterExclude)
 		require.NoError(t, err)
 		require.Len(t, results, 1)
 		require.Equal(t, firstID, results[0].MemoryID.String())

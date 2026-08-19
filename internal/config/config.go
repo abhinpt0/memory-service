@@ -316,6 +316,9 @@ type Config struct {
 	OutboxEnabled            bool
 	OutboxReplayBatchSize    int
 
+	// Policy imports
+	PolicyImportDir string // Directory containing startup-imported policy definitions
+
 	// Episodic memory settings
 	EpisodicMaxDepth           int           // Maximum namespace depth (default 5)
 	EpisodicIndexingBatchSize  int           // Items processed per indexer cycle (default 100)
@@ -323,7 +326,6 @@ type Config struct {
 	EpisodicTTLInterval        time.Duration // Polling interval for TTL expiry + eviction (default 60s)
 	EpisodicEvictionBatchSize  int           // Max rows processed per eviction pass (default 100)
 	EpisodicTombstoneRetention time.Duration // How long to keep delete/expired tombstones (default 90 days)
-	EpisodicPolicyDir          string        // Directory for OPA Rego policies (default: built-in)
 
 	// Knowledge clustering settings
 	KnowledgeClusteringEnabled bool          // Feature gate (default false)

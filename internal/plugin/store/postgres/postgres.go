@@ -16,6 +16,7 @@ import (
 	"github.com/charmbracelet/log"
 	"github.com/chirino/memory-service/internal/config"
 	"github.com/chirino/memory-service/internal/dataencryption"
+	coreepisodic "github.com/chirino/memory-service/internal/episodic"
 	"github.com/chirino/memory-service/internal/model"
 	"github.com/chirino/memory-service/internal/plugin/store/sqlentry"
 	registrycache "github.com/chirino/memory-service/internal/registry/cache"
@@ -104,10 +105,24 @@ func (m *postgresMigrator) Migrate(ctx context.Context) error {
 	if err := postgresRequireCurrentSchemaOrEmpty(ctx, sqlDB); err != nil {
 		return err
 	}
-
 	// Read and execute embedded schema
 	if _, err := sqlDB.ExecContext(ctx, schemaSQL); err != nil {
 		return fmt.Errorf("migration: failed to execute schema: %w", err)
+	}
+	defaultKind, err := coreepisodic.BuiltinDefaultKindVersion(ctx)
+	if err != nil {
+		return fmt.Errorf("migration: load built-in default memory kind: %w", err)
+	}
+	attributeTypes, err := json.Marshal(defaultKind.AttributeTypes)
+	if err != nil {
+		return fmt.Errorf("migration: encode built-in default memory kind attributes: %w", err)
+	}
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO memory_kind_versions (name, attribute_types, attributes_rego, writable, created_at)
+		 VALUES ($1, $2::jsonb, $3, $4, NOW()) ON CONFLICT (name) DO NOTHING`,
+		defaultKind.Name, string(attributeTypes), *defaultKind.AttributesRego, defaultKind.Writable,
+	); err != nil {
+		return fmt.Errorf("migration: seed built-in default memory kind: %w", err)
 	}
 	log.Info("Postgres schema migration complete")
 	return nil
@@ -115,7 +130,7 @@ func (m *postgresMigrator) Migrate(ctx context.Context) error {
 
 func postgresRequireCurrentSchemaOrEmpty(ctx context.Context, db *sql.DB) error {
 	const versionKey = "core_schema_version"
-	const expectedVersion = "1"
+	const expectedVersion = "2"
 
 	var hasMetadata bool
 	if err := db.QueryRowContext(ctx, "SELECT to_regclass('public.schema_metadata') IS NOT NULL").Scan(&hasMetadata); err != nil {
@@ -146,7 +161,7 @@ func postgresRequireCurrentSchemaOrEmpty(ctx context.Context, db *sql.DB) error 
 			return fmt.Errorf("migration: failed to inspect existing schema: %w", err)
 		}
 		if hasCoreTables {
-			return fmt.Errorf("migration: existing incompatible PostgreSQL schema detected; reset the datastore before applying schema version %s", expectedVersion)
+			return fmt.Errorf("migration: existing unversioned PostgreSQL schema detected; reset the datastore before starting schema version %s", expectedVersion)
 		}
 		return nil
 	}
@@ -154,13 +169,13 @@ func postgresRequireCurrentSchemaOrEmpty(ctx context.Context, db *sql.DB) error 
 	var version string
 	err := db.QueryRowContext(ctx, "SELECT value FROM schema_metadata WHERE key = $1", versionKey).Scan(&version)
 	if errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("migration: schema metadata is missing %s; reset the datastore before applying schema version %s", versionKey, expectedVersion)
+		return fmt.Errorf("migration: schema metadata is missing %s; reset the datastore before starting schema version %s", versionKey, expectedVersion)
 	}
 	if err != nil {
 		return fmt.Errorf("migration: failed to read schema metadata: %w", err)
 	}
 	if version != expectedVersion {
-		return fmt.Errorf("migration: unsupported PostgreSQL schema version %s; reset the datastore before applying schema version %s", version, expectedVersion)
+		return fmt.Errorf("migration: unsupported PostgreSQL schema version %s; reset the datastore before starting schema version %s", version, expectedVersion)
 	}
 	return nil
 }
@@ -184,6 +199,13 @@ func pgUniqueViolation(err error) (*pgconn.PgError, bool) {
 		return pgErr, true
 	}
 	return nil, false
+}
+
+// isUniqueViolation is a simpler boolean wrapper around pgUniqueViolation.
+// Use this when only the bool answer matters and the PgError detail is not needed.
+func isUniqueViolation(err error) bool {
+	_, ok := pgUniqueViolation(err)
+	return ok
 }
 
 func logDuplicateKey(op string, err error, kv ...interface{}) {

@@ -3276,41 +3276,89 @@ func (s *MemoriesServer) PutMemory(ctx context.Context, req *pb.PutMemoryRequest
 	if err != nil {
 		return nil, err
 	}
-	policyAttrs := map[string]interface{}{}
-	if s.Policy != nil {
-		decision, err := s.Policy.EvaluateAuthz(ctx, "write", namespace, key, value, index, pc)
-		if err != nil {
-			return nil, episodicInternalError("policy evaluation error", err)
-		}
-		if !decision.Allow {
-			if decision.Reason != "" {
-				return nil, status.Error(codes.PermissionDenied, decision.Reason)
+	// Resolve, authorize, project, and persist inside one InWriteTx so the kind resolved
+	// for authz is exactly the kind projected and persisted. No second ResolveKindForWrite.
+	kindSel := req.GetKind()
+	var writeResult *registryepisodic.MemoryWriteResult
+	if writeErr := inEpisodicWrite(ctx, s.Store, func(txCtx context.Context) error {
+		// 1. Load and authorize the active row before replacing it.
+		var predecessorExpectation *registryepisodic.MemoryPredecessorExpectation
+		if s.Policy != nil {
+			predecessor, lookupErr := s.Store.GetMemoryPredecessor(txCtx, namespace, key)
+			if lookupErr != nil {
+				return lookupErr
 			}
-			return nil, status.Error(codes.PermissionDenied, "access denied")
+			predecessorExpectation = &registryepisodic.MemoryPredecessorExpectation{}
+			if predecessor != nil {
+				predecessorExpectation.Exists = true
+				predecessorExpectation.ID = predecessor.ID
+				predecessorExpectation.Revision = predecessor.Revision
+				decision, authzErr := s.Policy.EvaluateAuthz(ctx, "write", namespace, key, value, index, predecessor.MemoryKind, pc)
+				if authzErr != nil {
+					return episodicInternalError("policy evaluation error", authzErr)
+				}
+				if !decision.Allow {
+					if decision.Reason != "" {
+						return status.Error(codes.PermissionDenied, decision.Reason)
+					}
+					return status.Error(codes.PermissionDenied, "access denied")
+				}
+			}
 		}
-		extracted, err := s.Policy.ExtractAttributes(ctx, namespace, key, value, index, pc)
-		if err != nil {
-			return nil, episodicInternalError("attribute extraction error", err)
+		// 2. Resolve exact canonical target kind once inside the write tx.
+		resolvedKind, resolveErr := s.Store.ResolveKindForWrite(txCtx, kindSel)
+		if resolveErr != nil {
+			if errors.Is(resolveErr, registryepisodic.ErrMemoryKindInvalid) ||
+				errors.Is(resolveErr, registryepisodic.ErrMemoryKindNotFound) ||
+				errors.Is(resolveErr, registryepisodic.ErrMemoryKindNotWritable) {
+				return status.Errorf(codes.InvalidArgument, "schema selector %q: %v", kindSel, resolveErr)
+			}
+			return episodicInternalError("resolve schema", resolveErr)
 		}
-		policyAttrs = extracted
-	}
-
-	result, err := withEpisodicWrite(ctx, s.Store, func(txCtx context.Context) (*registryepisodic.MemoryWriteResult, error) {
-		return s.Store.PutMemory(txCtx, registryepisodic.PutMemoryRequest{
-			Namespace:        namespace,
-			Key:              key,
-			Value:            value,
-			Index:            index,
-			TTLSeconds:       int(req.GetTtlSeconds()),
-			PolicyAttributes: policyAttrs,
-			ExpectedRevision: req.ExpectedRevision,
+		// 3. OPA authz with the exact resolved target kind.
+		if s.Policy != nil {
+			decision, authzErr := s.Policy.EvaluateAuthz(ctx, "write", namespace, key, value, index, resolvedKind, pc)
+			if authzErr != nil {
+				return episodicInternalError("policy evaluation error", authzErr)
+			}
+			if !decision.Allow {
+				if decision.Reason != "" {
+					return status.Error(codes.PermissionDenied, decision.Reason)
+				}
+				return status.Error(codes.PermissionDenied, "access denied")
+			}
+		}
+		// 4. Project with the already-resolved kind (no second resolve).
+		policyAttrs, _, projErr := grpcProjectResolvedKind(txCtx, s.Store, resolvedKind, namespace, key, value, index)
+		if projErr != nil {
+			return projErr
+		}
+		var putErr error
+		writeResult, putErr = s.Store.PutMemory(txCtx, registryepisodic.PutMemoryRequest{
+			Namespace:             namespace,
+			Key:                   key,
+			Value:                 value,
+			Index:                 index,
+			TTLSeconds:            int(req.GetTtlSeconds()),
+			PolicyAttributes:      policyAttrs,
+			MemoryKind:            resolvedKind,
+			ExpectedRevision:      req.ExpectedRevision,
+			AuthorizedPredecessor: predecessorExpectation,
 		})
-	})
-	if err != nil {
-		if errors.Is(err, registryepisodic.ErrMemoryRevisionConflict) {
-			return nil, grpcStatusWithCause(codes.Aborted, "memory revision conflict", err)
+		return putErr
+	}); writeErr != nil {
+		// Preserve gRPC status errors (PermissionDenied, InvalidArgument) from the closure.
+		if _, ok := status.FromError(writeErr); ok {
+			return nil, writeErr
 		}
-		return nil, episodicInternalError("failed to store memory", err)
+		if errors.Is(writeErr, registryepisodic.ErrMemoryRevisionConflict) {
+			return nil, grpcStatusWithCause(codes.Aborted, "memory revision conflict", writeErr)
+		}
+		return nil, episodicInternalError("failed to store memory", writeErr)
+	}
+	result := writeResult
+	if result == nil {
+		return nil, status.Error(codes.Internal, "internal server error")
 	}
 	resp, err := memoryWriteResultToProto(result)
 	if err != nil {
@@ -3344,28 +3392,45 @@ func (s *MemoriesServer) GetMemory(ctx context.Context, req *pb.GetMemoryRequest
 		return nil, err
 	}
 
-	if s.Policy != nil {
-		decision, err := s.Policy.EvaluateAuthz(ctx, "read", namespace, key, nil, nil, pc)
-		if err != nil {
-			return nil, episodicInternalError("policy evaluation error", err)
-		}
-		if !decision.Allow {
-			if decision.Reason != "" {
-				return nil, status.Error(codes.PermissionDenied, decision.Reason)
+	// Authz with actual row kind: look up kind, check authz, read — all in one write tx
+	// so the row we authorize matches the row we read.
+	var grpcGetItem *registryepisodic.MemoryItem
+	if err := inEpisodicWrite(ctx, s.Store, func(txCtx context.Context) error {
+		// 1. Look up exact kind without loading/decrypting the value.
+		// If the row does not exist we still run authz with kind="" so that
+		// callers without access get PermissionDenied (not NotFound), preventing existence leakage.
+		if s.Policy != nil {
+			rowKind, found, kindErr := s.Store.GetMemoryRowKind(txCtx, namespace, key, archived)
+			if kindErr != nil {
+				return kindErr
 			}
-			return nil, status.Error(codes.PermissionDenied, "access denied")
+			// 2. Authz with the exact row kind (empty string when row not found).
+			decision, authzErr := s.Policy.EvaluateAuthz(ctx, "read", namespace, key, nil, nil, rowKind, pc)
+			if authzErr != nil {
+				return fmt.Errorf("policy evaluation error: %w", authzErr)
+			}
+			if !decision.Allow {
+				reason := decision.Reason
+				if reason == "" {
+					reason = "access denied"
+				}
+				return status.Error(codes.PermissionDenied, reason)
+			}
+			// Authz passed but row doesn't exist — return not found now.
+			if !found {
+				grpcGetItem = nil
+				return nil
+			}
 		}
-	}
-
-	item, err := withEpisodicWrite(ctx, s.Store, func(txCtx context.Context) (*registryepisodic.MemoryItem, error) {
+		// 3. Read full item (value is now authorized to be loaded).
 		item, err := s.Store.GetMemory(txCtx, namespace, key, archived)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if item == nil {
-			return nil, nil
+			grpcGetItem = nil
+			return nil
 		}
-
 		fetchedAt := time.Now().UTC()
 		if err := s.Store.IncrementMemoryLoads(txCtx, []registryepisodic.MemoryKey{{
 			Namespace: namespace,
@@ -3373,7 +3438,6 @@ func (s *MemoriesServer) GetMemory(ctx context.Context, req *pb.GetMemoryRequest
 		}}, fetchedAt); err != nil {
 			log.Warn("failed to increment memory usage counters", "namespace", namespace, "key", key, "err", err)
 		}
-
 		if req.GetIncludeUsage() {
 			usage, err := s.Store.GetMemoryUsage(txCtx, namespace, key)
 			if err != nil {
@@ -3382,14 +3446,20 @@ func (s *MemoriesServer) GetMemory(ctx context.Context, req *pb.GetMemoryRequest
 				item.Usage = usage
 			}
 		}
-		return item, nil
-	})
-	if err != nil {
+		grpcGetItem = item
+		return nil
+	}); err != nil {
+		// Preserve gRPC status errors from the authz check (e.g. PermissionDenied)
+		// rather than wrapping them as Internal.
+		if _, ok := status.FromError(err); ok {
+			return nil, err
+		}
 		return nil, episodicInternalError("failed to fetch memory", err)
 	}
-	if item == nil {
+	if grpcGetItem == nil {
 		return nil, status.Error(codes.NotFound, "memory not found")
 	}
+	item := grpcGetItem
 
 	resp, err := memoryItemToProto(*item)
 	if err != nil {
@@ -3425,26 +3495,44 @@ func (s *MemoriesServer) UpdateMemory(ctx context.Context, req *pb.UpdateMemoryR
 		return nil, err
 	}
 
-	if s.Policy != nil {
-		decision, err := s.Policy.EvaluateAuthz(ctx, "update", namespace, key, nil, nil, pc)
-		if err != nil {
-			return nil, episodicInternalError("policy evaluation error", err)
-		}
-		if !decision.Allow {
-			if decision.Reason != "" {
-				return nil, status.Error(codes.PermissionDenied, decision.Reason)
+	// Authz with actual row kind: look up kind, check authz, archive — all in one write tx.
+	// Per Enhancement 115: run authz with kind="" when row absent; return NotFound only if authz passes.
+	if archiveErr := inEpisodicWrite(ctx, s.Store, func(txCtx context.Context) error {
+		if s.Policy != nil {
+			// 1. Look up exact kind without loading value. ArchiveFilterExclude: archived rows = absent.
+			rowKind, found, kindErr := s.Store.GetMemoryRowKind(txCtx, namespace, key, registryepisodic.ArchiveFilterExclude)
+			if kindErr != nil {
+				return kindErr
 			}
-			return nil, status.Error(codes.PermissionDenied, "access denied")
+			// 2. Authz with exact row kind (empty string when row not found — prevents existence leakage).
+			authzKind := rowKind // empty when not found
+			decision, authzErr := s.Policy.EvaluateAuthz(ctx, "update", namespace, key, nil, nil, authzKind, pc)
+			if authzErr != nil {
+				return fmt.Errorf("policy evaluation error: %w", authzErr)
+			}
+			if !decision.Allow {
+				reason := decision.Reason
+				if reason == "" {
+					reason = "access denied"
+				}
+				return status.Error(codes.PermissionDenied, reason)
+			}
+			// Authz passed but row does not exist — return NotFound now.
+			if !found {
+				return status.Error(codes.NotFound, "memory not found")
+			}
 		}
-	}
-
-	if err := inEpisodicWrite(ctx, s.Store, func(txCtx context.Context) error {
+		// 3. Archive.
 		return s.Store.ArchiveMemory(txCtx, namespace, key, req.ExpectedRevision)
-	}); err != nil {
-		if errors.Is(err, registryepisodic.ErrMemoryRevisionConflict) {
-			return nil, grpcStatusWithCause(codes.Aborted, "memory revision conflict", err)
+	}); archiveErr != nil {
+		// Preserve gRPC status errors (PermissionDenied, NotFound) from the closure.
+		if _, ok := status.FromError(archiveErr); ok {
+			return nil, archiveErr
 		}
-		return nil, episodicInternalError("failed to archive memory", err)
+		if errors.Is(archiveErr, registryepisodic.ErrMemoryRevisionConflict) {
+			return nil, grpcStatusWithCause(codes.Aborted, "memory revision conflict", archiveErr)
+		}
+		return nil, episodicInternalError("failed to archive memory", archiveErr)
 	}
 	return &emptypb.Empty{}, nil
 }
@@ -3483,16 +3571,46 @@ func (s *MemoriesServer) SearchMemories(ctx context.Context, req *pb.SearchMemor
 		return nil, err
 	}
 	policyFilter := map[string]interface{}{}
+	grpcKind := strings.TrimSpace(req.GetKind())
+	if err := episodic.ValidateKindSelector(grpcKind); err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid kind selector: %v", err)
+	}
+	grpcKI := episodic.KindIntersection{Selector: grpcKind}
 	if s.Policy != nil {
 		var err error
-		effectivePrefix, policyFilter, err = s.Policy.InjectFilterParts(ctx, req.GetNamespacePrefix(), filter, pc)
+		effectivePrefix, policyFilter, grpcKI, err = s.Policy.InjectFilterPartsWithKind(ctx, req.GetNamespacePrefix(), filter, grpcKind, pc)
 		if err != nil {
 			return nil, episodicInternalError("filter injection error", err)
 		}
 	}
-	normalizedFilter, err := registryepisodic.NormalizeAttributeFilters(filter, policyFilter)
+	grpcKind = grpcKI.Selector
+
+	// Empty intersection: return immediately before schema/filter/store work.
+	if grpcKI.Empty {
+		return &pb.SearchMemoriesResponse{Items: []*pb.MemoryItem{}}, nil
+	}
+
+	// Normalize filter operator structure (pure, no DB). Keep raw for schema validation inside tx.
+	rawGRPCCallerFilter, err := registryepisodic.NormalizeAttributeFilters(filter)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	normalizedGRPCPolicyFilter, err := registryepisodic.NormalizeAttributeFilters(policyFilter)
+	if err != nil {
+		return nil, episodicInternalError("policy filter normalization error", err)
+	}
+
+	// Helper to build the merged filter inside a read tx (schema version lookups need scoped handle).
+	buildNormalizedFilter := func(txCtx context.Context) (registryepisodic.AttributeFilter, error) {
+		validated, vErr := grpcValidateAndNormalizeCallerFilter(txCtx, s.Store, grpcKind, rawGRPCCallerFilter)
+		if vErr != nil {
+			return registryepisodic.AttributeFilter{}, status.Errorf(codes.InvalidArgument, "filter validation: %v", vErr)
+		}
+		merged, mErr := registryepisodic.MergeAttributeFilters(validated, normalizedGRPCPolicyFilter)
+		if mErr != nil {
+			return registryepisodic.AttributeFilter{}, status.Error(codes.InvalidArgument, mErr.Error())
+		}
+		return merged, nil
 	}
 
 	query := strings.TrimSpace(req.GetQuery())
@@ -3501,6 +3619,9 @@ func (s *MemoriesServer) SearchMemories(ctx context.Context, req *pb.SearchMemor
 		return nil, status.Error(codes.InvalidArgument, "query and queries are mutually exclusive")
 	}
 	if hasQueries {
+		if req.GetSort() != nil {
+			return nil, status.Error(codes.InvalidArgument, "sort is not supported with semantic search")
+		}
 		queries, err := protoMemorySearchQuerySpecs(req.GetQueries())
 		if err != nil {
 			return nil, status.Error(codes.InvalidArgument, err.Error())
@@ -3513,9 +3634,16 @@ func (s *MemoriesServer) SearchMemories(ctx context.Context, req *pb.SearchMemor
 			return nil, status.Error(codes.Unavailable, "semantic search unavailable")
 		}
 		items, err := withEpisodicRead(ctx, s.Store, func(txCtx context.Context) ([]registryepisodic.MemoryItem, error) {
-			return multiQuerySemanticSearchMemories(txCtx, s.Store, s.Embedder, effectivePrefix, normalizedFilter, queries, perQueryLimit, limit, archived)
+			normalizedFilter, fErr := buildNormalizedFilter(txCtx)
+			if fErr != nil {
+				return nil, fErr
+			}
+			return multiQuerySemanticSearchMemories(txCtx, s.Store, s.Embedder, effectivePrefix, normalizedFilter, queries, perQueryLimit, limit, archived, grpcKind)
 		})
 		if err != nil {
+			if _, ok := status.FromError(err); ok {
+				return nil, err
+			}
 			if errors.Is(err, registryepisodic.ErrSemanticSearchUnavailable) {
 				return nil, grpcStatusWithCause(codes.Unavailable, "semantic search unavailable", err)
 			}
@@ -3532,13 +3660,23 @@ func (s *MemoriesServer) SearchMemories(ctx context.Context, req *pb.SearchMemor
 		return memoryItemsToSearchResponse(items)
 	}
 	if query != "" {
+		if req.GetSort() != nil {
+			return nil, status.Error(codes.InvalidArgument, "sort is not supported with semantic search")
+		}
 		if s.Embedder == nil {
 			return nil, status.Error(codes.Unavailable, "semantic search unavailable")
 		}
 		items, err := withEpisodicRead(ctx, s.Store, func(txCtx context.Context) ([]registryepisodic.MemoryItem, error) {
-			return semanticSearchMemories(txCtx, s.Store, s.Embedder, effectivePrefix, normalizedFilter, query, limit, archived)
+			normalizedFilter, fErr := buildNormalizedFilter(txCtx)
+			if fErr != nil {
+				return nil, fErr
+			}
+			return semanticSearchMemories(txCtx, s.Store, s.Embedder, effectivePrefix, normalizedFilter, query, limit, archived, grpcKind)
 		})
 		if err != nil {
+			if _, ok := status.FromError(err); ok {
+				return nil, err
+			}
 			if errors.Is(err, registryepisodic.ErrSemanticSearchUnavailable) {
 				return nil, grpcStatusWithCause(codes.Unavailable, "semantic search unavailable", err)
 			}
@@ -3555,10 +3693,47 @@ func (s *MemoriesServer) SearchMemories(ctx context.Context, req *pb.SearchMemor
 		return memoryItemsToSearchResponse(items)
 	}
 
+	// Attribute-only search: filter validation, sort type resolution, and query all in one read tx.
 	items, err := withEpisodicRead(ctx, s.Store, func(txCtx context.Context) ([]registryepisodic.MemoryItem, error) {
-		return s.Store.SearchMemories(txCtx, effectivePrefix, normalizedFilter, limit, archived)
+		normalizedFilter, fErr := buildNormalizedFilter(txCtx)
+		if fErr != nil {
+			return nil, fErr
+		}
+		var grpcSort *registryepisodic.MemoryAttributeSort
+		if req.GetSort() != nil {
+			direction, directionErr := normalizeGRPCSortDirection(req.GetSort().GetDirection())
+			if directionErr != nil {
+				return nil, status.Error(codes.InvalidArgument, directionErr.Error())
+			}
+			if err := registryepisodic.ValidateAttributeFilterField(req.GetSort().GetField()); err != nil {
+				return nil, status.Error(codes.InvalidArgument, "invalid sort field: "+err.Error())
+			}
+			sortType, sortErr := grpcResolveKindSortFieldType(txCtx, s.Store, grpcKind, req.GetSort().GetField())
+			if sortErr != nil {
+				return nil, status.Error(codes.InvalidArgument, "invalid sort: "+sortErr.Error())
+			}
+			if sortType == string(episodic.AttributeTypeStringArr) {
+				return nil, status.Error(codes.InvalidArgument, "sort on string[] attributes is not supported")
+			}
+			grpcSort = &registryepisodic.MemoryAttributeSort{
+				Field:     req.GetSort().GetField(),
+				Direction: direction,
+				Type:      sortType,
+			}
+		}
+		return s.Store.SearchMemories(txCtx, registryepisodic.MemorySearchQuery{
+			NamespacePrefix: effectivePrefix,
+			Filter:          normalizedFilter,
+			Limit:           limit,
+			Archived:        archived,
+			MemoryKind:      grpcKind,
+			Sort:            grpcSort,
+		})
 	})
 	if err != nil {
+		if _, ok := status.FromError(err); ok {
+			return nil, err
+		}
 		return nil, episodicInternalError("failed to search memories", err)
 	}
 	if req.GetIncludeUsage() {
@@ -3608,9 +3783,21 @@ func (s *MemoriesServer) ListMemoryNamespaces(ctx context.Context, req *pb.ListM
 		return nil, err
 	}
 
+	effectiveKind := ""
+	var effectiveFilter registryepisodic.AttributeFilter
 	if s.Policy != nil {
 		var err error
-		prefix, _, err = s.Policy.InjectFilter(ctx, prefix, nil, pc)
+		var ki episodic.KindIntersection
+		var policyFilter map[string]interface{}
+		prefix, policyFilter, ki, err = s.Policy.InjectFilterPartsWithKind(ctx, prefix, map[string]interface{}{}, "", pc)
+		if err != nil {
+			return nil, episodicInternalError("filter injection error", err)
+		}
+		if ki.Empty {
+			return &pb.ListMemoryNamespacesResponse{}, nil
+		}
+		effectiveKind = ki.Selector
+		effectiveFilter, err = registryepisodic.NormalizeAttributeFilters(policyFilter)
 		if err != nil {
 			return nil, episodicInternalError("filter injection error", err)
 		}
@@ -3618,10 +3805,12 @@ func (s *MemoriesServer) ListMemoryNamespaces(ctx context.Context, req *pb.ListM
 
 	namespaces, err := withEpisodicRead(ctx, s.Store, func(txCtx context.Context) ([][]string, error) {
 		return s.Store.ListNamespaces(txCtx, registryepisodic.ListNamespacesRequest{
-			Prefix:   prefix,
-			Suffix:   suffix,
-			MaxDepth: maxDepth,
-			Archived: archived,
+			Prefix:     prefix,
+			Suffix:     suffix,
+			MaxDepth:   maxDepth,
+			Archived:   archived,
+			MemoryKind: effectiveKind,
+			Filter:     effectiveFilter,
 		})
 	})
 	if err != nil {
@@ -3656,8 +3845,20 @@ func (s *MemoriesServer) ListMemoryEvents(ctx context.Context, req *pb.ListMemor
 	if err != nil {
 		return nil, err
 	}
+	effectiveKind := ""
+	var effectiveFilter registryepisodic.AttributeFilter
 	if s.Policy != nil {
-		nsPrefix, _, err = s.Policy.InjectFilter(ctx, nsPrefix, nil, pc)
+		var ki episodic.KindIntersection
+		var policyFilter map[string]interface{}
+		nsPrefix, policyFilter, ki, err = s.Policy.InjectFilterPartsWithKind(ctx, nsPrefix, map[string]interface{}{}, "", pc)
+		if err != nil {
+			return nil, episodicInternalError("filter injection error", err)
+		}
+		if ki.Empty {
+			return &pb.ListMemoryEventsResponse{}, nil
+		}
+		effectiveKind = ki.Selector
+		effectiveFilter, err = registryepisodic.NormalizeAttributeFilters(policyFilter)
 		if err != nil {
 			return nil, episodicInternalError("filter injection error", err)
 		}
@@ -3671,6 +3872,8 @@ func (s *MemoriesServer) ListMemoryEvents(ctx context.Context, req *pb.ListMemor
 		NamespacePrefix: nsPrefix,
 		Kinds:           append([]string(nil), req.GetKinds()...),
 		Limit:           limit,
+		MemoryKind:      effectiveKind,
+		Filter:          effectiveFilter,
 	}
 	if req.AfterCursor != nil {
 		listReq.AfterCursor = req.GetAfterCursor()
@@ -3732,6 +3935,10 @@ func (s *AdminMemoriesServer) ListMemories(ctx context.Context, req *pb.AdminLis
 		Limit:           limit,
 		AfterCursor:     req.GetAfterCursor(),
 		IncludeUsage:    req.GetIncludeUsage(),
+		MemoryKind:      strings.TrimSpace(req.GetKind()),
+	}
+	if err := episodic.ValidateKindSelector(query.MemoryKind); err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid kind selector: %v", err)
 	}
 	if req.GetCreatedAfter() != nil {
 		t := req.GetCreatedAfter().AsTime()
@@ -3745,10 +3952,31 @@ func (s *AdminMemoriesServer) ListMemories(ctx context.Context, req *pb.AdminLis
 		t := req.GetExpiresBefore().AsTime()
 		query.ExpiresBefore = &t
 	}
+	// Normalize and validate filter + run list query inside one read tx so kind-version
+	// lookups use the scoped handle (avoids SQLite dbFor panic).
+	var rawNormFilter registryepisodic.AttributeFilter
+	if f := req.GetFilter(); f != nil {
+		filterMap := f.AsMap()
+		normFilter, err := registryepisodic.NormalizeAttributeFilters(filterMap)
+		if err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "invalid filter: %s", err.Error())
+		}
+		rawNormFilter = normFilter
+	}
 	page, err := withEpisodicRead(ctx, s.Store, func(txCtx context.Context) (registryepisodic.AdminMemoryPage, error) {
+		if !rawNormFilter.Empty() {
+			validated, vErr := grpcValidateAndNormalizeCallerFilter(txCtx, s.Store, query.MemoryKind, rawNormFilter)
+			if vErr != nil {
+				return registryepisodic.AdminMemoryPage{}, status.Errorf(codes.InvalidArgument, "filter validation: %v", vErr)
+			}
+			query.Filter = validated
+		}
 		return s.Store.AdminListMemories(txCtx, query)
 	})
 	if err != nil {
+		if _, ok := status.FromError(err); ok {
+			return nil, err
+		}
 		return nil, episodicInternalError("failed to list admin memories", err)
 	}
 	if req.GetIncludeUsage() {
@@ -3836,12 +4064,17 @@ func (s *AdminMemoriesServer) SearchMemories(ctx context.Context, req *pb.AdminS
 	}
 	effectivePrefix := prefix
 	policyFilter := map[string]interface{}{}
+	adminGRPCKind := strings.TrimSpace(req.GetKind())
+	if err := episodic.ValidateKindSelector(adminGRPCKind); err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid kind selector: %v", err)
+	}
+	adminGRPCKI := episodic.KindIntersection{Selector: adminGRPCKind}
 	if asUserID := strings.TrimSpace(req.GetAsUserId()); asUserID != "" {
 		if s.Policy == nil {
 			return nil, status.Error(codes.FailedPrecondition, "memory policy is not configured")
 		}
 		var err error
-		effectivePrefix, policyFilter, err = s.Policy.InjectFilterParts(ctx, prefix, filter, episodic.PolicyContext{
+		effectivePrefix, policyFilter, adminGRPCKI, err = s.Policy.InjectFilterPartsWithKind(ctx, prefix, filter, adminGRPCKind, episodic.PolicyContext{
 			UserID:   asUserID,
 			ClientID: getClientID(ctx),
 			JWTClaims: map[string]interface{}{
@@ -3852,10 +4085,37 @@ func (s *AdminMemoriesServer) SearchMemories(ctx context.Context, req *pb.AdminS
 			return nil, episodicInternalError("filter injection error", err)
 		}
 	}
-	normalizedFilter, err := registryepisodic.NormalizeAttributeFilters(filter, policyFilter)
+	adminGRPCKind = adminGRPCKI.Selector
+
+	// Empty intersection: return immediately before schema/filter/store work.
+	if adminGRPCKI.Empty {
+		return &pb.AdminSearchMemoriesResponse{Items: []*pb.AdminMemoryItem{}}, nil
+	}
+
+	// Normalize filter operator structure (pure, no DB). Keep raw for schema validation inside tx.
+	rawAdminGRPCCallerFilter, err := registryepisodic.NormalizeAttributeFilters(filter)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+	normalizedAdminGRPCPolicyFilter, err := registryepisodic.NormalizeAttributeFilters(policyFilter)
+	if err != nil {
+		return nil, episodicInternalError("policy filter normalization error", err)
+	}
+
+	// buildNormalizedAdminFilter validates caller filter types against schema and merges policy
+	// filter. Must run inside a read tx so schema version lookups use the scoped DB handle.
+	buildNormalizedAdminFilter := func(txCtx context.Context) (registryepisodic.AttributeFilter, error) {
+		validated, vErr := grpcValidateAndNormalizeCallerFilter(txCtx, s.Store, adminGRPCKind, rawAdminGRPCCallerFilter)
+		if vErr != nil {
+			return registryepisodic.AttributeFilter{}, status.Errorf(codes.InvalidArgument, "filter validation: %v", vErr)
+		}
+		merged, mErr := registryepisodic.MergeAttributeFilters(validated, normalizedAdminGRPCPolicyFilter)
+		if mErr != nil {
+			return registryepisodic.AttributeFilter{}, status.Error(codes.InvalidArgument, mErr.Error())
+		}
+		return merged, nil
+	}
+
 	archived := protoArchiveFilterToEpisodic(req.GetArchived())
 	query := strings.TrimSpace(req.GetQuery())
 	hasQueries := len(req.GetQueries()) > 0
@@ -3864,6 +4124,9 @@ func (s *AdminMemoriesServer) SearchMemories(ctx context.Context, req *pb.AdminS
 	}
 	var items []registryepisodic.MemoryItem
 	if hasQueries {
+		if req.GetSort() != nil {
+			return nil, status.Error(codes.InvalidArgument, "sort is not supported with semantic search")
+		}
 		queries, queryErr := protoMemorySearchQuerySpecs(req.GetQueries())
 		if queryErr != nil {
 			return nil, status.Error(codes.InvalidArgument, queryErr.Error())
@@ -3876,17 +4139,73 @@ func (s *AdminMemoriesServer) SearchMemories(ctx context.Context, req *pb.AdminS
 			return nil, status.Error(codes.Unavailable, "semantic search unavailable")
 		}
 		items, err = withEpisodicRead(ctx, s.Store, func(txCtx context.Context) ([]registryepisodic.MemoryItem, error) {
-			return multiQuerySemanticSearchMemories(txCtx, s.Store, s.Embedder, effectivePrefix, normalizedFilter, queries, perQueryLimit, limit, archived)
+			normalizedFilter, fErr := buildNormalizedAdminFilter(txCtx)
+			if fErr != nil {
+				return nil, fErr
+			}
+			return multiQuerySemanticSearchMemories(txCtx, s.Store, s.Embedder, effectivePrefix, normalizedFilter, queries, perQueryLimit, limit, archived, adminGRPCKind)
 		})
+		if err != nil {
+			if _, ok := status.FromError(err); ok {
+				return nil, err
+			}
+			if errors.Is(err, registryepisodic.ErrSemanticSearchUnavailable) {
+				return nil, grpcStatusWithCause(codes.Unavailable, "semantic search unavailable", err)
+			}
+			return nil, episodicInternalError("multi-query admin search error", err)
+		}
 	} else if query != "" {
+		if req.GetSort() != nil {
+			return nil, status.Error(codes.InvalidArgument, "sort is not supported with semantic search")
+		}
 		if s.Embedder == nil {
 			return nil, status.Error(codes.Unavailable, "semantic search unavailable")
 		}
 		items, err = withEpisodicRead(ctx, s.Store, func(txCtx context.Context) ([]registryepisodic.MemoryItem, error) {
-			return semanticSearchMemories(txCtx, s.Store, s.Embedder, effectivePrefix, normalizedFilter, query, limit, archived)
+			normalizedFilter, fErr := buildNormalizedAdminFilter(txCtx)
+			if fErr != nil {
+				return nil, fErr
+			}
+			return semanticSearchMemories(txCtx, s.Store, s.Embedder, effectivePrefix, normalizedFilter, query, limit, archived, adminGRPCKind)
 		})
+		if err != nil {
+			if _, ok := status.FromError(err); ok {
+				return nil, err
+			}
+			if errors.Is(err, registryepisodic.ErrSemanticSearchUnavailable) {
+				return nil, grpcStatusWithCause(codes.Unavailable, "semantic search unavailable", err)
+			}
+			return nil, episodicInternalError("admin semantic search error", err)
+		}
 	} else {
+		// Attribute-only search: filter validation, sort type resolution, and query all in one read tx.
 		items, err = withEpisodicRead(ctx, s.Store, func(txCtx context.Context) ([]registryepisodic.MemoryItem, error) {
+			normalizedFilter, fErr := buildNormalizedAdminFilter(txCtx)
+			if fErr != nil {
+				return nil, fErr
+			}
+			var adminGRPCSort *registryepisodic.MemoryAttributeSort
+			if req.GetSort() != nil {
+				direction, directionErr := normalizeGRPCSortDirection(req.GetSort().GetDirection())
+				if directionErr != nil {
+					return nil, status.Error(codes.InvalidArgument, directionErr.Error())
+				}
+				if err := registryepisodic.ValidateAttributeFilterField(req.GetSort().GetField()); err != nil {
+					return nil, status.Error(codes.InvalidArgument, "invalid sort field: "+err.Error())
+				}
+				adminSortType, sortErr := grpcResolveKindSortFieldType(txCtx, s.Store, adminGRPCKind, req.GetSort().GetField())
+				if sortErr != nil {
+					return nil, status.Error(codes.InvalidArgument, "invalid sort: "+sortErr.Error())
+				}
+				if adminSortType == string(episodic.AttributeTypeStringArr) {
+					return nil, status.Error(codes.InvalidArgument, "sort on string[] attributes is not supported")
+				}
+				adminGRPCSort = &registryepisodic.MemoryAttributeSort{
+					Field:     req.GetSort().GetField(),
+					Direction: direction,
+					Type:      adminSortType,
+				}
+			}
 			return s.Store.AdminSearchMemories(txCtx, registryepisodic.AdminMemorySearchQuery{
 				NamespacePrefix: effectivePrefix,
 				KeyPrefix:       req.GetKeyPrefix(),
@@ -3894,14 +4213,16 @@ func (s *AdminMemoriesServer) SearchMemories(ctx context.Context, req *pb.AdminS
 				Archived:        archived,
 				Limit:           limit,
 				IncludeUsage:    req.GetIncludeUsage(),
+				MemoryKind:      adminGRPCKind,
+				Sort:            adminGRPCSort,
 			})
 		})
-	}
-	if err != nil {
-		if errors.Is(err, registryepisodic.ErrSemanticSearchUnavailable) {
-			return nil, grpcStatusWithCause(codes.Unavailable, "semantic search unavailable", err)
+		if err != nil {
+			if _, ok := status.FromError(err); ok {
+				return nil, err
+			}
+			return nil, episodicInternalError("failed to search admin memories", err)
 		}
-		return nil, episodicInternalError("failed to search admin memories", err)
 	}
 	if req.GetKeyPrefix() != "" && (query != "" || hasQueries) {
 		items = filterMemoryItemsByKeyPrefix(items, req.GetKeyPrefix())
@@ -4121,19 +4442,12 @@ func (s *AdminMemoriesServer) PutMemory(ctx context.Context, req *pb.AdminPutMem
 		index = map[string]string{}
 	}
 
-	policyAttrs := map[string]interface{}{}
-	if s.Policy != nil {
-		// Admin memory writes are authorized by admin role/scope/justification
-		// above. Do not run user OPA authz here; only run attribute extraction
-		// with a neutral admin context for indexing/search.
-		extracted, err := s.Policy.ExtractAttributes(ctx, namespace, key, value, index, adminMemoryPolicyContext(ctx))
-		if err != nil {
-			return nil, episodicInternalError("attribute extraction error", err)
-		}
-		policyAttrs = extracted
-	}
-
+	kindSel := req.GetKind()
 	result, err := withEpisodicWrite(ctx, s.Store, func(txCtx context.Context) (*registryepisodic.MemoryWriteResult, error) {
+		policyAttrs, resolvedKind, err := grpcResolveKindProjection(txCtx, s.Store, kindSel, namespace, key, value, index)
+		if err != nil {
+			return nil, err
+		}
 		return s.Store.PutMemory(txCtx, registryepisodic.PutMemoryRequest{
 			Namespace:        namespace,
 			Key:              key,
@@ -4141,10 +4455,14 @@ func (s *AdminMemoriesServer) PutMemory(ctx context.Context, req *pb.AdminPutMem
 			Index:            index,
 			TTLSeconds:       int(req.GetTtlSeconds()),
 			PolicyAttributes: policyAttrs,
+			MemoryKind:       resolvedKind,
 			ExpectedRevision: req.ExpectedRevision,
 		})
 	})
 	if err != nil {
+		if _, ok := status.FromError(err); ok {
+			return nil, err
+		}
 		if errors.Is(err, registryepisodic.ErrMemoryRevisionConflict) {
 			return nil, grpcStatusWithCause(codes.Aborted, "memory revision conflict", err)
 		}
@@ -4155,6 +4473,17 @@ func (s *AdminMemoriesServer) PutMemory(ctx context.Context, req *pb.AdminPutMem
 		return nil, episodicInternalError("failed to encode memory write response", err)
 	}
 	return resp, nil
+}
+
+func normalizeGRPCSortDirection(raw string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "asc":
+		return "asc", nil
+	case "desc":
+		return "desc", nil
+	default:
+		return "", fmt.Errorf("invalid sort direction %q; expected asc or desc", raw)
+	}
 }
 
 func (s *AdminMemoriesServer) UpdateMemory(ctx context.Context, req *pb.AdminUpdateMemoryRequest) (*emptypb.Empty, error) {
@@ -4195,13 +4524,152 @@ func (s *AdminMemoriesServer) UpdateMemory(ctx context.Context, req *pb.AdminUpd
 	return &emptypb.Empty{}, nil
 }
 
-func adminMemoryPolicyContext(ctx context.Context) episodic.PolicyContext {
-	return episodic.PolicyContext{
-		UserID:   "",
-		ClientID: getClientID(ctx),
-		JWTClaims: map[string]interface{}{
-			"roles": []string{security.RoleAdmin},
-		},
+func grpcResolveKindProjection(ctx context.Context, store registryepisodic.EpisodicStore, kindSel string, namespace []string, key string, value map[string]interface{}, index map[string]string) (map[string]interface{}, string, error) {
+	canonicalName, err := store.ResolveKindForWrite(ctx, kindSel)
+	if err != nil {
+		if errors.Is(err, registryepisodic.ErrMemoryKindInvalid) || errors.Is(err, registryepisodic.ErrMemoryKindNotFound) || errors.Is(err, registryepisodic.ErrMemoryKindNotWritable) {
+			return nil, "", status.Errorf(codes.InvalidArgument, "schema selector %q: %v", kindSel, err)
+		}
+		return nil, "", episodicInternalError("resolve schema", err)
+	}
+	return grpcProjectResolvedKind(ctx, store, canonicalName, namespace, key, value, index)
+}
+
+// grpcProjectResolvedKind loads and evaluates the Rego projection for an already-resolved
+// canonical kind name. Use after resolving the kind once (e.g. for authz) to avoid a second
+// ResolveKindForWrite call. Projection type violations are returned as InvalidArgument.
+func grpcProjectResolvedKind(ctx context.Context, store registryepisodic.EpisodicStore, canonicalName string, namespace []string, key string, value map[string]interface{}, index map[string]string) (map[string]interface{}, string, error) {
+	sv, err := store.GetMemoryKindVersion(ctx, canonicalName)
+	if err != nil {
+		return nil, canonicalName, episodicInternalError("load schema version", err)
+	}
+	if sv == nil || sv.AttributesRego == nil || *sv.AttributesRego == "" {
+		return map[string]interface{}{}, canonicalName, nil
+	}
+	pq, err := episodic.CompileKindProjection(ctx, *sv.AttributesRego)
+	if err != nil {
+		return nil, canonicalName, episodicInternalError("compile schema", err)
+	}
+	raw, err := episodic.EvaluateKindProjection(ctx, pq, namespace, key, value, index)
+	if err != nil {
+		return nil, canonicalName, episodicInternalError("evaluate schema projection", err)
+	}
+	attrs, err := episodic.ValidateAndNormalizeKindProjection(raw, sv.AttributeTypes)
+	if err != nil {
+		// Projection type violation is a client error (bad value for the chosen schema).
+		return nil, canonicalName, status.Errorf(codes.InvalidArgument, "schema %q projection invalid: %v", canonicalName, err)
+	}
+	return attrs, canonicalName, nil
+}
+
+// grpcKindVersionList mirrors the REST kindVersionList helper: builds a
+// KindVersionList for the given selector so filter/sort can use the shared
+// episodic package helpers.
+func grpcKindVersionList(ctx context.Context, store registryepisodic.EpisodicStore, memoryKind string) (episodic.KindVersionList, string, error) {
+	if store == nil {
+		return nil, "", nil
+	}
+	_, exactCanonical, isExact := episodic.ParseKindSelector(memoryKind)
+	if isExact {
+		sv, err := store.GetMemoryKindVersion(ctx, exactCanonical)
+		if err != nil {
+			return nil, exactCanonical, err
+		}
+		if sv == nil {
+			return nil, exactCanonical, fmt.Errorf("schema version %q not found", exactCanonical)
+		}
+		return episodic.KindVersionList{{Name: sv.Name, AttributeTypes: sv.AttributeTypes}}, exactCanonical, nil
+	}
+	family, _, _ := episodic.ParseKindSelector(memoryKind)
+	if family == episodic.DefaultKindFamily && memoryKind == "" {
+		family = ""
+	}
+	all, err := store.ListMemoryKindVersions(ctx, family)
+	if err != nil {
+		return nil, "", err
+	}
+	list := make(episodic.KindVersionList, 0, len(all))
+	for _, sv := range all {
+		v := sv
+		list = append(list, struct {
+			Name           string
+			AttributeTypes map[string]string
+		}{Name: v.Name, AttributeTypes: v.AttributeTypes})
+	}
+	return list, "", nil
+}
+
+// grpcResolveKindSortFieldType looks up the declared attribute type for a sort field.
+// Defect 7 fix: mirrors REST — resolves across all selected schema versions.
+func grpcResolveKindSortFieldType(ctx context.Context, store registryepisodic.EpisodicStore, memoryKind, field string) (string, error) {
+	if store == nil {
+		return "", nil
+	}
+	versions, exactName, err := grpcKindVersionList(ctx, store, memoryKind)
+	if err != nil {
+		return "", fmt.Errorf("load schema versions: %w", err)
+	}
+	return episodic.ResolveSortFieldType(field, exactName, versions)
+}
+
+// grpcValidateAndNormalizeCallerFilter validates and normalizes caller-supplied filter
+// conditions against declared schema versions.  Returns a new AttributeFilter with
+// normalized values (timestamps canonical UTC, numbers as float64, etc.).
+// Policy-injected filters must NOT be passed here.
+func grpcValidateAndNormalizeCallerFilter(ctx context.Context, store registryepisodic.EpisodicStore, memoryKind string, callerFilter registryepisodic.AttributeFilter) (registryepisodic.AttributeFilter, error) {
+	if store == nil || callerFilter.Empty() {
+		return callerFilter, nil
+	}
+	versions, exactName, err := grpcKindVersionList(ctx, store, memoryKind)
+	if err != nil {
+		return registryepisodic.AttributeFilter{}, fmt.Errorf("load schema versions for filter validation: %w", err)
+	}
+	if len(versions) == 0 {
+		return callerFilter, nil
+	}
+	out := registryepisodic.AttributeFilter{
+		Conditions: make([]registryepisodic.AttributeFilterCondition, 0, len(callerFilter.Conditions)),
+	}
+	for _, cond := range callerFilter.Conditions {
+		// Validate field declaration + operator.
+		if err := episodic.ValidateCallerFilterField(cond.Field, string(cond.Op), exactName, versions); err != nil {
+			return registryepisodic.AttributeFilter{}, fmt.Errorf("filter on %q: %w", cond.Field, err)
+		}
+		// Resolve the field type and normalize values.
+		fieldType, _ := episodic.ResolveSortFieldType(cond.Field, exactName, versions)
+		rawValues := make([]interface{}, 0, len(cond.Values))
+		for _, v := range cond.Values {
+			rawValues = append(rawValues, v.Raw)
+		}
+		normalizedRaw, err := episodic.ValidateAndNormalizeCallerFilterValues(cond.Field, string(cond.Op), fieldType, rawValues)
+		if err != nil {
+			return registryepisodic.AttributeFilter{}, fmt.Errorf("filter on %q values: %w", cond.Field, err)
+		}
+		normalizedCond := registryepisodic.AttributeFilterCondition{
+			Field:     cond.Field,
+			Op:        cond.Op,
+			RangeKind: grpcNormalizedRangeKindForType(fieldType, cond.RangeKind),
+		}
+		for _, rv := range normalizedRaw {
+			normalizedCond.Values = append(normalizedCond.Values, registryepisodic.AttributeFilterValue{
+				Raw:  rv,
+				Text: fmt.Sprintf("%v", rv),
+			})
+		}
+		out.Conditions = append(out.Conditions, normalizedCond)
+	}
+	return out, nil
+}
+
+// grpcNormalizedRangeKindForType returns the schema-derived RangeKind for a field type.
+func grpcNormalizedRangeKindForType(fieldType string, existing registryepisodic.AttributeFilterRangeKind) registryepisodic.AttributeFilterRangeKind {
+	switch episodic.AttributeType(fieldType) {
+	case episodic.AttributeTypeNumber:
+		return registryepisodic.AttributeFilterRangeNumber
+	case episodic.AttributeTypeTimestamp:
+		return registryepisodic.AttributeFilterRangeTime
+	default:
+		return existing
 	}
 }
 
@@ -4297,12 +4765,16 @@ func episodicInternalError(message string, err error) error {
 }
 
 func memoryWriteResultToProto(item *registryepisodic.MemoryWriteResult) (*pb.MemoryWriteResult, error) {
+	if item.MemoryKind == "" {
+		return nil, fmt.Errorf("memory write result has empty kind")
+	}
 	resp := &pb.MemoryWriteResult{
 		Id:        uuidToBytes(item.ID),
 		Namespace: append([]string(nil), item.Namespace...),
 		Key:       item.Key,
 		CreatedAt: item.CreatedAt.UTC().Format(time.RFC3339),
 		Revision:  item.Revision,
+		Kind:      item.MemoryKind,
 	}
 	if item.Attributes != nil {
 		attrs, err := structpb.NewStruct(item.Attributes)
@@ -4319,6 +4791,9 @@ func memoryWriteResultToProto(item *registryepisodic.MemoryWriteResult) (*pb.Mem
 }
 
 func memoryItemToProto(item registryepisodic.MemoryItem) (*pb.MemoryItem, error) {
+	if item.MemoryKind == "" {
+		return nil, fmt.Errorf("memory item has empty kind")
+	}
 	value, err := structpb.NewStruct(item.Value)
 	if err != nil {
 		return nil, err
@@ -4331,6 +4806,7 @@ func memoryItemToProto(item registryepisodic.MemoryItem) (*pb.MemoryItem, error)
 		CreatedAt: item.CreatedAt.UTC().Format(time.RFC3339),
 		Archived:  item.ArchivedAt != nil,
 		Revision:  item.Revision,
+		Kind:      item.MemoryKind,
 	}
 	if item.Attributes != nil {
 		attrs, err := structpb.NewStruct(item.Attributes)
@@ -4356,6 +4832,9 @@ func memoryItemToProto(item registryepisodic.MemoryItem) (*pb.MemoryItem, error)
 }
 
 func adminMemoryItemToProto(item registryepisodic.MemoryItem) (*pb.AdminMemoryItem, error) {
+	if item.MemoryKind == "" {
+		return nil, fmt.Errorf("admin memory item has empty kind")
+	}
 	resp := &pb.AdminMemoryItem{
 		Id:        uuidToBytes(item.ID),
 		Namespace: append([]string(nil), item.Namespace...),
@@ -4363,6 +4842,7 @@ func adminMemoryItemToProto(item registryepisodic.MemoryItem) (*pb.AdminMemoryIt
 		CreatedAt: timestamppb.New(item.CreatedAt.UTC()),
 		Archived:  item.ArchivedAt != nil,
 		Revision:  item.Revision,
+		Kind:      item.MemoryKind,
 	}
 	if item.Value != nil {
 		value, err := structpb.NewStruct(item.Value)
@@ -4422,6 +4902,7 @@ func memoryEventToProto(event registryepisodic.MemoryEvent) (*pb.MemoryEventItem
 		Key:        event.Key,
 		Kind:       event.Kind,
 		OccurredAt: timestamppb.New(event.OccurredAt.UTC()),
+		MemoryKind: event.MemoryKind,
 	}
 	if event.Value != nil {
 		value, err := structpb.NewStruct(event.Value)
@@ -4467,7 +4948,14 @@ func filterMemoryItemsByKeyPrefix(items []registryepisodic.MemoryItem, keyPrefix
 	return out
 }
 
-func semanticSearchMemories(ctx context.Context, store registryepisodic.EpisodicStore, embedder registryembed.Embedder, namespacePrefix []string, filter registryepisodic.AttributeFilter, query string, limit int, archived registryepisodic.ArchiveFilter) ([]registryepisodic.MemoryItem, error) {
+// grpcSemanticSearchMaxOverfetch is the maximum vector-fetch limit for the
+// bounded iterative overfetch loop (defect 6 fix — gRPC path). This is a
+// best-effort heuristic: if all kind-matching rows rank beyond this position
+// in the full similarity ranking, the result count may be silently below the
+// requested limit. See WORKAROUNDS.md "Semantic search kind post-filter".
+const grpcSemanticSearchMaxOverfetch = 1000
+
+func semanticSearchMemories(ctx context.Context, store registryepisodic.EpisodicStore, embedder registryembed.Embedder, namespacePrefix []string, filter registryepisodic.AttributeFilter, query string, limit int, archived registryepisodic.ArchiveFilter, memoryKind string) ([]registryepisodic.MemoryItem, error) {
 	embeddings, err := embedder.EmbedTexts(ctx, []string{query})
 	if err != nil {
 		return nil, fmt.Errorf("embed query: %w", err)
@@ -4475,63 +4963,124 @@ func semanticSearchMemories(ctx context.Context, store registryepisodic.Episodic
 	if len(embeddings) == 0 {
 		return nil, nil
 	}
-
 	nsEncoded := ""
 	if len(namespacePrefix) > 0 {
-		var err error
 		nsEncoded, err = episodic.EncodeNamespace(namespacePrefix, 0)
 		if err != nil {
 			return nil, err
 		}
 	}
-	vectorResults, err := store.SearchMemoryVectors(ctx, nsEncoded, embeddings[0], filter, limit, archived)
-	if err != nil {
-		return nil, fmt.Errorf("search memory vectors: %w", err)
-	}
-	if len(vectorResults) == 0 {
-		return nil, nil
-	}
+	return grpcSemanticSearchWithKindFilter(ctx, store, nsEncoded, embeddings[0], filter, limit, archived, memoryKind)
+}
 
-	scoreByID := make(map[uuid.UUID]float64, len(vectorResults))
-	orderedIDs := make([]uuid.UUID, 0, len(vectorResults))
-	for _, vr := range vectorResults {
-		if prev, exists := scoreByID[vr.MemoryID]; !exists {
-			scoreByID[vr.MemoryID] = vr.Score
-			orderedIDs = append(orderedIDs, vr.MemoryID)
-		} else if vr.Score > prev {
-			scoreByID[vr.MemoryID] = vr.Score
+// grpcSemanticSearchWithKindFilter performs bounded iterative overfetch for
+// gRPC single-query semantic search (defect 6 fix, mirrors REST path).
+func grpcSemanticSearchWithKindFilter(ctx context.Context, store registryepisodic.EpisodicStore, nsEncoded string, embedding []float32, filter registryepisodic.AttributeFilter, limit int, archived registryepisodic.ArchiveFilter, memoryKind string) ([]registryepisodic.MemoryItem, error) {
+	fetchLimit := limit * 4
+	if fetchLimit < limit+10 {
+		fetchLimit = limit + 10
+	}
+	if fetchLimit > grpcSemanticSearchMaxOverfetch {
+		fetchLimit = grpcSemanticSearchMaxOverfetch
+	}
+	type vectorHit struct {
+		score            float64
+		revision         int64
+		schema           string
+		primaryValidated bool // true = SQL JOIN already enforced freshness
+	}
+	bestByID := make(map[uuid.UUID]vectorHit)
+	orderedIDs := make([]uuid.UUID, 0)
+	// Bounded overfetch loop: doubles fetchLimit until limit is filled, backend is exhausted,
+	// or the hard cap (grpcSemanticSearchMaxOverfetch) is reached.
+	var results []registryepisodic.MemoryItem
+	for {
+		vectorResults, err := store.SearchMemoryVectors(ctx, nsEncoded, embedding, filter, memoryKind, fetchLimit, archived)
+		if err != nil {
+			return nil, fmt.Errorf("search memory vectors: %w", err)
+		}
+		if len(vectorResults) == 0 {
+			break
+		}
+		for _, vr := range vectorResults {
+			if prev, exists := bestByID[vr.MemoryID]; !exists {
+				bestByID[vr.MemoryID] = vectorHit{score: vr.Score, revision: vr.MemoryRevision, schema: vr.MemoryKind, primaryValidated: vr.PrimaryValidated}
+				orderedIDs = append(orderedIDs, vr.MemoryID)
+			} else if vr.Score > prev.score {
+				bestByID[vr.MemoryID] = vectorHit{score: vr.Score, revision: prev.revision, schema: prev.schema, primaryValidated: prev.primaryValidated}
+			}
+		}
+		items, err := store.GetMemoriesByIDs(ctx, orderedIDs, archived)
+		if err != nil {
+			return nil, fmt.Errorf("get memories by ids: %w", err)
+		}
+		itemByID := make(map[uuid.UUID]registryepisodic.MemoryItem, len(items))
+		for _, item := range items {
+			hit := bestByID[item.ID]
+			// Item 3: SQL-validated hits skip freshness checks entirely.
+			if !hit.primaryValidated {
+				// Schema freshness check (only for unvalidated/Qdrant hits).
+				if hit.schema != "" {
+					if hit.schema != item.MemoryKind {
+						continue
+					}
+				} else {
+					// Empty vector schema — reject as stale.
+					continue
+				}
+				if hit.revision <= 0 || item.Revision != hit.revision {
+					continue
+				}
+			}
+			itemByID[item.ID] = item
+		}
+		results = results[:0]
+		for _, id := range orderedIDs {
+			item, ok := itemByID[id]
+			if !ok {
+				continue
+			}
+			if !matchesGRPCKindSelector(item.MemoryKind, memoryKind) {
+				continue
+			}
+			score := bestByID[id].score
+			item.Score = &score
+			results = append(results, item)
+		}
+		sort.SliceStable(results, func(i, j int) bool {
+			return *results[i].Score > *results[j].Score
+		})
+		if len(results) >= limit || len(vectorResults) < fetchLimit {
+			break
+		}
+		prevFetchLimit := fetchLimit
+		fetchLimit = fetchLimit * 2
+		if fetchLimit > grpcSemanticSearchMaxOverfetch {
+			fetchLimit = grpcSemanticSearchMaxOverfetch
+		}
+		// Bug 3: break if fetchLimit is at the hard cap and backend returned exactly cap.
+		if fetchLimit == prevFetchLimit {
+			break
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
 		}
 	}
-	if len(orderedIDs) == 0 {
-		return nil, nil
-	}
-
-	items, err := store.GetMemoriesByIDs(ctx, orderedIDs, archived)
-	if err != nil {
-		return nil, fmt.Errorf("get memories by ids: %w", err)
-	}
-	itemByID := make(map[uuid.UUID]registryepisodic.MemoryItem, len(items))
-	for _, item := range items {
-		itemByID[item.ID] = item
-	}
-
-	results := make([]registryepisodic.MemoryItem, 0, len(orderedIDs))
-	for _, id := range orderedIDs {
-		item, ok := itemByID[id]
-		if !ok {
-			continue
-		}
-		score := scoreByID[id]
-		item.Score = &score
-		results = append(results, item)
-	}
-	sort.SliceStable(results, func(i, j int) bool {
-		return *results[i].Score > *results[j].Score
-	})
 	if len(results) > limit {
 		results = results[:limit]
 	}
 	return results, nil
+}
+
+// matchesGRPCKindSelector mirrors memories.go matchesKindSelector for gRPC paths.
+func matchesGRPCKindSelector(itemSchema, sel string) bool {
+	if sel == "" {
+		return true
+	}
+	if strings.Contains(sel, "/") {
+		return itemSchema == sel
+	}
+	return strings.HasPrefix(itemSchema, sel+"/")
 }
 
 type memorySearchQuerySpec struct {
@@ -4568,6 +5117,37 @@ func protoPerQueryLimit(raw int32, limit int) (int, error) {
 	return int(raw), nil
 }
 
+// grpcMqCandidateEligible mirrors memories.mqCandidateEligible for gRPC paths.
+// PrimaryValidated only skips freshness; kind must always be checked (Defect B fix).
+func grpcMqCandidateEligible(
+	vectorSchema string,
+	vectorRevision int64,
+	primaryValidated bool,
+	primaryKind string,
+	primaryRevision int64,
+	memoryKind string,
+) bool {
+	// Kind must always match, regardless of PrimaryValidated.
+	if !matchesGRPCKindSelector(primaryKind, memoryKind) {
+		return false
+	}
+	if primaryValidated {
+		return true
+	}
+	if vectorSchema != "" {
+		if vectorSchema != primaryKind {
+			return false
+		}
+	} else {
+		// Empty vector schema — reject as stale.
+		return false
+	}
+	if vectorRevision <= 0 || primaryRevision != vectorRevision {
+		return false
+	}
+	return true
+}
+
 func multiQuerySemanticSearchMemories(
 	ctx context.Context,
 	store registryepisodic.EpisodicStore,
@@ -4578,6 +5158,7 @@ func multiQuerySemanticSearchMemories(
 	perQueryLimit int,
 	limit int,
 	archived registryepisodic.ArchiveFilter,
+	memoryKind string,
 ) ([]registryepisodic.MemoryItem, error) {
 	texts := make([]string, 0, len(queries))
 	for _, q := range queries {
@@ -4612,32 +5193,139 @@ func multiQuerySemanticSearchMemories(
 		firstSeen  int
 	}
 
+	// accum/seenOrder accumulate per-query eligible hits into the RRF pool.
+	// revByID/kindByID/validatedByID track vector metadata for stale-check on first encounter.
 	accum := make(map[uuid.UUID]*rrfEntry)
 	seenOrder := make([]uuid.UUID, 0)
+	revByID := make(map[uuid.UUID]int64)
+	kindByID := make(map[uuid.UUID]string)
+	validatedByID := make(map[uuid.UUID]bool)
+
+	// Bugs 4+5 fix (gRPC): per-query overfetch loop so stale/wrong-kind Qdrant hits
+	// cannot consume the per-query top-k before primary validation.
 	for qi, q := range queries {
-		vectorResults, err := store.SearchMemoryVectors(ctx, nsEncoded, embeddings[qi], filter, perQueryLimit, archived)
-		if err != nil {
-			return nil, fmt.Errorf("search memory vectors (query %d): %w", qi, err)
+		if qi >= len(embeddings) {
+			break
 		}
-		seenForQuery := make(map[uuid.UUID]bool, len(vectorResults))
+		// Start at perQueryLimit*4, doubling until enough eligible hits, exhaustion, or hard cap.
+		qFetchLimit := perQueryLimit * 4
+		if qFetchLimit < perQueryLimit+10 {
+			qFetchLimit = perQueryLimit + 10
+		}
+		if qFetchLimit > grpcSemanticSearchMaxOverfetch {
+			qFetchLimit = grpcSemanticSearchMaxOverfetch
+		}
+
+		type qHit struct {
+			score            float64
+			revision         int64
+			schema           string
+			primaryValidated bool
+		}
+		qBestByID := make(map[uuid.UUID]qHit)
+		qOrder := make([]uuid.UUID, 0)
+
+		for {
+			vectorResults, err := store.SearchMemoryVectors(ctx, nsEncoded, embeddings[qi], filter, memoryKind, qFetchLimit, archived)
+			if err != nil {
+				return nil, fmt.Errorf("search memory vectors (query %d): %w", qi, err)
+			}
+			if len(vectorResults) == 0 {
+				break
+			}
+			for _, vr := range vectorResults {
+				if _, dup := qBestByID[vr.MemoryID]; !dup {
+					qBestByID[vr.MemoryID] = qHit{score: vr.Score, revision: vr.MemoryRevision, schema: vr.MemoryKind, primaryValidated: vr.PrimaryValidated}
+					qOrder = append(qOrder, vr.MemoryID)
+				}
+			}
+			// Fetch primary rows for all accumulated candidates.
+			allIDs := make([]uuid.UUID, 0, len(qBestByID))
+			for id := range qBestByID {
+				allIDs = append(allIDs, id)
+			}
+			primaryItems, err := store.GetMemoriesByIDs(ctx, allIDs, archived)
+			if err != nil {
+				return nil, fmt.Errorf("get memories by ids (query %d): %w", qi, err)
+			}
+			primaryByID := make(map[uuid.UUID]registryepisodic.MemoryItem, len(primaryItems))
+			for _, item := range primaryItems {
+				primaryByID[item.ID] = item
+			}
+			// Count eligible hits using the shared predicate.
+			// Kind must always match regardless of PrimaryValidated (Defect B fix).
+			eligibleCount := 0
+			for _, id := range qOrder {
+				hit := qBestByID[id]
+				primary, primaryFound := primaryByID[id]
+				if !primaryFound {
+					continue
+				}
+				if grpcMqCandidateEligible(hit.schema, hit.revision, hit.primaryValidated, primary.MemoryKind, primary.Revision, memoryKind) {
+					eligibleCount++
+				}
+			}
+			// Stop if we have enough eligible hits, backend is exhausted, or at cap.
+			prevQFetchLimit := qFetchLimit
+			if eligibleCount >= perQueryLimit || len(vectorResults) < qFetchLimit {
+				break
+			}
+			qFetchLimit = qFetchLimit * 2
+			if qFetchLimit > grpcSemanticSearchMaxOverfetch {
+				qFetchLimit = grpcSemanticSearchMaxOverfetch
+			}
+			if qFetchLimit == prevQFetchLimit {
+				break
+			}
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+		}
+
+		// Assign RRF ranks to eligible hits in score-descending order.
+		// Fetch primary rows once more for the final selection.
+		allIDs := make([]uuid.UUID, 0, len(qBestByID))
+		for id := range qBestByID {
+			allIDs = append(allIDs, id)
+		}
+		primaryItems, err := store.GetMemoriesByIDs(ctx, allIDs, archived)
+		if err != nil {
+			return nil, fmt.Errorf("get memories by ids (query %d final): %w", qi, err)
+		}
+		primaryByID := make(map[uuid.UUID]registryepisodic.MemoryItem, len(primaryItems))
+		for _, item := range primaryItems {
+			primaryByID[item.ID] = item
+		}
+
 		rank := 1
-		for _, vr := range vectorResults {
-			if seenForQuery[vr.MemoryID] {
+		for _, id := range qOrder {
+			if rank > perQueryLimit {
+				break
+			}
+			hit := qBestByID[id]
+			primary, primaryFound := primaryByID[id]
+			if !primaryFound {
 				continue
 			}
-			seenForQuery[vr.MemoryID] = true
-			entry, ok := accum[vr.MemoryID]
-			if !ok {
+			if !grpcMqCandidateEligible(hit.schema, hit.revision, hit.primaryValidated, primary.MemoryKind, primary.Revision, memoryKind) {
+				continue
+			}
+			// Record for RRF.
+			entry, exists := accum[id]
+			if !exists {
 				entry = &rrfEntry{
 					purposeSet: make(map[string]struct{}),
 					firstSeen:  len(seenOrder),
 				}
-				accum[vr.MemoryID] = entry
-				seenOrder = append(seenOrder, vr.MemoryID)
+				accum[id] = entry
+				seenOrder = append(seenOrder, id)
+				revByID[id] = hit.revision
+				kindByID[id] = hit.schema
+				validatedByID[id] = hit.primaryValidated
 			}
 			entry.rrfScore += 1.0 / (rrfK + float64(rank))
-			if vr.Score > entry.bestRaw {
-				entry.bestRaw = vr.Score
+			if hit.score > entry.bestRaw {
+				entry.bestRaw = hit.score
 			}
 			if _, already := entry.purposeSet[q.Purpose]; !already {
 				entry.purposeSet[q.Purpose] = struct{}{}
@@ -4650,6 +5338,8 @@ func multiQuerySemanticSearchMemories(
 	if len(seenOrder) == 0 {
 		return nil, nil
 	}
+
+	// Sort IDs by RRF score descending; ties broken by best raw score then first-seen order.
 	sort.SliceStable(seenOrder, func(i, j int) bool {
 		ei, ej := accum[seenOrder[i]], accum[seenOrder[j]]
 		if ei.rrfScore != ej.rrfScore {
@@ -4660,22 +5350,28 @@ func multiQuerySemanticSearchMemories(
 		}
 		return ei.firstSeen < ej.firstSeen
 	})
-	topIDs := seenOrder
-	if len(topIDs) > limit {
-		topIDs = topIDs[:limit]
-	}
 
-	items, err := store.GetMemoriesByIDs(ctx, topIDs, archived)
+	// Fetch ALL scored IDs, filter, then apply limit AFTER so stale hits don't consume quota.
+	items, err := store.GetMemoriesByIDs(ctx, seenOrder, archived)
 	if err != nil {
 		return nil, fmt.Errorf("get memories by ids: %w", err)
 	}
 	itemByID := make(map[uuid.UUID]registryepisodic.MemoryItem, len(items))
 	for _, item := range items {
+		// Final guard: apply full eligibility including kind (Defect B fix).
+		// grpcMqCandidateEligible checks kind first, then freshness unless PrimaryValidated.
+		if !grpcMqCandidateEligible(kindByID[item.ID], revByID[item.ID], validatedByID[item.ID], item.MemoryKind, item.Revision, memoryKind) {
+			continue
+		}
 		itemByID[item.ID] = item
 	}
 
-	results := make([]registryepisodic.MemoryItem, 0, len(topIDs))
-	for _, id := range topIDs {
+	// Assemble results preserving RRF order, attach scores and attribution.
+	results := make([]registryepisodic.MemoryItem, 0, limit)
+	for _, id := range seenOrder {
+		if len(results) >= limit {
+			break
+		}
 		item, ok := itemByID[id]
 		if !ok {
 			continue
@@ -6627,4 +7323,347 @@ func decodeGRPCUserListField(data map[string]any, field string) ([]string, bool)
 	default:
 		return nil, false
 	}
+}
+
+// --- Admin Memory Schema Service ---
+
+// AdminMemoryKindServer implements the AdminMemoryKindService gRPC interface.
+type AdminMemoryKindServer struct {
+	pb.UnimplementedAdminMemoryKindServiceServer
+	Store     registryepisodic.EpisodicStore
+	MainStore registrystore.MemoryStore
+	Config    *config.Config
+}
+
+func (s *AdminMemoryKindServer) requireAdmin(ctx context.Context, operation, justification string) error {
+	id, err := requireGRPCIdentity(ctx)
+	if err != nil {
+		return err
+	}
+	if !id.Roles[security.RoleAdmin] {
+		return status.Error(codes.PermissionDenied, "admin role required")
+	}
+	if s.Config != nil && s.Config.RequireJustification && strings.TrimSpace(justification) == "" {
+		return status.Error(codes.InvalidArgument, "admin justification required")
+	}
+	log.Info("Admin audit",
+		"caller", id.UserID,
+		"role", security.RoleAdmin,
+		"operation", "grpc "+operation,
+		"requestID", security.RequestIDFromContext(ctx),
+		"justification", strings.TrimSpace(justification),
+	)
+	return nil
+}
+
+func (s *AdminMemoryKindServer) CreateMemoryKindVersion(ctx context.Context, req *pb.CreateMemoryKindVersionRequest) (*pb.MemoryKindVersion, error) {
+	if s.Store == nil {
+		return nil, status.Error(codes.FailedPrecondition, "episodic store is not configured")
+	}
+	if err := s.requireAdmin(ctx, "CreateMemoryKindVersion", req.GetJustification()); err != nil {
+		return nil, err
+	}
+	if err := requireGRPCOIDCScope(ctx, security.PermissionAdminMemoriesWrite); err != nil {
+		return nil, err
+	}
+	if req.GetName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "name is required")
+	}
+	if _, _, err := episodic.ParseCanonicalKindName(req.GetName()); err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid schema name: %v", err)
+	}
+	if err := episodic.ValidateKindAttributeTypes(req.GetAttributes()); err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid attributes: %v", err)
+	}
+	rego := req.GetProjectionRego()
+	if rego != "" {
+		if _, err := episodic.CompileKindProjection(ctx, rego); err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "invalid projection_rego: %v", err)
+		}
+	}
+	sv := model.MemoryKindVersion{
+		Name:           req.GetName(),
+		AttributeTypes: req.GetAttributes(),
+		Writable:       true,
+		CreatedAt:      time.Now().UTC(),
+	}
+	if req.Writable != nil {
+		sv.Writable = req.GetWritable()
+	}
+	if rego != "" {
+		sv.AttributesRego = &rego
+	}
+	return withEpisodicWrite(ctx, s.Store, func(txCtx context.Context) (*pb.MemoryKindVersion, error) {
+		result, err := s.Store.CreateMemoryKindVersion(txCtx, sv)
+		if err != nil {
+			if errors.Is(err, registryepisodic.ErrMemoryKindVersionConflict) {
+				return nil, grpcStatusWithCause(codes.AlreadyExists, "schema version already exists with a different definition", err)
+			}
+			return nil, episodicInternalError("create schema version", err)
+		}
+		return kindVersionToProto(result, true), nil
+	})
+}
+
+func (s *AdminMemoryKindServer) ListMemoryKindVersions(ctx context.Context, req *pb.ListMemoryKindVersionsRequest) (*pb.ListMemoryKindVersionsResponse, error) {
+	if s.Store == nil {
+		return nil, status.Error(codes.FailedPrecondition, "episodic store is not configured")
+	}
+	if err := s.requireAdmin(ctx, "ListMemoryKindVersions", req.GetJustification()); err != nil {
+		return nil, err
+	}
+	if err := requireGRPCOIDCScope(ctx, security.PermissionAdminMemoriesRead); err != nil {
+		return nil, err
+	}
+	return withEpisodicRead(ctx, s.Store, func(txCtx context.Context) (*pb.ListMemoryKindVersionsResponse, error) {
+		versions, err := s.Store.ListMemoryKindVersions(txCtx, req.GetFamily())
+		if err != nil {
+			return nil, episodicInternalError("list schema versions", err)
+		}
+		items := make([]*pb.MemoryKindVersion, 0, len(versions))
+		for i := range versions {
+			items = append(items, kindVersionToProto(&versions[i], false))
+		}
+		return &pb.ListMemoryKindVersionsResponse{Items: items}, nil
+	})
+}
+
+func (s *AdminMemoryKindServer) GetMemoryKindVersion(ctx context.Context, req *pb.GetMemoryKindVersionRequest) (*pb.MemoryKindVersion, error) {
+	if s.Store == nil {
+		return nil, status.Error(codes.FailedPrecondition, "episodic store is not configured")
+	}
+	if err := s.requireAdmin(ctx, "GetMemoryKindVersion", req.GetJustification()); err != nil {
+		return nil, err
+	}
+	if err := requireGRPCOIDCScope(ctx, security.PermissionAdminMemoriesRead); err != nil {
+		return nil, err
+	}
+	name := req.GetFamily() + "/" + req.GetVersion()
+	return withEpisodicRead(ctx, s.Store, func(txCtx context.Context) (*pb.MemoryKindVersion, error) {
+		sv, err := s.Store.GetMemoryKindVersion(txCtx, name)
+		if err != nil {
+			return nil, episodicInternalError("get schema version", err)
+		}
+		if sv == nil {
+			return nil, status.Errorf(codes.NotFound, "schema version %q not found", name)
+		}
+		return kindVersionToProto(sv, true), nil
+	})
+}
+
+func (s *AdminMemoryKindServer) CreateMemoryKindMigration(ctx context.Context, req *pb.CreateMemoryKindMigrationRequest) (*pb.MemoryKindMigration, error) {
+	if s.Store == nil {
+		return nil, status.Error(codes.FailedPrecondition, "episodic store is not configured")
+	}
+	if err := s.requireAdmin(ctx, "CreateMemoryKindMigration", req.GetJustification()); err != nil {
+		return nil, err
+	}
+	if err := requireGRPCOIDCScope(ctx, security.PermissionAdminMemoriesWrite); err != nil {
+		return nil, err
+	}
+	src := req.GetSource()
+	tgt := req.GetTarget()
+	srcFamily, _, parseErr := episodic.ParseCanonicalKindName(src)
+	if parseErr != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid source: %v", parseErr)
+	}
+	tgtFamily, _, parseErr2 := episodic.ParseCanonicalKindName(tgt)
+	if parseErr2 != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid target: %v", parseErr2)
+	}
+	if src == tgt {
+		return nil, status.Error(codes.InvalidArgument, "source and target must differ")
+	}
+	if srcFamily != tgtFamily {
+		return nil, status.Error(codes.InvalidArgument, "source and target must belong to the same family")
+	}
+	// Verify source and target exist; create migration in a write tx.
+	var srcVer, target *model.MemoryKindVersion
+	var readErr error
+	srcVer, target, readErr = func() (*model.MemoryKindVersion, *model.MemoryKindVersion, error) {
+		var sv, tgv *model.MemoryKindVersion
+		err := s.Store.InReadTx(ctx, func(txCtx context.Context) error {
+			var e error
+			sv, e = s.Store.GetMemoryKindVersion(txCtx, src)
+			if e != nil {
+				return e
+			}
+			tgv, e = s.Store.GetMemoryKindVersion(txCtx, tgt)
+			return e
+		})
+		return sv, tgv, err
+	}()
+	if readErr != nil {
+		return nil, episodicInternalError("get schema versions for migration", readErr)
+	}
+	if srcVer == nil {
+		return nil, status.Errorf(codes.NotFound, "source schema version %q not found", src)
+	}
+	// Validate namespace prefix segments.
+	for i, seg := range req.GetNamespacePrefix() {
+		if seg == "" {
+			return nil, status.Errorf(codes.InvalidArgument, "namespace_prefix[%d] must not be empty", i)
+		}
+	}
+	if target == nil {
+		return nil, status.Errorf(codes.NotFound, "target schema version %q not found", tgt)
+	}
+	if !target.Writable {
+		return nil, status.Error(codes.InvalidArgument, "target schema version is not writable")
+	}
+	m := model.MemoryKindMigration{
+		ID:              uuid.New(),
+		Source:          src,
+		Target:          tgt,
+		NamespacePrefix: req.GetNamespacePrefix(),
+		State:           model.MigrationStateQueued,
+		CreatedAt:       time.Now().UTC(),
+	}
+	result, err := withEpisodicWrite(ctx, s.Store, func(txCtx context.Context) (*model.MemoryKindMigration, error) {
+		return s.Store.CreateMemoryKindMigrationAndTask(txCtx, m)
+	})
+	if err != nil {
+		if errors.Is(err, registryepisodic.ErrMemoryKindMigrationActiveForSource) {
+			return nil, grpcStatusWithCause(codes.AlreadyExists, "an active migration for this source version already exists", err)
+		}
+		return nil, episodicInternalError("create migration", err)
+	}
+	return kindMigrationToProto(ctx, s.Store, result), nil
+}
+
+func (s *AdminMemoryKindServer) ListMemoryKindMigrations(ctx context.Context, req *pb.ListMemoryKindMigrationsRequest) (*pb.ListMemoryKindMigrationsResponse, error) {
+	if s.Store == nil {
+		return nil, status.Error(codes.FailedPrecondition, "episodic store is not configured")
+	}
+	if err := s.requireAdmin(ctx, "ListMemoryKindMigrations", req.GetJustification()); err != nil {
+		return nil, err
+	}
+	if err := requireGRPCOIDCScope(ctx, security.PermissionAdminMemoriesRead); err != nil {
+		return nil, err
+	}
+	return withEpisodicRead(ctx, s.Store, func(txCtx context.Context) (*pb.ListMemoryKindMigrationsResponse, error) {
+		migrations, err := s.Store.ListMemoryKindMigrations(txCtx, req.GetState())
+		if err != nil {
+			return nil, episodicInternalError("list migrations", err)
+		}
+		items := make([]*pb.MemoryKindMigration, 0, len(migrations))
+		for i := range migrations {
+			items = append(items, kindMigrationToProto(txCtx, s.Store, &migrations[i]))
+		}
+		return &pb.ListMemoryKindMigrationsResponse{Items: items}, nil
+	})
+}
+
+func (s *AdminMemoryKindServer) GetMemoryKindMigration(ctx context.Context, req *pb.GetMemoryKindMigrationRequest) (*pb.MemoryKindMigration, error) {
+	if s.Store == nil {
+		return nil, status.Error(codes.FailedPrecondition, "episodic store is not configured")
+	}
+	if err := s.requireAdmin(ctx, "GetMemoryKindMigration", req.GetJustification()); err != nil {
+		return nil, err
+	}
+	if err := requireGRPCOIDCScope(ctx, security.PermissionAdminMemoriesRead); err != nil {
+		return nil, err
+	}
+	id, err := bytesToUUID(req.GetId())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, "invalid migration id")
+	}
+	return withEpisodicRead(ctx, s.Store, func(txCtx context.Context) (*pb.MemoryKindMigration, error) {
+		m, err := s.Store.GetMemoryKindMigration(txCtx, id)
+		if err != nil {
+			return nil, episodicInternalError("get migration", err)
+		}
+		if m == nil {
+			return nil, status.Error(codes.NotFound, "migration not found")
+		}
+		return kindMigrationToProto(txCtx, s.Store, m), nil
+	})
+}
+
+func (s *AdminMemoryKindServer) CancelMemoryKindMigration(ctx context.Context, req *pb.CancelMemoryKindMigrationRequest) (*emptypb.Empty, error) {
+	if s.Store == nil {
+		return nil, status.Error(codes.FailedPrecondition, "episodic store is not configured")
+	}
+	if err := s.requireAdmin(ctx, "CancelMemoryKindMigration", req.GetJustification()); err != nil {
+		return nil, err
+	}
+	if err := requireGRPCOIDCScope(ctx, security.PermissionAdminMemoriesWrite); err != nil {
+		return nil, err
+	}
+	id, err := bytesToUUID(req.GetId())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, "invalid migration id")
+	}
+	return withEpisodicWrite(ctx, s.Store, func(txCtx context.Context) (*emptypb.Empty, error) {
+		if err := s.Store.UpdateMemoryKindMigrationCancelRequested(txCtx, id); err != nil {
+			if errors.Is(err, registryepisodic.ErrMemoryKindMigrationNotFound) {
+				return nil, status.Error(codes.NotFound, "migration not found")
+			}
+			return nil, episodicInternalError("cancel migration", err)
+		}
+		return &emptypb.Empty{}, nil
+	})
+}
+
+// kindVersionToProto converts a model.MemoryKindVersion to its proto representation.
+func kindVersionToProto(sv *model.MemoryKindVersion, includeRego bool) *pb.MemoryKindVersion {
+	resp := &pb.MemoryKindVersion{
+		Name:       sv.Name,
+		Attributes: sv.AttributeTypes,
+		Writable:   sv.Writable,
+		CreatedAt:  timestamppb.New(sv.CreatedAt),
+	}
+	if includeRego && sv.AttributesRego != nil {
+		s := *sv.AttributesRego
+		resp.ProjectionRego = &s
+	}
+	return resp
+}
+
+// grpcMigrationVectorPending returns a live count of rows awaiting re-index.
+// Item 7 fix: wraps CountMemoriesPendingIndexByKind in InReadTx and removes
+// the State guard so all states show live convergence.
+func grpcMigrationVectorPending(ctx context.Context, store registryepisodic.EpisodicStore, m *model.MemoryKindMigration) int64 {
+	if store == nil {
+		return m.VectorPendingCount
+	}
+	var count int64
+	if err := store.InReadTx(ctx, func(rCtx context.Context) error {
+		var err error
+		count, err = store.CountMemoriesPendingIndexByKind(rCtx, m.Target, m.NamespacePrefix)
+		return err
+	}); err != nil {
+		log.Warn("grpcMigrationVectorPending: count failed, falling back to stored value",
+			"migration", m.ID, "err", err)
+		return m.VectorPendingCount
+	}
+	return count
+}
+
+// kindMigrationToProto converts a model.MemoryKindMigration to its proto representation.
+// Defect 10 fix: VectorPendingCount is computed live for non-terminal migrations.
+func kindMigrationToProto(ctx context.Context, store registryepisodic.EpisodicStore, m *model.MemoryKindMigration) *pb.MemoryKindMigration {
+	resp := &pb.MemoryKindMigration{
+		Id:                    uuidToBytes(m.ID),
+		Source:                m.Source,
+		Target:                m.Target,
+		NamespacePrefix:       m.NamespacePrefix,
+		State:                 m.State,
+		CancelRequested:       m.CancelRequested,
+		MigratedCount:         m.MigratedCount,
+		SkippedTombstoneCount: m.SkippedTombstoneCount,
+		VectorPendingCount:    grpcMigrationVectorPending(ctx, store, m),
+		RetryCount:            int32(m.RetryCount),
+		CreatedAt:             timestamppb.New(m.CreatedAt),
+	}
+	if m.LastErrorCode != nil {
+		resp.LastErrorCode = m.LastErrorCode
+	}
+	if m.StartedAt != nil {
+		resp.StartedAt = timestamppb.New(*m.StartedAt)
+	}
+	if m.CompletedAt != nil {
+		resp.CompletedAt = timestamppb.New(*m.CompletedAt)
+	}
+	return resp
 }

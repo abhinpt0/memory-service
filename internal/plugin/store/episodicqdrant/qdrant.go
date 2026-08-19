@@ -57,13 +57,19 @@ func (c *Client) UpsertMemoryVectors(ctx context.Context, items []registryepisod
 	}
 	points := make([]*pb.PointStruct, 0, len(items))
 	for _, item := range items {
-		payload := map[string]*pb.Value{
-			"kind":       stringValue("memory"),
-			"memory_id":  stringValue(item.MemoryID.String()),
-			"field_name": stringValue(item.FieldName),
-			"namespace":  stringValue(item.Namespace),
-			"archived":   boolValue(item.Archived),
+		if item.MemoryKind == "" {
+			return fmt.Errorf("internal error: MemoryVectorUpsert.MemoryKind must be non-empty for memory %s", item.MemoryID)
 		}
+		payload := map[string]*pb.Value{
+			"kind":            stringValue("memory"),
+			"memory_id":       stringValue(item.MemoryID.String()),
+			"field_name":      stringValue(item.FieldName),
+			"namespace":       stringValue(item.Namespace),
+			"archived":        boolValue(item.Archived),
+			"memory_revision": {Kind: &pb.Value_IntegerValue{IntegerValue: item.MemoryRevision}},
+		}
+		payload["memory_kind"] = stringValue(item.MemoryKind)
+		payload["memory_kind_family"] = stringValue(strings.SplitN(item.MemoryKind, "/", 2)[0])
 		ancestors := namespaceAncestors(item.Namespace)
 		if len(ancestors) > 0 {
 			payload["namespace_ancestors"] = stringListValue(ancestors)
@@ -93,12 +99,17 @@ func (c *Client) UpsertMemoryVectors(ctx context.Context, items []registryepisod
 		})
 	}
 
-	_, err := c.points.Upsert(ctx, &pb.UpsertPoints{
+	wait := true
+	result, err := c.points.Upsert(ctx, &pb.UpsertPoints{
 		CollectionName: c.collectionName,
 		Points:         points,
+		Wait:           &wait,
 	})
 	if err != nil {
 		return fmt.Errorf("qdrant episodic upsert: %w", err)
+	}
+	if result == nil || result.GetResult().GetStatus() != pb.UpdateStatus_Completed {
+		return fmt.Errorf("qdrant episodic upsert did not complete: %v", result.GetResult().GetStatus())
 	}
 	return nil
 }
@@ -108,8 +119,10 @@ func (c *Client) DeleteMemoryVectors(ctx context.Context, memoryID uuid.UUID) er
 	if c == nil {
 		return nil
 	}
-	_, err := c.points.Delete(ctx, &pb.DeletePoints{
+	wait := true
+	result, err := c.points.Delete(ctx, &pb.DeletePoints{
 		CollectionName: c.collectionName,
+		Wait:           &wait,
 		Points: &pb.PointsSelector{
 			PointsSelectorOneOf: &pb.PointsSelector_Filter{
 				Filter: &pb.Filter{
@@ -124,11 +137,14 @@ func (c *Client) DeleteMemoryVectors(ctx context.Context, memoryID uuid.UUID) er
 	if err != nil {
 		return fmt.Errorf("qdrant episodic delete: %w", err)
 	}
+	if result == nil || result.GetResult().GetStatus() != pb.UpdateStatus_Completed {
+		return fmt.Errorf("qdrant episodic delete did not complete: %v", result.GetResult().GetStatus())
+	}
 	return nil
 }
 
 // SearchMemoryVectors searches vectors using namespace_ancestors + attribute filter.
-func (c *Client) SearchMemoryVectors(ctx context.Context, namespacePrefix string, embedding []float32, filter registryepisodic.AttributeFilter, limit int, archived registryepisodic.ArchiveFilter) ([]registryepisodic.MemoryVectorSearch, error) {
+func (c *Client) SearchMemoryVectors(ctx context.Context, namespacePrefix string, embedding []float32, filter registryepisodic.AttributeFilter, memoryKind string, limit int, archived registryepisodic.ArchiveFilter) ([]registryepisodic.MemoryVectorSearch, error) {
 	if c == nil || limit <= 0 || len(embedding) == 0 {
 		return nil, nil
 	}
@@ -139,6 +155,13 @@ func (c *Client) SearchMemoryVectors(ctx context.Context, namespacePrefix string
 	if namespacePrefix != "" {
 		// Qdrant matches keyword against array elements, so this enforces prefix by exact ancestor match.
 		must = append(must, matchKeywordCondition("namespace_ancestors", namespacePrefix))
+	}
+	if memoryKind != "" {
+		if strings.Contains(memoryKind, "/") {
+			must = append(must, matchKeywordCondition("memory_kind", memoryKind))
+		} else {
+			must = append(must, matchKeywordCondition("memory_kind_family", memoryKind))
+		}
 	}
 	switch archived {
 	case registryepisodic.ArchiveFilterExclude:
@@ -167,23 +190,37 @@ func (c *Client) SearchMemoryVectors(ctx context.Context, namespacePrefix string
 		return nil, fmt.Errorf("qdrant episodic search: %w", err)
 	}
 
-	bestByID := make(map[uuid.UUID]float64)
+	type vectorHit struct {
+		score    float64
+		revision int64
+		schema   string
+	}
+	bestByID := make(map[uuid.UUID]vectorHit)
 	for _, pt := range resp.GetResult() {
-		memoryID, ok := memoryIDFromPayload(pt.GetPayload())
+		payload := pt.GetPayload()
+		memoryID, ok := memoryIDFromPayload(payload)
 		if !ok {
 			continue
 		}
+		schema := schemaFromPayload(payload)
+		if schema == "" {
+			// Fresh-only invariant: skip vectors without a memory_kind.
+			continue
+		}
 		score := float64(pt.GetScore())
-		if prev, exists := bestByID[memoryID]; !exists || score > prev {
-			bestByID[memoryID] = score
+		rev := revisionFromPayload(payload)
+		if prev, exists := bestByID[memoryID]; !exists || score > prev.score {
+			bestByID[memoryID] = vectorHit{score: score, revision: rev, schema: schema}
 		}
 	}
 
 	results := make([]registryepisodic.MemoryVectorSearch, 0, len(bestByID))
-	for id, score := range bestByID {
+	for id, hit := range bestByID {
 		results = append(results, registryepisodic.MemoryVectorSearch{
-			MemoryID: id,
-			Score:    score,
+			MemoryID:       id,
+			Score:          hit.score,
+			MemoryRevision: hit.revision,
+			MemoryKind:     hit.schema,
 		})
 	}
 	sort.Slice(results, func(i, j int) bool {
@@ -361,6 +398,28 @@ func memoryIDFromPayload(payload map[string]*pb.Value) (uuid.UUID, bool) {
 		return uuid.Nil, false
 	}
 	return id, true
+}
+
+func revisionFromPayload(payload map[string]*pb.Value) int64 {
+	if payload == nil {
+		return 0
+	}
+	raw, ok := payload["memory_revision"]
+	if !ok || raw == nil {
+		return 0
+	}
+	return raw.GetIntegerValue()
+}
+
+func schemaFromPayload(payload map[string]*pb.Value) string {
+	if payload == nil {
+		return ""
+	}
+	raw, ok := payload["memory_kind"]
+	if !ok || raw == nil {
+		return ""
+	}
+	return raw.GetStringValue()
 }
 
 func sanitizePayloadKey(s string) string {

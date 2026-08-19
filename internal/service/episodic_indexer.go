@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"sync"
 	"time"
@@ -11,6 +12,13 @@ import (
 	registryembed "github.com/chirino/memory-service/internal/registry/embed"
 	registryepisodic "github.com/chirino/memory-service/internal/registry/episodic"
 )
+
+// isRevisionConflict returns true when a CAS operation was rejected because the
+// target row changed between the read and the write. The indexer uses this to
+// skip a row rather than treating it as a failure.
+func isRevisionConflict(err error) bool {
+	return errors.Is(err, registryepisodic.ErrMemoryRevisionConflict)
+}
 
 // EpisodicIndexer polls for memories with indexed_at IS NULL and:
 //   - Active rows (archived_at IS NULL): generates embeddings and upserts them into the vector store.
@@ -111,7 +119,13 @@ func (idx *EpisodicIndexer) runOnce(ctx context.Context) (stats EpisodicIndexRun
 					if err := idx.store.DeleteMemoryVectors(writeCtx, m.ID); err != nil {
 						return err
 					}
-					return idx.store.SetMemoryIndexedAt(writeCtx, m.ID, time.Now())
+					if err := idx.store.SetMemoryKindIndexedAtCAS(writeCtx, m.ID, m.MemoryKind, m.Revision, time.Now()); err != nil {
+						if isRevisionConflict(err) {
+							return nil // row changed; skip gracefully
+						}
+						return err
+					}
+					return nil
 				}); err != nil {
 					if markJobInterrupted(event, ctx, err) {
 						return stats
@@ -129,10 +143,20 @@ func (idx *EpisodicIndexer) runOnce(ctx context.Context) (stats EpisodicIndexRun
 
 		// Active row: embed and upsert.
 		if idx.embedder == nil || len(m.IndexedContent) == 0 {
-			// No embedder or no value — mark as indexed with no vector.
+			// No embedder or no content means the complete replacement vector set is empty.
+			// Delete any vectors left by an earlier revision before marking convergence.
 			stats.SkippedNoEmbedding++
 			if err := idx.store.InWriteTx(ctx, func(writeCtx context.Context) error {
-				return idx.store.SetMemoryIndexedAt(writeCtx, m.ID, time.Now())
+				if err := idx.store.DeleteMemoryVectors(writeCtx, m.ID); err != nil {
+					return err
+				}
+				if err := idx.store.SetMemoryKindIndexedAtCAS(writeCtx, m.ID, m.MemoryKind, m.Revision, time.Now()); err != nil {
+					if isRevisionConflict(err) {
+						return nil // row changed; will be re-indexed on next cycle
+					}
+					return err
+				}
+				return nil
 			}); err != nil {
 				if markJobInterrupted(event, ctx, err) {
 					return stats
@@ -161,6 +185,7 @@ func (idx *EpisodicIndexer) runOnce(ctx context.Context) (stats EpisodicIndexRun
 		}
 
 		var upserts []registryepisodic.MemoryVectorUpsert
+		embedFailed := false
 		if len(entries) > 0 {
 			texts := make([]string, len(entries))
 			for i, fe := range entries {
@@ -175,9 +200,19 @@ func (idx *EpisodicIndexer) runOnce(ctx context.Context) (stats EpisodicIndexRun
 				event.SetReason("embed_failed")
 				event.EnrichError(err)
 				stats.Failures++
+				embedFailed = true
 			} else {
+				if len(embeddings) != len(entries) {
+					log.Warn("Episodic indexer: embedder returned wrong result count", "id", m.ID, "expected", len(entries), "actual", len(embeddings))
+					event.SetReason("embed_result_count_mismatch")
+					stats.Failures++
+					embedFailed = true
+				}
 				stats.Embedded += len(embeddings)
 				for i, fe := range entries {
+					if embedFailed {
+						break
+					}
 					if i < len(embeddings) {
 						upserts = append(upserts, registryepisodic.MemoryVectorUpsert{
 							MemoryID:         m.ID,
@@ -186,18 +221,34 @@ func (idx *EpisodicIndexer) runOnce(ctx context.Context) (stats EpisodicIndexRun
 							PolicyAttributes: m.PolicyAttributes,
 							Archived:         m.ArchivedAt != nil,
 							Embedding:        embeddings[i],
+							MemoryKind:       m.MemoryKind,
+							MemoryRevision:   m.Revision,
 						})
 					}
 				}
 			}
 		}
+		if embedFailed {
+			continue // leave indexed_at pending; do not delete the last good vector set
+		}
 
 		if len(upserts) > 0 {
 			if err := idx.store.InWriteTx(ctx, func(writeCtx context.Context) error {
+				// Replace the complete per-memory vector set so fields removed by a
+				// later revision cannot remain as higher-scoring stale candidates.
+				if err := idx.store.DeleteMemoryVectors(writeCtx, m.ID); err != nil {
+					return err
+				}
 				if err := idx.store.UpsertMemoryVectors(writeCtx, upserts); err != nil {
 					return err
 				}
-				return idx.store.SetMemoryIndexedAt(writeCtx, m.ID, time.Now())
+				if err := idx.store.SetMemoryKindIndexedAtCAS(writeCtx, m.ID, m.MemoryKind, m.Revision, time.Now()); err != nil {
+					if isRevisionConflict(err) {
+						return nil // row changed between find and upsert; will re-index
+					}
+					return err
+				}
+				return nil
 			}); err != nil {
 				if markJobInterrupted(event, ctx, err) {
 					return stats
@@ -210,7 +261,16 @@ func (idx *EpisodicIndexer) runOnce(ctx context.Context) (stats EpisodicIndexRun
 			}
 			stats.VectorUpserts += len(upserts)
 		} else if err := idx.store.InWriteTx(ctx, func(writeCtx context.Context) error {
-			return idx.store.SetMemoryIndexedAt(writeCtx, m.ID, time.Now())
+			if err := idx.store.DeleteMemoryVectors(writeCtx, m.ID); err != nil {
+				return err
+			}
+			if err := idx.store.SetMemoryKindIndexedAtCAS(writeCtx, m.ID, m.MemoryKind, m.Revision, time.Now()); err != nil {
+				if isRevisionConflict(err) {
+					return nil
+				}
+				return err
+			}
+			return nil
 		}); err != nil {
 			if markJobInterrupted(event, ctx, err) {
 				return stats

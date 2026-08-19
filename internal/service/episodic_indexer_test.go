@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"testing"
 	"time"
@@ -21,6 +22,8 @@ type fakeEpisodicStore struct {
 	upserts          [][]registryepisodic.MemoryVectorUpsert
 	deletedVectorIDs []uuid.UUID
 	indexedAtByID    map[uuid.UUID]time.Time
+	casErrors        []error
+	operations       []string
 }
 
 func (f *fakeEpisodicStore) InReadTx(ctx context.Context, fn func(context.Context) error) error {
@@ -39,6 +42,7 @@ func (f *fakeEpisodicStore) FindMemoriesPendingIndexing(_ context.Context, _ int
 }
 
 func (f *fakeEpisodicStore) UpsertMemoryVectors(_ context.Context, items []registryepisodic.MemoryVectorUpsert) error {
+	f.operations = append(f.operations, "upsert")
 	cp := make([]registryepisodic.MemoryVectorUpsert, len(items))
 	copy(cp, items)
 	f.upserts = append(f.upserts, cp)
@@ -46,6 +50,7 @@ func (f *fakeEpisodicStore) UpsertMemoryVectors(_ context.Context, items []regis
 }
 
 func (f *fakeEpisodicStore) DeleteMemoryVectors(_ context.Context, memoryID uuid.UUID) error {
+	f.operations = append(f.operations, "delete")
 	f.deletedVectorIDs = append(f.deletedVectorIDs, memoryID)
 	return nil
 }
@@ -58,17 +63,83 @@ func (f *fakeEpisodicStore) SetMemoryIndexedAt(_ context.Context, memoryID uuid.
 	return nil
 }
 
+func (f *fakeEpisodicStore) SetMemoryKindIndexedAtCAS(_ context.Context, memoryID uuid.UUID, _ string, _ int64, indexedAt time.Time) error {
+	f.operations = append(f.operations, "cas")
+	if len(f.casErrors) > 0 {
+		err := f.casErrors[0]
+		f.casErrors = f.casErrors[1:]
+		if err != nil {
+			return err
+		}
+	}
+	if f.indexedAtByID == nil {
+		f.indexedAtByID = make(map[uuid.UUID]time.Time)
+	}
+	f.indexedAtByID[memoryID] = indexedAt
+	return nil
+}
+
+func TestEpisodicIndexer_LifecycleChangeBeforeCASLeavesRowPending(t *testing.T) {
+	memoryID := uuid.New()
+	store := &fakeEpisodicStore{
+		pending: []registryepisodic.PendingMemory{{
+			ID: memoryID, Namespace: "user\x1ealice", MemoryKind: "default/v1", Revision: 1,
+			IndexedContent: map[string]string{"text": "stale payload"},
+		}},
+		casErrors: []error{registryepisodic.ErrMemoryRevisionConflict},
+	}
+	indexer := NewEpisodicIndexer(store, &fakeEmbedder{embeddings: [][]float32{{1, 0}}}, time.Second, 10)
+	if _, err := indexer.Trigger(context.Background()); err != nil {
+		t.Fatalf("Trigger: %v", err)
+	}
+	if _, marked := store.indexedAtByID[memoryID]; marked {
+		t.Fatal("lifecycle-conflicted row must remain pending for reconciliation")
+	}
+	if len(store.upserts) != 1 {
+		t.Fatalf("expected stale upsert attempt before CAS conflict, got %d", len(store.upserts))
+	}
+
+	// A superseding lifecycle transition clears indexed_at and increments revision.
+	// The next pass must delete the stale vector before marking the row indexed.
+	archivedAt := time.Now().UTC()
+	supersededReason := int32(0)
+	store.pending[0].ArchivedAt = &archivedAt
+	store.pending[0].DeletedReason = &supersededReason
+	store.pending[0].Revision = 2
+	if _, err := indexer.Trigger(context.Background()); err != nil {
+		t.Fatalf("second Trigger: %v", err)
+	}
+	if len(store.deletedVectorIDs) != 2 || store.deletedVectorIDs[1] != memoryID {
+		t.Fatalf("next pass did not delete stale lifecycle vector: %#v", store.deletedVectorIDs)
+	}
+	if _, marked := store.indexedAtByID[memoryID]; !marked {
+		t.Fatal("reconciled lifecycle revision should be marked indexed")
+	}
+}
+
+func (f *fakeEpisodicStore) FindMemoriesToMigrateByKind(_ context.Context, _ string, _ []string, _ time.Time, _ uuid.UUID, _ int) ([]registryepisodic.MigrationCandidate, error) {
+	return nil, nil
+}
+
+func (f *fakeEpisodicStore) MigrateOneMemoryKindCAS(_ context.Context, _ uuid.UUID, _ string, _ int64, _ map[string]interface{}, _ string) error {
+	return nil
+}
+
 type fakeEmbedder struct {
 	registryembed.Embedder
 
 	embeddings [][]float32
 	calls      [][]string
+	err        error
 }
 
 func (f *fakeEmbedder) EmbedTexts(_ context.Context, texts []string) ([][]float32, error) {
 	cp := make([]string, len(texts))
 	copy(cp, texts)
 	f.calls = append(f.calls, cp)
+	if f.err != nil {
+		return nil, f.err
+	}
 	return f.embeddings, nil
 }
 
@@ -117,6 +188,9 @@ func TestEpisodicIndexer_EmbedsIndexedContentOnly(t *testing.T) {
 	if len(store.upserts[0]) != 2 {
 		t.Fatalf("expected two vector upserts, got %d", len(store.upserts[0]))
 	}
+	if len(store.deletedVectorIDs) != 1 || store.deletedVectorIDs[0] != memoryID {
+		t.Fatalf("expected complete vector-set replacement before upsert, got deletes %#v", store.deletedVectorIDs)
+	}
 	if store.upserts[0][0].MemoryID != memoryID || store.upserts[0][0].FieldName != "summary" || !reflect.DeepEqual(store.upserts[0][0].Embedding, []float32{1, 2}) {
 		t.Fatalf("unexpected first upsert: %#v", store.upserts[0][0])
 	}
@@ -153,8 +227,48 @@ func TestEpisodicIndexer_SkipsWhenIndexedContentMissing(t *testing.T) {
 	if len(embedder.calls) != 0 {
 		t.Fatalf("expected no embed calls, got %d", len(embedder.calls))
 	}
+	if !reflect.DeepEqual(store.operations, []string{"delete", "cas"}) {
+		t.Fatalf("empty replacement must delete stale vectors before CAS: %#v", store.operations)
+	}
 	if _, ok := store.indexedAtByID[memoryID]; !ok {
 		t.Fatalf("memory %s was not marked indexed", memoryID)
+	}
+}
+
+func TestEpisodicIndexer_AllEmptyContentDeletesStaleVectors(t *testing.T) {
+	memoryID := uuid.New()
+	store := &fakeEpisodicStore{pending: []registryepisodic.PendingMemory{{
+		ID: memoryID, MemoryKind: "default/v1", Revision: 2,
+		IndexedContent: map[string]string{"title": "", "summary": ""},
+	}}}
+	indexer := NewEpisodicIndexer(store, &fakeEmbedder{}, time.Second, 10)
+
+	stats, err := indexer.Trigger(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Failures != 0 || len(store.upserts) != 0 {
+		t.Fatalf("unexpected result: stats=%+v upserts=%v", stats, store.upserts)
+	}
+	if !reflect.DeepEqual(store.operations, []string{"delete", "cas"}) {
+		t.Fatalf("all-empty replacement must delete stale vectors before CAS: %#v", store.operations)
+	}
+}
+
+func TestEpisodicIndexer_EmbeddingFailurePreservesLastGoodVectors(t *testing.T) {
+	memoryID := uuid.New()
+	store := &fakeEpisodicStore{pending: []registryepisodic.PendingMemory{{
+		ID: memoryID, MemoryKind: "default/v1", Revision: 2,
+		IndexedContent: map[string]string{"title": "new content"},
+	}}}
+	indexer := NewEpisodicIndexer(store, &fakeEmbedder{err: errors.New("embed unavailable")}, time.Second, 10)
+
+	stats, err := indexer.Trigger(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Failures != 1 || len(store.operations) != 0 {
+		t.Fatalf("failed embedding must leave prior vectors and indexed_at untouched: stats=%+v ops=%v", stats, store.operations)
 	}
 }
 

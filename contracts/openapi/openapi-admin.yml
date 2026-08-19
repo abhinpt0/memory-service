@@ -102,6 +102,18 @@ paths:
           required: false
           schema:
             type: string
+        - name: kind
+          in: query
+          required: false
+          description: Optional memory kind selector. Exact canonical name (e.g. default/v1), family name (e.g. default), or omit for all kinds.
+          schema:
+            type: string
+        - name: filter
+          in: query
+          required: false
+          description: Optional JSON-encoded projected-attribute filter object (same format as AdminSearch filter body field).
+          schema:
+            type: string
         - name: justification
           in: query
           required: false
@@ -284,38 +296,220 @@ paths:
       security:
         - BearerAuth: []
         - ApiKeyAuth: []
-  /admin/v1/memory-policies:
-    get:
+  /admin/v1/memory-kinds:
+    post:
       tags: [Admin]
-      summary: Download active episodic memory policy bundle
-      description: Returns the currently active OPA/Rego policy sources for episodic memory.
-      operationId: adminGetMemoryPolicies
-      responses:
-        '200':
-          description: Current episodic policy bundle.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/MemoryPolicyBundle'
-        default:
-          $ref: '#/components/responses/Error'
-      security:
-        - BearerAuth: []
-        - ApiKeyAuth: []
-    put:
-      tags: [Admin]
-      summary: Upload episodic memory policy bundle
-      description: Replaces active episodic OPA/Rego policies and hot-reloads evaluation without restart.
-      operationId: adminPutMemoryPolicies
+      summary: Create an immutable memory schema version
+      description: |-
+        Creates a new immutable MemoryKindVersion. Each version defines how a memory
+        value is projected into typed plaintext attributes for filtering and sorting.
+        Creation is idempotent: repeating the request with identical source and types
+        returns the existing resource. Any difference returns 409 Conflict.
+      operationId: adminCreateMemoryKindVersion
+      parameters:
+        - name: justification
+          in: query
+          required: false
+          schema:
+            type: string
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/MemoryPolicyBundle'
+              $ref: '#/components/schemas/CreateMemoryKindVersionRequest'
+      responses:
+        '200':
+          description: Schema version created or already existed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemoryKindVersion'
+        '409':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/Error'
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+    get:
+      tags: [Admin]
+      summary: List memory schema versions
+      operationId: adminListMemoryKindVersions
+      parameters:
+        - name: family
+          in: query
+          required: false
+          description: Filter by schema family name.
+          schema:
+            type: string
+        - name: justification
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: List of schema versions.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListMemoryKindVersionsResponse'
+        default:
+          $ref: '#/components/responses/Error'
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+  /admin/v1/memory-kinds/{family}/{version}:
+    get:
+      tags: [Admin]
+      summary: Get a memory schema version
+      description: Returns the schema version including its projection Rego source. Administrator only.
+      operationId: adminGetMemoryKindVersion
+      parameters:
+        - name: family
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: version
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: justification
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Schema version.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemoryKindVersion'
+        default:
+          $ref: '#/components/responses/Error'
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+  /admin/v1/memory-kind-migrations:
+    post:
+      tags: [Admin]
+      summary: Create a memory schema migration
+      description: |-
+        Starts an online background migration from source schema version to target.
+        The target must be writable. Only one active migration per source version is
+        allowed; a second request returns 409 Conflict.
+      operationId: adminCreateMemoryKindMigration
+      parameters:
+        - name: justification
+          in: query
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateMemoryKindMigrationRequest'
+      responses:
+        '200':
+          description: Migration created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemoryKindMigration'
+        '409':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/Error'
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+    get:
+      tags: [Admin]
+      summary: List memory schema migrations
+      operationId: adminListMemoryKindMigrations
+      parameters:
+        - name: state
+          in: query
+          required: false
+          description: Filter by state (queued, running, canceling, succeeded, failed, canceled).
+          schema:
+            type: string
+        - name: justification
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: List of migrations.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListMemoryKindMigrationsResponse'
+        default:
+          $ref: '#/components/responses/Error'
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+  /admin/v1/memory-kind-migrations/{id}:
+    get:
+      tags: [Admin]
+      summary: Get a memory schema migration
+      operationId: adminGetMemoryKindMigration
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: justification
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Migration status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemoryKindMigration'
+        default:
+          $ref: '#/components/responses/Error'
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+    delete:
+      tags: [Admin]
+      summary: Request cancellation of a migration
+      description: |-
+        Marks a queued or running migration as cancel-requested. The worker stops
+        after the current row operation. Already migrated rows are preserved.
+      operationId: adminCancelMemoryKindMigration
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: justification
+          in: query
+          required: false
+          schema:
+            type: string
       responses:
         '204':
-          description: Policies updated.
+          description: Cancellation requested.
+        '404':
+          $ref: '#/components/responses/NotFound'
         default:
           $ref: '#/components/responses/Error'
       security:
@@ -1900,6 +2094,7 @@ components:
           description: Human-readable label used as attribution in matchedQueries. Defaults to text when absent.
     AdminMemoryItem:
       type: object
+      required: [kind]
       properties:
         id:
           type: string
@@ -1917,6 +2112,9 @@ components:
         attributes:
           type: object
           additionalProperties: true
+        kind:
+          type: string
+          description: Canonical schema name for this memory row (e.g. "default/v1"). Always non-empty.
         score:
           type: number
           format: double
@@ -1996,6 +2194,14 @@ components:
           type: string
         as_user_id:
           type: string
+        kind:
+          type: string
+          description: |-
+            Optional schema selector. An exact canonical name searches that version only.
+            A family name searches all versions in that family. Omission searches all schemas.
+          nullable: true
+        sort:
+          $ref: '#/components/schemas/MemoryAttributeSort'
     AdminSearchMemoriesResponse:
       type: object
       properties:
@@ -2010,6 +2216,21 @@ components:
           type: array
           items:
             type: string
+    MemoryAttributeSort:
+      type: object
+      description: |-
+        One-field typed sort for attribute-only memory searches. Rejected when query or queries
+        is present (semantic results are ordered by similarity score).
+      required:
+        - field
+      properties:
+        field:
+          type: string
+          description: The attribute name to sort by. Must be declared in the selected schema(s).
+        direction:
+          type: string
+          enum: [asc, desc]
+          default: asc
     AdminListMemoryNamespacesResponse:
       type: object
       properties:
@@ -2020,22 +2241,129 @@ components:
         afterCursor:
           type: string
           nullable: true
-    MemoryPolicyBundle:
+    MemoryKindVersion:
+      type: object
+      properties:
+        name:
+          type: string
+          description: Canonical schema name (family/version), e.g. "customer-profile/v2".
+        attributes:
+          type: object
+          additionalProperties:
+            type: string
+          description: >-
+            Declared type for each attribute the Rego program may return.
+            Allowed type values: string, number, boolean, timestamp, string[].
+        projectionRego:
+          type: string
+          description: OPA Rego source for `package memories.attributes`. Present on definition endpoints only.
+          nullable: true
+        writable:
+          type: boolean
+          description: When false the version is not writable (e.g. a deprecated version set to read-only).
+        createdAt:
+          type: string
+          format: date-time
+    CreateMemoryKindVersionRequest:
       type: object
       required:
-        - authz
+        - name
         - attributes
-        - filter
+        - projectionRego
       properties:
-        authz:
+        name:
           type: string
-          description: Rego source for `package memories.authz`.
+          description: Canonical schema name (family/version).
         attributes:
+          type: object
+          additionalProperties:
+            type: string
+        projectionRego:
           type: string
-          description: Rego source for `package memories.attributes`.
-        filter:
+          description: OPA Rego source for `package memories.attributes`.
+        writable:
+          type: boolean
+          description: Whether new writes may use this immutable version. Defaults to true when omitted.
+    ListMemoryKindVersionsResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/MemoryKindVersion'
+    MemoryKindMigration:
+      type: object
+      properties:
+        id:
           type: string
-          description: Rego source for `package memories.filter`.
+          format: uuid
+        source:
+          type: string
+          description: Source schema version canonical name.
+        target:
+          type: string
+          description: Target schema version canonical name.
+        namespace_prefix:
+          type: array
+          items:
+            type: string
+          nullable: true
+          description: Optional namespace scope restriction.
+        state:
+          type: string
+          enum: [queued, running, canceling, succeeded, failed, canceled]
+        cancel_requested:
+          type: boolean
+        migrated_count:
+          type: integer
+          format: int64
+        skipped_tombstone_count:
+          type: integer
+          format: int64
+        vector_pending_count:
+          type: integer
+          format: int64
+        retry_count:
+          type: integer
+        last_error_code:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+    CreateMemoryKindMigrationRequest:
+      type: object
+      required:
+        - source
+        - target
+      properties:
+        source:
+          type: string
+          description: Source schema version canonical name.
+        target:
+          type: string
+          description: Target schema version canonical name.
+        namespace_prefix:
+          type: array
+          items:
+            type: string
+          nullable: true
+          description: Optional namespace scope restriction.
+    ListMemoryKindMigrationsResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/MemoryKindMigration'
     MemoryIndexStatusResponse:
       type: object
       properties:
@@ -2695,8 +3023,16 @@ components:
           type: integer
           format: int64
           description: Optional optimistic concurrency revision expected for the active memory.
+        kind:
+          type: string
+          description: |-
+            Optional exact canonical schema name ("profile/v2"). Omission always uses
+            the fixed built-in "default/v1" kind.
+          pattern: '^[a-z][a-z0-9-]{0,62}/[a-z][a-z0-9-]{0,62}$'
+          nullable: true
     MemoryWriteResult:
       type: object
+      required: [kind]
       properties:
         id:
           type: string
@@ -2710,6 +3046,9 @@ components:
         attributes:
           type: object
           additionalProperties: true
+        kind:
+          type: string
+          description: Exact canonical schema name used for this write (e.g. "default/v1").
         createdAt:
           type: string
           format: date-time

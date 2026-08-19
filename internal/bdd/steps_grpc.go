@@ -637,6 +637,39 @@ func (g *grpcSteps) iSendGRPCRequestWithBody(endpoint string, body *godog.DocStr
 				})
 		}
 
+	case "AdminMemoryKindService":
+		client := pb.NewAdminMemoryKindServiceClient(conn)
+		switch method {
+		case "CreateMemoryKindVersion":
+			return g.invokeUnary(conn, ctx, content, func() proto.Message { return &pb.CreateMemoryKindVersionRequest{} }, func(ctx context.Context, req proto.Message) (proto.Message, error) {
+				return client.CreateMemoryKindVersion(ctx, req.(*pb.CreateMemoryKindVersionRequest))
+			})
+		case "ListMemoryKindVersions":
+			return g.invokeUnary(conn, ctx, content, func() proto.Message { return &pb.ListMemoryKindVersionsRequest{} }, func(ctx context.Context, req proto.Message) (proto.Message, error) {
+				return client.ListMemoryKindVersions(ctx, req.(*pb.ListMemoryKindVersionsRequest))
+			})
+		case "GetMemoryKindVersion":
+			return g.invokeUnary(conn, ctx, content, func() proto.Message { return &pb.GetMemoryKindVersionRequest{} }, func(ctx context.Context, req proto.Message) (proto.Message, error) {
+				return client.GetMemoryKindVersion(ctx, req.(*pb.GetMemoryKindVersionRequest))
+			})
+		case "CreateMemoryKindMigration":
+			return g.invokeUnary(conn, ctx, content, func() proto.Message { return &pb.CreateMemoryKindMigrationRequest{} }, func(ctx context.Context, req proto.Message) (proto.Message, error) {
+				return client.CreateMemoryKindMigration(ctx, req.(*pb.CreateMemoryKindMigrationRequest))
+			})
+		case "ListMemoryKindMigrations":
+			return g.invokeUnary(conn, ctx, content, func() proto.Message { return &pb.ListMemoryKindMigrationsRequest{} }, func(ctx context.Context, req proto.Message) (proto.Message, error) {
+				return client.ListMemoryKindMigrations(ctx, req.(*pb.ListMemoryKindMigrationsRequest))
+			})
+		case "GetMemoryKindMigration":
+			return g.invokeUnary(conn, ctx, content, func() proto.Message { return &pb.GetMemoryKindMigrationRequest{} }, func(ctx context.Context, req proto.Message) (proto.Message, error) {
+				return client.GetMemoryKindMigration(ctx, req.(*pb.GetMemoryKindMigrationRequest))
+			})
+		case "CancelMemoryKindMigration":
+			return g.invokeUnary(conn, ctx, content, func() proto.Message { return &pb.CancelMemoryKindMigrationRequest{} }, func(ctx context.Context, req proto.Message) (proto.Message, error) {
+				return client.CancelMemoryKindMigration(ctx, req.(*pb.CancelMemoryKindMigrationRequest))
+			})
+		}
+
 	case "AttachmentsService":
 		client := pb.NewAttachmentsServiceClient(conn)
 		switch method {

@@ -185,9 +185,9 @@ MEMORY_SERVICE_ATTACHMENTS_FS_DIR=/tmp/memory-service-attachments`}/>
 <ConfigBlock property={`# Select MongoDB as the datastore
 --db-kind=mongo
 
-# MongoDB connection
+# MongoDB connection (must target a replica set or mongos; standalone is rejected)
 
---db-url=mongodb://localhost:27017/memoryservice`} />
+--db-url=mongodb://localhost:27017/memoryservice?replicaSet=rs0`} />
 
 ## Cache Configuration
 
@@ -764,11 +764,11 @@ MEMORY_SERVICE_EMBEDDING_OPENAI_API_KEY=sk-...`}
 
 ## Memories Configuration
 
-Configure namespaced Memories policy loading.
+Configure startup policy imports.
 
-| Flag                                                                     | Values | Default           | Description                                                                                                                                                                                         |
-| ------------------------------------------------------------------------ | ------ | ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| <Cfg p="--episodic-policy-dir" e="MEMORY_SERVICE_EPISODIC_POLICY_DIR" /> | path   | built-in policies | Directory containing memory OPA/Rego policy files: `authz.rego` (`data.memories.authz.decision`), `attributes.rego` (`data.memories.attributes.attributes`), `filter.rego` (`data.memories.filter`) |
+| Flag                                                                 | Values | Default         | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| -------------------------------------------------------------------- | ------ | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| <Cfg p="--policy-import-dir" e="MEMORY_SERVICE_POLICY_IMPORT_DIR" /> | path   | image-dependent | Shared policy import root. Optional `authz.rego` and `filter.rego` replace the built-in global memory policies; `.yaml` and `.yml` files are discovered recursively, and only documents with `kind: memory-kind` import immutable database-backed memory-kind versions. The distributed container image defaults to `/etc/memory-service/policies/`. See [Policy Import Directory Configuration](/docs/concepts/memories/#policy-import-directory-configuration) for directory layout, filename, discriminator, and Rego entrypoint rules. |
 
 ## API Key Authentication
 

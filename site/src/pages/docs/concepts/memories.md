@@ -65,6 +65,7 @@ Response:
   "namespace": ["user", "alice", "notes"],
   "key": "python_tip",
   "attributes": { "namespace": "user", "sub": "alice" },
+  "kind": "default/v1",
   "created_at": "2026-01-01T00:00:00Z",
   "expires_at": "2026-01-02T00:00:00Z",
   "revision": 1
@@ -96,6 +97,7 @@ Response:
     "text": "Alice prefers list comprehensions over map/filter."
   },
   "attributes": { "namespace": "user", "sub": "alice" },
+  "kind": "default/v1",
   "created_at": "2026-01-01T00:00:00Z",
   "expires_at": "2026-01-02T00:00:00Z"
 }
@@ -125,6 +127,114 @@ curl -X PATCH http://localhost:8080/v1/memories \
 ```
 
 Returns `204 No Content`. Archiving is recorded as a memory update, and semantic search respects the memory's archive state via vector-store metadata plus datastore post-filtering.
+
+## Memory Kind Versions
+
+Every memory row carries a **canonical kind name** — a string like `default/v1` or `customer-profile/v2` — that identifies which projection program was used to compute its plaintext attributes. Different memories can use different kinds in the same datastore, and migrations can move memories to a new kind online without stopping writes.
+
+### Kind Names
+
+A kind name combines a family and a version, separated by exactly one `/`:
+
+```
+customer-profile/v2
+```
+
+Both segments are lowercase DNS-label-like values: 1–63 characters, starting with a letter, containing only letters, digits, and hyphens. The name is the resource's unique identifier and is stored directly on the memory row.
+
+### The Built-In Default Kind
+
+The built-in kind `default/v1` is always registered from manifest and Rego source embedded in the Memory Service binary. Its immutable projection derives the compatibility `namespace` and `sub` attributes. Memories written without an explicit `kind` field always resolve to `default/v1`. The manifest and the built-in `authz.rego`, `projection.rego`, and `filter.rego` sources live together under `internal/episodic/default-v1/`; authz/filter remain global across kinds.
+
+Its declared attributes are:
+
+```json
+{
+  "namespace": "string",
+  "sub": "string"
+}
+```
+
+Its attribute-projection program is:
+
+```rego
+package memories.attributes
+
+default attributes = {}
+
+attributes = {"namespace": input.namespace[0], "sub": input.namespace[1]} if {
+  count(input.namespace) >= 2
+}
+```
+
+This Rego belongs to the immutable `default/v1` kind. It is separate from the global `authz.rego` and `filter.rego` programs described under [Access Control](#access-control).
+
+### Selecting a Kind at Write Time
+
+```bash
+curl -X PUT http://localhost:8080/v1/memories \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <token>" \
+  -d '{
+    "namespace": ["user", "alice", "events"],
+    "key": "signup",
+    "value": {"observedAt": "2026-01-01T00:00:00Z", "channel": "web"},
+    "kind": "event-tracking/v2"
+  }'
+```
+
+`kind` accepts:
+
+| Value                 | Behavior                                  |
+| --------------------- | ----------------------------------------- |
+| `"event-tracking/v2"` | Use that exact writable version           |
+| `"event-tracking"`    | Rejected; writes require an exact version |
+| omitted               | Use the fixed built-in `default/v1`       |
+
+The exact resolved name is returned in the write response as `kind`.
+
+### Searching by Kind
+
+Attribute-only `POST /v1/memories/search` accepts an optional `kind` selector:
+
+```json
+{
+  "namespace_prefix": ["user", "alice"],
+  "kind": "event-tracking/v2",
+  "filter": { "channel": { "$eq": "web" } },
+  "limit": 10
+}
+```
+
+| Selector              | Matches                     |
+| --------------------- | --------------------------- |
+| `"event-tracking/v2"` | Only that exact version     |
+| `"event-tracking"`    | All versions in that family |
+| omitted               | All schemas                 |
+
+A field absent from a given schema version does not match a condition on that field, so the same filter can safely be used across a family search.
+
+### Attribute Sort
+
+Attribute-only searches (no `query` or `queries`) support a single typed sort:
+
+```json
+{
+  "namespace_prefix": ["user", "alice", "events"],
+  "kind": "event-tracking/v2",
+  "sort": { "field": "observedAt", "direction": "desc" },
+  "limit": 20
+}
+```
+
+Rules:
+
+- `field` must be a top-level attribute name declared in the selected schema(s).
+- `direction` is `"asc"` or `"desc"`.
+- Memories with the field absent sort last in both directions.
+- Ties break on `created_at DESC, id DESC`.
+- String sorting uses binary/locale-independent collation (`COLLATE "C"` on PostgreSQL, `COLLATE BINARY` on SQLite).
+- Sort is rejected when `query` or `queries` is present — semantic results are always ordered by similarity score.
 
 ## Searching Memories
 
@@ -219,15 +329,17 @@ Multi-query search embeds all query texts in one batch, runs vector search indep
 
 ### Search Parameters
 
-| Parameter          | Type       | Required | Description                                                                     |
-| ------------------ | ---------- | -------- | ------------------------------------------------------------------------------- |
-| `namespace_prefix` | `string[]` | yes      | Restricts results to this namespace subtree                                     |
-| `query`            | `string`   | no       | Single semantic search string. Mutually exclusive with `queries`                |
-| `queries`          | `object[]` | no       | Multi-query semantic search strings with required `text` and optional `purpose` |
-| `per_query_limit`  | `integer`  | no       | Per-query vector search budget for multi-query search, default `limit`, max 100 |
-| `filter`           | `object`   | no       | Attribute filter expressions (see below)                                        |
-| `archived`         | `string`   | no       | `exclude` (default), `include`, or `only`                                       |
-| `limit`            | `integer`  | no       | Max results, default 10, max 100                                                |
+| Parameter          | Type       | Required | Description                                                                                       |
+| ------------------ | ---------- | -------- | ------------------------------------------------------------------------------------------------- |
+| `namespace_prefix` | `string[]` | yes      | Restricts results to this namespace subtree                                                       |
+| `query`            | `string`   | no       | Single semantic search string. Mutually exclusive with `queries`                                  |
+| `queries`          | `object[]` | no       | Multi-query semantic search strings with required `text` and optional `purpose`                   |
+| `per_query_limit`  | `integer`  | no       | Per-query vector search budget for multi-query search, default `limit`, max 100                   |
+| `filter`           | `object`   | no       | Attribute filter expressions (see below)                                                          |
+| `kind`             | `string`   | no       | Schema selector: exact name, family name, or omit for all schemas                                 |
+| `sort`             | `object`   | no       | One-field typed sort: `{"field":"<attr>","direction":"asc\|desc"}`. Rejected with semantic search |
+| `archived`         | `string`   | no       | `exclude` (default), `include`, or `only`                                                         |
+| `limit`            | `integer`  | no       | Max results, default 10, max 100                                                                  |
 
 ### Attribute Filter Expressions
 
@@ -334,6 +446,7 @@ The same OPA access control that governs memory reads applies here — callers o
 | `key`        | Unique key within the namespace                                          |
 | `value`      | Arbitrary JSON object; encrypted at rest                                 |
 | `attributes` | Policy-derived plaintext attributes used for filtering/search scoping    |
+| `kind`       | Canonical schema name used for this row (e.g. `"default/v1"`)            |
 | `created_at` | Timestamp of this version                                                |
 | `expires_at` | TTL expiry timestamp, or `null` for no expiry                            |
 | `score`      | Cosine similarity score (search results only; `null` for attribute-only) |
@@ -355,18 +468,52 @@ A background goroutine expires memories on a configurable interval (default: 60 
 
 ## Access Control
 
-Memory access is enforced by embedded **OPA/Rego policies** evaluated on every memory API call. The service loads policy files from:
+Memory access is enforced by embedded **OPA/Rego policies** evaluated on every memory API call. The service loads policy definitions from the shared `--policy-import-dir` or `MEMORY_SERVICE_POLICY_IMPORT_DIR` root.
 
-- `--episodic-policy-dir`
-- `MEMORY_SERVICE_EPISODIC_POLICY_DIR`
+The directory may contain this optional pair of global policy overrides:
 
-Expected files in that directory:
+- `authz.rego` — read/write/delete authorization
+- `filter.rego` — search/list namespace and filter injection
 
-- `authz.rego` - read/write/delete authorization
-- `attributes.rego` - plaintext policy attributes extraction
-- `filter.rego` - search/list namespace+filter injection
+The two global files are optional as a pair: when neither is present, the service uses its built-in authorization and scoping programs. Other Rego files are available as assets for manifest-based policy types and are not loaded as global programs. Attribute projection is defined through stored `MemoryKindVersion` resources (see [Memory Kind Versions](#memory-kind-versions) above). The same import root is searched recursively for every `.yaml` and `.yml` file. Documents without `kind: memory-kind` are ignored; matching documents are decoded strictly and may reference a projection file relative to their own directory. JSON manifests are not scanned. Imports insert only absent versions; identical versions are logged, and same-name differences are logged without overwriting the database. The built-in `default/v1` kind handles namespace/sub projection for memories written without an explicit kind.
 
-If no directory is set, or if a file is missing, the service falls back to the built-in default for that file.
+If no directory is set, the service uses its built-in authorization and scoping programs and imports no deployment-provided memory kinds. The distributed container image copies the policy tree to `/etc/memory-service/policies/`, including the cognition bundle under `cognition/`, and sets the parent directory as its default import root.
+
+### Policy Import Directory Configuration
+
+The policy import directory can contain global Rego overrides and any number of manifest-based policy bundles:
+
+```text
+<policy-import-dir>/
+├── authz.rego                 # optional global override
+├── filter.rego                # optional global override
+└── cognition/
+    ├── cognition.yaml         # discovered recursively
+    └── projection.rego
+```
+
+The global overrides use filename-based discovery:
+
+- `authz.rego` and `filter.rego` are exact, case-sensitive filenames and must be located directly at the policy import root.
+- They must be provided together. When neither is present, the embedded global policies are used.
+- `authz.rego` must expose `data.memories.authz.decision`; `filter.rego` must expose `data.memories.filter`.
+- Global Rego discovery is not recursive. Other `.rego` files are not loaded as global programs.
+
+Manifest-based policy documents use discriminator-based discovery. Every `.yaml` and `.yml` file below the import root is examined recursively. Documents without `kind: memory-kind`, including documents for future policy types, are ignored by the memory-kind importer. JSON files are not examined.
+
+A memory-kind manifest can embed its projection in `projectionRego` or reference a Rego file relative to the manifest with `projectionRegoFile`:
+
+```yaml
+kind: memory-kind
+name: customer-profile/v1
+attributes:
+  customerId: string
+  updatedAt: timestamp
+projectionRegoFile: projection.rego
+writable: true
+```
+
+The referenced filename is arbitrary; `projection.rego` is the recommended convention. Relative references cannot escape the manifest's directory. The referenced program must declare `package memories.attributes` and define an `attributes` rule, producing `data.memories.attributes.attributes`. A `.rego` file that is neither a root-level global override nor referenced by a manifest is ignored.
 
 ### Rego Policy Input Variables
 
@@ -379,44 +526,12 @@ Each policy is evaluated with an `input` object. Available fields differ by poli
 | `operation`          | `string`                | Operation being authorized: `write`, `read`, or `delete`    |
 | `namespace`          | `string[]`              | Full namespace segments from the request                    |
 | `key`                | `string`                | Memory key from the request                                 |
+| `kind`               | `string`                | Exact resolved kind for writes, or the selected row's kind  |
 | `value`              | `object`                | Present for `write`; full memory value payload              |
 | `index`              | `object<string,string>` | Present for `write`; caller-provided redacted index payload |
 | `context.user_id`    | `string`                | Authenticated subject/user ID                               |
 | `context.client_id`  | `string`                | Authenticated client ID (API key/OIDC client), when present |
 | `context.jwt_claims` | `object`                | Raw JWT claims map (for example `roles`)                    |
-
-#### `attributes.rego` (`data.memories.attributes.attributes`)
-
-| `input` field        | Type                    | Description                                                 |
-| -------------------- | ----------------------- | ----------------------------------------------------------- |
-| `namespace`          | `string[]`              | Full namespace segments from the write request              |
-| `key`                | `string`                | Memory key from the write request                           |
-| `value`              | `object`                | Memory value JSON body                                      |
-| `index`              | `object<string,string>` | Caller-provided redacted index payload                      |
-| `context.user_id`    | `string`                | Authenticated subject/user ID                               |
-| `context.client_id`  | `string`                | Authenticated client ID (API key/OIDC client), when present |
-| `context.jwt_claims` | `object`                | Raw JWT claims map (for example `roles`)                    |
-
-Typical `value` and `index` payloads passed to `attributes.rego`:
-
-```json
-{
-  "value": {
-    "text": "Alice prefers list comprehensions over map/filter.",
-    "topic": "python",
-    "confidence": 0.92,
-    "source": {
-      "type": "chat",
-      "conversationId": "8fa3deec-4a45-42a5-a36d-6076b20a2c8d"
-    },
-    "tags": ["style", "python", "preferences"]
-  },
-  "index": {
-    "text": "Alice prefers list comprehensions over map/filter.",
-    "topic": "python"
-  }
-}
-```
 
 #### `filter.rego` (`data.memories.filter`)
 
@@ -424,18 +539,22 @@ Typical `value` and `index` payloads passed to `attributes.rego`:
 | -------------------- | ---------- | ----------------------------------------------------------- |
 | `namespace_prefix`   | `string[]` | Requested namespace prefix for search/list                  |
 | `filter`             | `object`   | Caller-supplied attribute filter (may be empty)             |
+| `kind`               | `string`   | Caller-supplied exact/family kind selector (may be empty)   |
 | `context.user_id`    | `string`   | Authenticated subject/user ID                               |
 | `context.client_id`  | `string`   | Authenticated client ID (API key/OIDC client), when present |
 | `context.jwt_claims` | `object`   | Raw JWT claims map (for example `roles`)                    |
 
 The `filter.rego` result may return:
 
-- `namespace_prefix` (`string[]`) - effective prefix to enforce
-- `attribute_filter` (`object`) - merged into the caller filter before datastore query
+- `namespace_prefix` (`string[]`) — effective prefix to enforce
+- `attribute_filter` (`object`) — merged into the caller filter before datastore query
+- `kind` (`string`) — optional exact/family selector that can only narrow the caller's selector
+
+The result must be an object and any returned fields must have these exact types. Malformed output fails the request closed.
 
 ### Default Built-In Policy (Repo Default)
 
-The default policy bundle shipped in this repository is:
+The default global authorization and search-scoping programs are shown below. They are independent of the `default/v1` attribute-projection Rego above and apply across all memory kinds.
 
 ```rego
 package memories.authz
@@ -449,41 +568,43 @@ decision = {"allow": true} if {
 ```
 
 ```rego
-package memories.attributes
-
-default attributes = {}
-
-attributes = {"namespace": input.namespace[0], "sub": input.namespace[1]} if {
-  count(input.namespace) >= 2
-}
-```
-
-```rego
 package memories.filter
 
-is_admin if {
-  "admin" in input.context.jwt_claims.roles
+namespace_prefix := input.namespace_prefix if {
+  starts_with(input.namespace_prefix, user_prefix)
 }
-
-namespace_prefix := input.namespace_prefix if { is_admin }
 namespace_prefix := user_prefix if {
-  not is_admin
   not starts_with(input.namespace_prefix, user_prefix)
 }
 
-attribute_filter := {} if { is_admin }
-attribute_filter := {"namespace": "user", "sub": input.context.user_id} if { not is_admin }
+user_prefix := ["user", input.context.user_id]
+
+starts_with(ns, prefix) if {
+  count(prefix) == 0
+}
+starts_with(ns, prefix) if {
+  count(ns) >= count(prefix)
+  not mismatch(ns, prefix)
+}
+mismatch(ns, prefix) if {
+  some i
+  i < count(prefix)
+  ns[i] != prefix[i]
+}
+
+# Authorization scoping is entirely expressed by namespace_prefix. Custom kinds
+# are not required to project security attributes.
+attribute_filter := {}
 ```
 
 What this means in practice:
 
 - `authz.rego`: direct `PUT`/`GET`/`DELETE` is allowed only under `["user", <caller_user_id>, ...]`; deny responses can carry a `reason`.
-- `attributes.rego`: each memory gets plaintext policy attributes `namespace` and `sub` for policy-aware filtering.
-- `filter.rego`: non-admin search/list calls are constrained to the caller's own `["user", <caller_user_id>]` subtree; admin callers keep the requested prefix and no forced attribute filter.
+- `filter.rego`: every public search/list call is constrained to the authenticated caller's own `["user", <caller_user_id>]` subtree, including calls made by principals that also have an admin role.
 
-Important: with the default bundle, `admin` role affects public search/list filtering, but does not bypass `authz.rego` for direct public read/write/delete. Administrative memory exploration uses separate `/admin/v1/...` endpoints described below.
+Administrative memory exploration uses the separate `/admin/v1/...` endpoints described below. Those endpoints bypass the user-facing `filter.rego`, except that admin search with `as_user_id` deliberately evaluates it as the target user with no administrative roles.
 
-See the [Admin APIs](/docs/concepts/admin-apis/) for policy management endpoints.
+See the [Admin APIs](/docs/concepts/admin-apis/) for schema version, migration, and index management endpoints.
 
 ## Admin Memory Exploration
 
@@ -516,7 +637,8 @@ curl -X POST http://localhost:8080/admin/v1/memories/search \
   -d '{
     "namespace_prefix": ["user"],
     "as_user_id": "alice",
-    "filter": {"memoryKind": {"$in": ["preference", "procedure"]}},
+    "kind": "preference",
+    "filter": {"category": {"$in": ["preference", "procedure"]}},
     "limit": 25
   }'
 ```
@@ -547,18 +669,17 @@ curl -X PATCH "http://localhost:8080/admin/v1/memories?ns=user&ns=alice&ns=cogni
   }'
 ```
 
-Admin memory writes are authorized by admin role, OIDC scope when configured, and optional justification enforcement. They intentionally bypass user-facing memory OPA authorization because they are administrative namespace operations; OPA attribute extraction still runs with a neutral admin context so indexing and search metadata stay consistent. Admin write requests do not carry `on_behalf_of_user_id`.
+Admin memory writes are authorized by admin role, OIDC scope when configured, and optional justification enforcement. They intentionally bypass user-facing memory OPA authorization because they are administrative namespace operations. Attribute projection still uses the selected immutable `MemoryKindVersion`, with only persisted namespace, key, value, and index inputs, so agent and admin writes produce the same replayable metadata. Admin write requests do not carry `on_behalf_of_user_id`.
 
-The old operational memory admin routes are split away from `/admin/v1/memories/...`:
+Operational memory admin routes (separate from the CRUD surface above):
 
-| Method        | Endpoint                         | Role  |
-| ------------- | -------------------------------- | ----- |
-| `GET` / `PUT` | `/admin/v1/memory-policies`      | admin |
-| `GET`         | `/admin/v1/memory-index/status`  | admin |
-| `POST`        | `/admin/v1/memory-index/trigger` | admin |
-| `GET`         | `/admin/v1/memory-usage`         | admin |
-| `GET`         | `/admin/v1/memory-usage/top`     | admin |
-| `DELETE`      | `/admin/v1/memories/{id}`        | admin |
+| Method   | Endpoint                         | Role  |
+| -------- | -------------------------------- | ----- |
+| `GET`    | `/admin/v1/memory-index/status`  | admin |
+| `POST`   | `/admin/v1/memory-index/trigger` | admin |
+| `GET`    | `/admin/v1/memory-usage`         | admin |
+| `GET`    | `/admin/v1/memory-usage/top`     | admin |
+| `DELETE` | `/admin/v1/memories/{id}`        | admin |
 
 If admin justification enforcement is enabled, admin memory routes accept `X-Justification` or `?justification=...`; gRPC admin memory requests carry a `justification` field.
 
@@ -566,7 +687,7 @@ If admin justification enforcement is enabled, admin memory routes accept `X-Jus
 
 Memory values are **encrypted at rest** using AES-256-GCM via the service's existing key-management infrastructure. The namespace, key, policy-derived attributes, caller-provided `index` payload (stored as `indexed_content`), and expiry timestamp are stored in plaintext for filtering and indexing.
 
-Vector stores never receive encrypted data. They hold only embeddings and plaintext policy attributes derived by the OPA attribute-extraction policy.
+Vector stores never receive encrypted data. They hold only embeddings and plaintext attributes derived by the memory's immutable kind projection.
 
 ## Vector Indexing
 
@@ -628,4 +749,4 @@ An async variant (`AsyncMemoryServiceStore`) is also available for use in async 
 
 - Learn about [Indexing & Search](/docs/concepts/indexing-and-search/) for conversation-level semantic search
 - Understand [Sharing & Access Control](/docs/concepts/sharing/) for conversation access control
-- See [Admin APIs](/docs/concepts/admin-apis/) for policy management and index status endpoints
+- See [Admin APIs](/docs/concepts/admin-apis/) for schema version, migration, and index management endpoints

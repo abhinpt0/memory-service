@@ -225,6 +225,47 @@ type Task struct {
 
 func (Task) TableName() string { return "tasks" }
 
+// MemoryKindVersion is an immutable schema resource stored in the datastore.
+type MemoryKindVersion struct {
+	Name           string            `json:"name"           gorm:"primaryKey;column:name"`
+	AttributeTypes map[string]string `json:"attributes"     gorm:"type:jsonb;serializer:json;column:attribute_types"`
+	AttributesRego *string           `json:"projectionRego" gorm:"column:attributes_rego"`
+	Writable       bool              `json:"writable"       gorm:"not null;default:true;column:writable"`
+	CreatedAt      time.Time         `json:"createdAt"      gorm:"not null;default:now();column:created_at"`
+}
+
+func (MemoryKindVersion) TableName() string { return "memory_kind_versions" }
+
+// MemoryKindMigration tracks a background migration job.
+type MemoryKindMigration struct {
+	ID                    uuid.UUID  `json:"id"                    gorm:"primaryKey;type:uuid;column:id"`
+	Source                string     `json:"source"                gorm:"not null;column:source"`
+	Target                string     `json:"target"                gorm:"not null;column:target"`
+	NamespacePrefix       []string   `json:"namespacePrefix"       gorm:"type:jsonb;serializer:json;column:namespace_prefix"`
+	State                 string     `json:"state"                 gorm:"not null;column:state"`
+	CancelRequested       bool       `json:"cancelRequested"       gorm:"not null;default:false;column:cancel_requested"`
+	MigratedCount         int64      `json:"migratedCount"         gorm:"not null;default:0;column:migrated_count"`
+	SkippedTombstoneCount int64      `json:"skippedTombstoneCount" gorm:"not null;default:0;column:skipped_tombstone_count"`
+	VectorPendingCount    int64      `json:"vectorPendingCount"    gorm:"not null;default:0;column:vector_pending_count"`
+	RetryCount            int        `json:"retryCount"            gorm:"not null;default:0;column:retry_count"`
+	LastErrorCode         *string    `json:"lastErrorCode"         gorm:"column:last_error_code"`
+	CreatedAt             time.Time  `json:"createdAt"             gorm:"not null;default:now();column:created_at"`
+	StartedAt             *time.Time `json:"startedAt"             gorm:"column:started_at"`
+	CompletedAt           *time.Time `json:"completedAt"           gorm:"column:completed_at"`
+}
+
+func (MemoryKindMigration) TableName() string { return "memory_kind_migrations" }
+
+// Migration state constants.
+const (
+	MigrationStateQueued    = "queued"
+	MigrationStateRunning   = "running"
+	MigrationStateCanceling = "canceling"
+	MigrationStateSucceeded = "succeeded"
+	MigrationStateFailed    = "failed"
+	MigrationStateCanceled  = "canceled"
+)
+
 // Attachment represents file attachment metadata.
 type Attachment struct {
 	ID          uuid.UUID  `json:"id"                   gorm:"primaryKey;type:uuid"`
