@@ -77,7 +77,10 @@ func main() {
 	}
 	fmt.Printf("Wrote %d rows to %s\n", len(manifest.Conversations), allPath)
 
-	// long-tail-conversation-ids.csv — conversations with >100 entries
+	// long-tail-conversation-ids.csv — conversations with >100 entries.
+	// Two columns: col 0 = conversationId, col 1 = ownerID.
+	// The list-entries benchmark needs the ownerID to send the correct
+	// X-User-ID header; without it the server returns 403.
 	var longTail []conversationRecord
 	for _, c := range manifest.Conversations {
 		if c.EntryCount > 100 {
@@ -87,7 +90,7 @@ func main() {
 	longPath := *resultsDir + "/long-tail-conversation-ids.csv"
 	if err := writeCSV(longPath, func(w *csv.Writer) error {
 		for _, c := range longTail {
-			if err := w.Write([]string{c.ID}); err != nil {
+			if err := w.Write([]string{c.ID, c.OwnerID}); err != nil {
 				return err
 			}
 		}

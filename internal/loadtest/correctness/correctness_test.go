@@ -330,7 +330,7 @@ func TestSearchPagination(t *testing.T) {
 	cursor := ""
 	pageNum := 0
 	for {
-		reqBody := map[string]any{"query": "load-test", "limit": 5}
+		reqBody := map[string]any{"query": "load test", "limit": 5}
 		if cursor != "" {
 			reqBody["afterCursor"] = cursor
 		}
