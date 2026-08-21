@@ -15,6 +15,10 @@ phases:
         duration: 160s
         scenario:
           - connectSSE:
+              # Wait up to 5 s for the first byte from the SSE stream (TTFB).
+              # This gives a meaningful p50/p99 for connection establishment.
+              # The step then completes and the connection is closed; SSE
+              # fan-out pressure comes from the appendBurst phase below.
               - httpRequest:
                   GET: /v1/events
                   headers:
@@ -22,7 +26,7 @@ phases:
                     X-API-Key: agent-api-key-1
                     X-User-ID: loadtest-sse-1
                   metric: sse-connection
-                  sync: false
+                  timeout: 5s
 
   - appendBurst:
       always:

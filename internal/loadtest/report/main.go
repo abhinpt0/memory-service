@@ -48,6 +48,7 @@ type benchmarkRow struct {
 	Name    string  `json:"name"`
 	RPS     float64 `json:"rps"`
 	P50ms   float64 `json:"p50ms"`
+	P95ms   float64 `json:"p95ms"`
 	P99ms   float64 `json:"p99ms"`
 	SLOPass bool    `json:"sloPass"`
 	// hasData indicates whether actual benchmark data was found.
@@ -168,14 +169,36 @@ func loadSeedManifest(root string) (seedManifest, bool) {
 	return m, true
 }
 
+// mergedMetricBenchmarks lists benchmark names whose multiple Hyperfoil metric
+// labels should be collapsed into a single report row (pooling request counts
+// for RPS, averaging percentiles across all metrics).  Use this for benchmarks
+// where metrics are sequential steps within one VU (e.g. append-user-entry
+// then append-ai-entry) rather than independent parallel workloads.
+var mergedMetricBenchmarks = map[string]bool{
+	"append-throughput": true,
+}
+
 // loadHyperfoilResults reads all hyperfoil-*.json files.
 // It supports the /run/{id}/stats/total JSON format returned by Hyperfoil 0.27.2
 // (field: statistics[].summary.percentileResponseTime + requestCount),
 // as well as the older flat format (fields: throughput, p50, p99).
+//
+// For benchmarks that use multiple named metrics across phases (e.g. sse-fan-out
+// which uses metric "sse-connection" in openConnections and "burst-append" in
+// appendBurst), each distinct metric name is emitted as a separate row named
+// "<benchmark>/<metric>".  Benchmarks listed in mergedMetricBenchmarks are
+// always collapsed into a single row regardless of metric count.
+// Single-metric benchmarks continue to be reported under the bare benchmark name.
 func loadHyperfoilResults(root string) []benchmarkRow {
-	pattern := filepath.Join(root, "loadtest", "results", "hyperfoil-*.json")
-	files, err := filepath.Glob(pattern)
-	if err != nil || len(files) == 0 {
+	resultsDir := filepath.Join(root, "loadtest", "results")
+	var files []string
+	for _, glob := range []string{"hyperfoil-*.json", "sse-event-delay-*.json"} {
+		matched, err := filepath.Glob(filepath.Join(resultsDir, glob))
+		if err == nil {
+			files = append(files, matched...)
+		}
+	}
+	if len(files) == 0 {
 		return nil
 	}
 
@@ -183,7 +206,20 @@ func loadHyperfoilResults(root string) []benchmarkRow {
 	latest := make(map[string]string) // name -> filepath
 	for _, f := range files {
 		base := strings.TrimSuffix(filepath.Base(f), ".json")
-		base = strings.TrimPrefix(base, "hyperfoil-")
+		// Normalise known prefixes to a stable benchmark name before
+		// stripping the trailing timestamp, so de-duplication works correctly
+		// regardless of which prefix pattern the file uses.
+		switch {
+		case strings.HasPrefix(base, "hyperfoil-"):
+			base = strings.TrimPrefix(base, "hyperfoil-")
+		case strings.HasPrefix(base, "sse-event-delay-"):
+			base = "sse-event-delay"
+			// timestamp is the only remaining segment; skip the strip below
+			if prev, ok := latest[base]; !ok || f > prev {
+				latest[base] = f
+			}
+			continue
+		}
 		// Strip trailing -YYYYMMDDTHHMMSS timestamp if present.
 		if idx := strings.LastIndex(base, "-"); idx >= 0 && len(base)-idx > 8 {
 			base = base[:idx]
@@ -218,15 +254,26 @@ func loadHyperfoilResults(root string) []benchmarkRow {
 			continue
 		}
 
-		var rps, p50, p99 float64
-
 		// --- Hyperfoil 0.27.2 /stats/total format ---
-		// {"status":"TERMINATED","statistics":[{"phase":"...","summary":{"percentileResponseTime":{"50.0":...,"99.0":...},"requestCount":N,...}},...]}
+		// {"status":"TERMINATED","statistics":[{"phase":"...","metric":"...","summary":{...}},...]}
+		//
+		// Group statistics entries by their "metric" field.  If all entries share
+		// the same (or empty) metric the result is a single row; if there are
+		// multiple distinct metrics (e.g. sse-fan-out) each gets its own row
+		// named "<benchmark>/<metric>".
 		if statsArr, ok := raw["statistics"].([]any); ok && len(statsArr) > 0 {
-			var totalRequests float64
-			var totalDurationNs float64
-			var p50sum, p99sum float64
-			count := 0
+			// Collect per-metric accumulators.
+			type metricAcc struct {
+				totalRequests   float64
+				totalDurationNs float64
+				p50sum          float64
+				p95sum          float64
+				p99sum          float64
+				count           int
+			}
+			byMetric := make(map[string]*metricAcc)
+			metricOrder := []string{} // preserve insertion order for stable output
+
 			for _, s := range statsArr {
 				stat, ok := s.(map[string]any)
 				if !ok {
@@ -236,44 +283,105 @@ func loadHyperfoilResults(root string) []benchmarkRow {
 				if !ok {
 					continue
 				}
+				metric := strVal(stat, "metric")
+				if _, exists := byMetric[metric]; !exists {
+					byMetric[metric] = &metricAcc{}
+					metricOrder = append(metricOrder, metric)
+				}
+				acc := byMetric[metric]
 				if rc, ok := floatVal(summary, "requestCount"); ok {
-					totalRequests += rc
+					acc.totalRequests += rc
 				}
 				if et, ok := floatVal(summary, "endTime"); ok {
 					if st, ok := floatVal(summary, "startTime"); ok {
-						totalDurationNs += et - st
+						acc.totalDurationNs += et - st
 					}
 				}
 				if pcts, ok := summary["percentileResponseTime"].(map[string]any); ok {
 					if v, ok := floatVal(pcts, "50.0"); ok {
-						p50sum += v / 1e6 // ns → ms
-						count++
+						acc.p50sum += v / 1e6 // ns → ms
+						acc.count++
+					}
+					// Prefer 95.0 (emitted by ssedelay); fall back to 90.0 (emitted by Hyperfoil).
+					if v, ok := floatVal(pcts, "95.0"); ok {
+						acc.p95sum += v / 1e6
+					} else if v, ok := floatVal(pcts, "90.0"); ok {
+						acc.p95sum += v / 1e6
 					}
 					if v, ok := floatVal(pcts, "99.0"); ok {
-						p99sum += v / 1e6
+						acc.p99sum += v / 1e6
 					}
 				}
 			}
-			if count > 0 {
-				p50 = p50sum / float64(count)
-				p99 = p99sum / float64(count)
+
+			multiMetric := len(byMetric) > 1 && !mergedMetricBenchmarks[name]
+			sloViolations := boolVal(raw, "sloViolations")
+
+			if !multiMetric {
+				// Emit a single merged row: pool requests/duration, average percentiles.
+				var merged metricAcc
+				for _, metric := range metricOrder {
+					acc := byMetric[metric]
+					merged.totalRequests += acc.totalRequests
+					merged.totalDurationNs += acc.totalDurationNs
+					merged.p50sum += acc.p50sum
+					merged.p95sum += acc.p95sum
+					merged.p99sum += acc.p99sum
+					merged.count += acc.count
+				}
+				var rps, p50, p95, p99 float64
+				if merged.count > 0 {
+					p50 = merged.p50sum / float64(merged.count)
+					p95 = merged.p95sum / float64(merged.count)
+					p99 = merged.p99sum / float64(merged.count)
+				}
+				if merged.totalDurationNs > 0 {
+					rps = merged.totalRequests / (merged.totalDurationNs / 1e3)
+				}
+				rows = append(rows, benchmarkRow{
+					Name:    name,
+					RPS:     rps,
+					P50ms:   p50,
+					P95ms:   p95,
+					P99ms:   p99,
+					SLOPass: !sloViolations,
+					hasData: true,
+				})
+			} else {
+				for _, metric := range metricOrder {
+					acc := byMetric[metric]
+					var rps, p50, p95, p99 float64
+					if acc.count > 0 {
+						p50 = acc.p50sum / float64(acc.count)
+						p95 = acc.p95sum / float64(acc.count)
+						p99 = acc.p99sum / float64(acc.count)
+					}
+					if acc.totalDurationNs > 0 {
+						rps = acc.totalRequests / (acc.totalDurationNs / 1e3)
+					}
+					rowName := name
+					if metric != "" {
+						rowName = name + "/" + metric
+					}
+					rows = append(rows, benchmarkRow{
+						Name:    rowName,
+						RPS:     rps,
+						P50ms:   p50,
+						P95ms:   p95,
+						P99ms:   p99,
+						SLOPass: !sloViolations,
+						hasData: true,
+					})
+				}
 			}
-			// RPS = total requests / total duration in seconds.
-			if totalDurationNs > 0 {
-				rps = totalRequests / (totalDurationNs / 1e3) // ms → s
-			}
+			continue
 		}
 
 		// --- Fallback: flat format (throughput, p50, p99) ---
-		if rps == 0 {
-			rps, _ = floatVal(raw, "throughput")
-		}
-		if p50 == 0 {
-			p50, _ = floatVal(raw, "p50")
-		}
-		if p99 == 0 {
-			p99, _ = floatVal(raw, "p99")
-		}
+		var rps, p50, p99 float64
+		rps, _ = floatVal(raw, "throughput")
+		p50, _ = floatVal(raw, "p50")
+		p99, _ = floatVal(raw, "p99")
 
 		sloViolations := boolVal(raw, "sloViolations")
 		rows = append(rows, benchmarkRow{
@@ -307,13 +415,23 @@ func loadCorrectnessReport(root string) (correctnessReport, bool) {
 // knownEndpoints is the canonical ordered list of benchmark endpoints shown in
 // the report table, including SSE (Sub-Task 6). Entries absent from the loaded
 // hyperfoil results appear as "-" rows.
+//
+// The sse-fan-out benchmark produces two distinct phases with separate metrics
+// (sse-connection for TTFB, burst-append for fan-out append latency), so it is
+// listed here as two separate rows.
 var knownEndpoints = []string{
 	"append-throughput",
 	"list-conversations",
 	"list-entries",
 	"search-conversations",
 	"list-forks",
-	"sse-fan-out",
+	"sse-fan-out/sse-connection",
+	"sse-fan-out/burst-append",
+	// SSE end-to-end event delivery latency at each concurrency ramp level.
+	// Produced by internal/loadtest/ssedelay/.
+	"sse-event-delay/users-1",
+	"sse-event-delay/users-10",
+	"sse-event-delay/users-50",
 }
 
 func buildBenchmarkRows(loaded []benchmarkRow) []benchmarkRow {
@@ -448,14 +566,15 @@ func writeMD(root, ts, baseURL string, seed seedManifest, hasSeed bool,
 	if benchNotRun {
 		sb.WriteString("> benchmarks not yet run\n\n")
 	}
-	sb.WriteString("| Endpoint | RPS | p50 (ms) | p99 (ms) | SLO |\n")
-	sb.WriteString("|---|---|---|---|---|\n")
+	sb.WriteString("| Endpoint | RPS | p50 (ms) | p90/p95 (ms) | p99 (ms) | SLO |\n")
+	sb.WriteString("|---|---|---|---|---|---|\n")
 	for _, r := range benchRows {
 		rpsStr := dash(r.RPS)
 		p50Str := dash(r.P50ms)
+		p95Str := dash(r.P95ms)
 		p99Str := dash(r.P99ms)
 		slo := sloIcon(r.SLOPass)
-		sb.WriteString(fmt.Sprintf("| %s | %s | %s | %s | %s |\n", r.Name, rpsStr, p50Str, p99Str, slo))
+		sb.WriteString(fmt.Sprintf("| %s | %s | %s | %s | %s | %s |\n", r.Name, rpsStr, p50Str, p95Str, p99Str, slo))
 	}
 	sb.WriteString("\n")
 

@@ -93,14 +93,45 @@ go run ./internal/loadtest/generator/ --help
 
 ### `task loadtest:bench`
 
-Runs all Hyperfoil benchmark flows against the seeded service via `jbang`.
-Writes per-flow JSON result files to `loadtest/results/hyperfoil-*.json`.
+Runs all Hyperfoil benchmark flows **and** the SSE event-delivery latency
+benchmark against the seeded service.  Writes per-flow JSON result files to
+`loadtest/results/hyperfoil-*.json` and `loadtest/results/sse-event-delay-*.json`.
 
 ```sh
 task loadtest:bench
 ```
 
 Requires `loadtest:seed` to have completed first.
+
+### `task loadtest:bench:sse-delay`
+
+Runs **only** the SSE event-delivery latency benchmark — useful for iterating
+on SSE performance without re-running the full Hyperfoil suite.
+
+```sh
+task loadtest:bench:sse-delay
+```
+
+**What it measures:** the time from a `POST /v1/conversations/{id}/entries`
+completing until the matching `conversation/updated` SSE event arrives on the
+user's open subscriber connection — the true end-to-end event delivery latency.
+
+**Topology (matches Hiram's realistic fan-out model):**
+
+| Role | Count per level |
+|---|---|
+| User sender connections | N (1 / 10 / 50) |
+| User SSE subscriber connections | N (1 / 10 / 50, one per user) |
+| Admin SSE subscribers (cognition) | 2 (persistent, whole run) |
+
+Each append fans out to exactly 3 SSE connections: the owning user's subscriber
+plus 2 admin subscribers.  Events for user A are never delivered to user B's
+subscriber.
+
+The benchmark runs three ramp levels sequentially (**1 → 10 → 50 concurrent
+users**, 30 s each) and emits p50/p95/p99 latency per level.  The report table
+shows all three as separate rows so degradation under fan-out pressure is
+immediately visible.
 
 ### `task loadtest:correctness`
 
@@ -141,7 +172,11 @@ It exits 1 only if it cannot write the output files.
 | list-entries | 300 ms |
 | search-conversations | 1000 ms |
 | list-forks | 300 ms |
-| sse-fan-out | N/A (connection SLO) |
+| sse-fan-out/sse-connection | N/A (TTFB only) |
+| sse-fan-out/burst-append | N/A |
+| sse-event-delay/users-1 | N/A (observability) |
+| sse-event-delay/users-10 | N/A (observability) |
+| sse-event-delay/users-50 | N/A (observability) |
 
 Override thresholds by editing the corresponding `loadtest/benchmarks/*.hf.yaml` file.
 
@@ -156,6 +191,7 @@ All output is written to `loadtest/results/` (gitignored except `.gitkeep`):
 | `seed-manifest.json` | `loadtest:seed` | All seeded conversation IDs, entry counts, fork chains |
 | `conversation-ids.csv` | `loadtest:bench` (via manifest-to-csv helper) | Flat list consumed by Hyperfoil |
 | `hyperfoil-<name>-<timestamp>.json` | `loadtest:bench` | Raw Hyperfoil result per flow |
+| `sse-event-delay-<timestamp>.json` | `loadtest:bench` / `loadtest:bench:sse-delay` | SSE append→event latency at 1/10/50 concurrent users |
 | `correctness-report.json` | `loadtest:correctness` | Per-test pass/fail and item counts |
 | `report.md` | `loadtest:report` | Human-readable Markdown summary |
 | `report.json` | `loadtest:report` | Machine-readable aggregate report |
@@ -192,9 +228,9 @@ loadtest/                          ← non-Go assets
 │   ├── list-entries.hf.yaml
 │   ├── search-conversations.hf.yaml
 │   ├── list-forks.hf.yaml
-│   ├── sse-fan-out.hf.yaml        ← Sub-Task 6
+│   ├── sse-fan-out.hf.yaml        ← Hyperfoil SSE TTFB + burst-append
 │   ├── manifest-to-csv.sh         ← shell wrapper for the Go CSV helper
-│   └── run.sh                     ← runs all flows via jbang
+│   └── run.sh                     ← runs all Hyperfoil flows + ssedelay
 └── results/
     └── .gitkeep                   ← keeps dir in git; *.json and *.md are gitignored
 
@@ -209,6 +245,8 @@ internal/loadtest/                 ← all Go source
 │   └── reporter.go
 ├── hfrun/                         ← Hyperfoil non-interactive runner
 │   └── main.go                    ← starts jbang, polls log, fetches /stats/total via REST
+├── ssedelay/                      ← SSE event-delivery latency benchmark (Go-native)
+│   └── main.go                    ← 1/10/50 concurrent users, append→event p50/p95/p99
 └── report/                        ← results aggregator binary
     └── main.go
 ```

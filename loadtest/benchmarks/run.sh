@@ -77,6 +77,11 @@ log "CSV generation complete."
 
 FLOWS="append-throughput list-conversations list-entries search-conversations list-forks sse-fan-out"
 
+# SSE end-to-end event delivery latency benchmark (Go-native, not Hyperfoil).
+# Runs after the Hyperfoil flows so SSE connections don't interfere with
+# the append-throughput measurement.
+SSE_DELAY_OUT="${RESULTS_DIR}/sse-event-delay-${TIMESTAMP}.json"
+
 # ---------------------------------------------------------------------------
 # Step 3: Run each flow — start controller, run benchmark, fetch stats, stop
 #
@@ -125,6 +130,24 @@ run_flow() {
 for FLOW in ${FLOWS}; do
     run_flow "${FLOW}"
 done
+
+# ---------------------------------------------------------------------------
+# Step 3b: Run SSE event-delay benchmark
+# ---------------------------------------------------------------------------
+
+log "Running SSE event-delay benchmark (1/10/50 concurrent users)..."
+if go run "${REPO_ROOT}/internal/loadtest/ssedelay/" \
+        --base-url="http://localhost:8082" \
+        --api-key="agent-api-key-1" \
+        --admin-api-key="admin-api-key-1" \
+        --duration=30 \
+        --out="${SSE_DELAY_OUT}"; then
+    log "PASS: sse-event-delay — results written to ${SSE_DELAY_OUT}"
+    PASSED="${PASSED} sse-event-delay"
+else
+    log "FAIL: sse-event-delay — see ${SSE_DELAY_OUT}"
+    FAILED="${FAILED} sse-event-delay"
+fi
 
 # ---------------------------------------------------------------------------
 # Step 4: Print summary
