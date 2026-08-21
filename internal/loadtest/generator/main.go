@@ -121,7 +121,7 @@ func main() {
 	}
 
 	// --- seed fork chains ---
-	forks, err := seedForkChains(client, cfg, r)
+	forks, err := seedForkChains(client, cfg, r, cfg.ForkChains)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ERROR seeding fork chains: %v\n", err)
 		// Non-fatal: continue and write manifest with whatever forks succeeded.
@@ -186,10 +186,9 @@ func seedEntriesWithIndex(
 	return idxReqs, nil
 }
 
-// seedForkChains creates SeedForkChains() root conversations of 10 entries
-// each, then forks each root at its 5th entry.
-func seedForkChains(client *http.Client, cfg GeneratorConfig, r *rand.Rand) ([]forkRecord, error) {
-	n := SeedForkChains()
+// seedForkChains creates n root conversations of 10 entries each, then forks
+// each root at its 5th entry. n is controlled by the --fork-chains flag.
+func seedForkChains(client *http.Client, cfg GeneratorConfig, r *rand.Rand, n int) ([]forkRecord, error) {
 	forks := make([]forkRecord, 0, n)
 
 	for range n {

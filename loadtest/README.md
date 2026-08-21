@@ -42,8 +42,11 @@ This executes **seed → bench → correctness → report** in sequence and writ
 
 ### `task loadtest:seed`
 
-Seeds the running memory service with 200 conversations (default). Writes
+Seeds the running memory service with a configurable dataset. Writes
 `loadtest/results/seed-manifest.json` which the benchmark and correctness tasks consume.
+
+**Default seed:** 200 conversations, 10 fork chains.
+For a more realistic scale test use `--total-conversations=2000 --fork-chains=40`.
 
 **You do not need to delete the manifest between runs.** Re-running `task loadtest:all`
 is safe — the seed step skips automatically if the manifest already exists. Only delete it
@@ -53,16 +56,40 @@ in these specific situations:
 |---|---|
 | Normal re-run (same DB) | Just run `task loadtest:all` — seed skips automatically |
 | DB was wiped or restarted | `rm loadtest/results/seed-manifest.json && task loadtest:all` |
-| Want different conversation count | `rm loadtest/results/seed-manifest.json && task loadtest:seed -- --total-conversations=500` |
+| Want different conversation count | `rm loadtest/results/seed-manifest.json && task loadtest:seed -- --total-conversations=2000 --fork-chains=40` |
 
 ```sh
+# Default (200 conversations, 10 fork chains)
 task loadtest:seed
-# Override conversation count:
-task loadtest:seed -- --total-conversations=50
+
+# Larger scale run (2000 conversations, 40 fork chains — ~2% fork rate)
+task loadtest:seed -- --total-conversations=2000 --fork-chains=40
+
+# All available flags:
+go run ./internal/loadtest/generator/ --help
 ```
+
+**Generator flags:**
+
+| Flag | Default | Description |
+|---|---|---|
+| `--total-conversations` | `200` | Number of main conversations to seed |
+| `--fork-chains` | `10` | Number of fork chains (each = 1 root + 1 fork conversation) |
+| `--worker-count` | `5` | Concurrent seeding workers |
+| `--base-url` | `http://localhost:8082` | Memory service base URL |
+| `--api-key` | `agent-api-key-1` | API key |
+| `--seed-manifest-path` | `loadtest/results/seed-manifest.json` | Output manifest path |
 
 > **Sign of a stale manifest:** correctness tests return HTTP 403 after a DB wipe.
 > Fix: `rm loadtest/results/seed-manifest.json && task loadtest:all`
+
+**Entry count distribution** (matches real-world chat patterns):
+
+| Bucket | Probability | Range |
+|---|---|---|
+| Short | 60% | 2–10 entries |
+| Medium | 30% | 11–100 entries |
+| Long tail | 10% | 101–2000 entries |
 
 ### `task loadtest:bench`
 
@@ -89,8 +116,12 @@ Requires `loadtest:seed` to have completed first.
 ### `task loadtest:report`
 
 Reads all JSON result files from `loadtest/results/` and produces:
-- `loadtest/results/report.md` — Markdown table of throughput, latency, and correctness
+- `loadtest/results/report.md` — Markdown report with seed statistics, throughput, latency, and correctness
 - `loadtest/results/report.json` — machine-readable version of the same data
+
+The report includes a **Seed Data** section showing: total conversations, total entries, fork chains,
+unique owners, min/max/avg/median entries per conversation, distribution by bucket (short/medium/long),
+and participant type breakdown (single-user / two-user / two-agent).
 
 ```sh
 task loadtest:report

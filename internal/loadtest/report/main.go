@@ -15,10 +15,18 @@ import (
 
 // ---- input structures -------------------------------------------------------
 
+type conversationRecord struct {
+	ID              string `json:"id"`
+	OwnerID         string `json:"ownerID"`
+	EntryCount      int    `json:"entryCount"`
+	ParticipantType string `json:"participantType"`
+}
+
 type seedManifest struct {
-	BaseURL            string `json:"baseURL"`
-	TotalConversations int    `json:"totalConversations"`
-	Forks              []any  `json:"forks"`
+	BaseURL            string               `json:"baseURL"`
+	TotalConversations int                  `json:"totalConversations"`
+	Conversations      []conversationRecord `json:"conversations"`
+	Forks              []any                `json:"forks"`
 }
 
 type correctnessResult struct {
@@ -53,8 +61,20 @@ type correctnessRow struct {
 }
 
 type seedInfo struct {
-	TotalConversations int `json:"totalConversations"`
-	ForkChains         int `json:"forkChains"`
+	TotalConversations int            `json:"totalConversations"`
+	ForkChains         int            `json:"forkChains"`
+	TotalEntries       int            `json:"totalEntries"`
+	ShortConvs         int            `json:"shortConversations"`
+	MediumConvs        int            `json:"mediumConversations"`
+	LongConvs          int            `json:"longConversations"`
+	ParticipantTypes   map[string]int `json:"participantTypes"`
+	UniqueOwners       int            `json:"uniqueOwners"`
+	MinEntries         int            `json:"minEntriesPerConv"`
+	MaxEntries         int            `json:"maxEntriesPerConv"`
+	AvgEntries         float64        `json:"avgEntriesPerConv"`
+	MedianEntries      int            `json:"medianEntriesPerConv"`
+	LongTailAvgEntries float64        `json:"longTailAvgEntries"`
+	LongTailMaxEntries int            `json:"longTailMaxEntries"`
 }
 
 type reportJSON struct {
@@ -312,6 +332,71 @@ func buildBenchmarkRows(loaded []benchmarkRow) []benchmarkRow {
 	return rows
 }
 
+func computeSeedInfo(seed seedManifest) seedInfo {
+	info := seedInfo{
+		TotalConversations: seed.TotalConversations,
+		ForkChains:         len(seed.Forks),
+		ParticipantTypes:   make(map[string]int),
+	}
+	if len(seed.Conversations) == 0 {
+		return info
+	}
+
+	owners := make(map[string]struct{})
+	counts := make([]int, 0, len(seed.Conversations))
+	totalEC := 0
+	longTailTotal := 0
+	info.MinEntries = seed.Conversations[0].EntryCount
+	info.MaxEntries = 0
+
+	for _, c := range seed.Conversations {
+		ec := c.EntryCount
+		info.TotalEntries += ec * 2 // USER + AI pairs
+		totalEC += ec
+		counts = append(counts, ec)
+
+		if ec < info.MinEntries {
+			info.MinEntries = ec
+		}
+		if ec > info.MaxEntries {
+			info.MaxEntries = ec
+		}
+
+		switch {
+		case ec <= 10:
+			info.ShortConvs++
+		case ec <= 100:
+			info.MediumConvs++
+		default:
+			info.LongConvs++
+			longTailTotal += ec
+			if ec > info.LongTailMaxEntries {
+				info.LongTailMaxEntries = ec
+			}
+		}
+		info.ParticipantTypes[c.ParticipantType]++
+		owners[c.OwnerID] = struct{}{}
+	}
+
+	info.UniqueOwners = len(owners)
+	info.AvgEntries = float64(totalEC) / float64(len(seed.Conversations))
+	if info.LongConvs > 0 {
+		info.LongTailAvgEntries = float64(longTailTotal) / float64(info.LongConvs)
+	}
+
+	// Median — sort a copy of counts.
+	sorted := make([]int, len(counts))
+	copy(sorted, counts)
+	for i := 1; i < len(sorted); i++ {
+		for j := i; j > 0 && sorted[j] < sorted[j-1]; j-- {
+			sorted[j], sorted[j-1] = sorted[j-1], sorted[j]
+		}
+	}
+	info.MedianEntries = sorted[len(sorted)/2]
+
+	return info
+}
+
 func writeMD(root, ts, baseURL string, seed seedManifest, hasSeed bool,
 	benchRows []benchmarkRow, benchNotRun bool,
 	correctRows []correctnessRow, correctNotRun bool) error {
@@ -320,12 +405,44 @@ func writeMD(root, ts, baseURL string, seed seedManifest, hasSeed bool,
 
 	sb.WriteString("# Load Test Report\n\n")
 	sb.WriteString(fmt.Sprintf("Generated: %s\n\n", ts))
-	if hasSeed {
-		sb.WriteString(fmt.Sprintf("Seed: %d conversations, %d fork chains\n\n", seed.TotalConversations, len(seed.Forks)))
-	} else {
-		sb.WriteString("Seed: not yet run\n\n")
-	}
 	sb.WriteString(fmt.Sprintf("BaseURL: %s\n\n", baseURL))
+
+	// --- Seed Data Statistics ---
+	sb.WriteString("## Seed Data\n\n")
+	if !hasSeed {
+		sb.WriteString("> seed not yet run\n\n")
+	} else {
+		si := computeSeedInfo(seed)
+		sb.WriteString("| Metric | Value |\n")
+		sb.WriteString("|---|---|\n")
+		sb.WriteString(fmt.Sprintf("| Total conversations | %d |\n", si.TotalConversations))
+		sb.WriteString(fmt.Sprintf("| Total entries seeded (USER+AI pairs) | %d |\n", si.TotalEntries))
+		sb.WriteString(fmt.Sprintf("| Fork chains | %d |\n", si.ForkChains))
+		sb.WriteString(fmt.Sprintf("| Unique conversation owners | %d |\n", si.UniqueOwners))
+		sb.WriteString("\n")
+
+		sb.WriteString("**Entry count distribution per conversation:**\n\n")
+		sb.WriteString("| Metric | Value |\n")
+		sb.WriteString("|---|---|\n")
+		sb.WriteString(fmt.Sprintf("| Min entries | %d |\n", si.MinEntries))
+		sb.WriteString(fmt.Sprintf("| Max entries | %d |\n", si.MaxEntries))
+		sb.WriteString(fmt.Sprintf("| Avg entries | %.1f |\n", si.AvgEntries))
+		sb.WriteString(fmt.Sprintf("| Median entries | %d |\n", si.MedianEntries))
+		sb.WriteString(fmt.Sprintf("| Short (≤10 entries) | %d conversations |\n", si.ShortConvs))
+		sb.WriteString(fmt.Sprintf("| Medium (11–100 entries) | %d conversations |\n", si.MediumConvs))
+		sb.WriteString(fmt.Sprintf("| Long tail (>100 entries) | %d conversations |\n", si.LongConvs))
+		sb.WriteString(fmt.Sprintf("| Long tail avg entries | %.0f |\n", si.LongTailAvgEntries))
+		sb.WriteString(fmt.Sprintf("| Long tail max entries | %d |\n", si.LongTailMaxEntries))
+		sb.WriteString("\n")
+
+		sb.WriteString("**Participant type breakdown:**\n\n")
+		sb.WriteString("| Type | Count |\n")
+		sb.WriteString("|---|---|\n")
+		for _, pt := range []string{"single-user", "two-user", "two-agent"} {
+			sb.WriteString(fmt.Sprintf("| %s | %d |\n", pt, si.ParticipantTypes[pt]))
+		}
+		sb.WriteString("\n")
+	}
 
 	sb.WriteString("## Throughput & Latency\n\n")
 	if benchNotRun {
@@ -419,12 +536,9 @@ func writeJSON(root, ts, baseURL string, seed seedManifest,
 	}
 
 	out := reportJSON{
-		Timestamp: ts,
-		BaseURL:   baseURL,
-		Seed: seedInfo{
-			TotalConversations: seed.TotalConversations,
-			ForkChains:         len(seed.Forks),
-		},
+		Timestamp:   ts,
+		BaseURL:     baseURL,
+		Seed:        computeSeedInfo(seed),
 		Benchmarks:  benchRows,
 		Correctness: correctRows,
 		AllPassed:   allPassed,
