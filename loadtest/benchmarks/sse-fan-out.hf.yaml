@@ -1,8 +1,6 @@
 name: sse-fan-out
 
 # SSE fan-out: 50 concurrent connections on /v1/events + append burst.
-# NOTE: If Hyperfoil cannot handle persistent SSE streams, escalate to
-# Diego Lovison (via Eric Deandrea) before using the Go fallback client.
 
 http:
   - host: localhost
