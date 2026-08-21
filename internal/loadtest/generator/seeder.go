@@ -142,10 +142,11 @@ func indexEntries(client *http.Client, cfg GeneratorConfig, entries []indexEntry
 	if batchSize <= 0 {
 		batchSize = 50
 	}
-	for i := 0; i < len(entries); i += batchSize {
+	total := len(entries)
+	for i := 0; i < total; i += batchSize {
 		end := i + batchSize
-		if end > len(entries) {
-			end = len(entries)
+		if end > total {
+			end = total
 		}
 		batch := entries[i:end]
 
@@ -182,6 +183,14 @@ func indexEntries(client *http.Client, cfg GeneratorConfig, entries []indexEntry
 				return fmt.Errorf("indexEntries: status %d: %s", resp.StatusCode, respBody)
 			}
 			break
+		}
+
+		// Pace index batches to give Postgres WAL time to flush between writes.
+		// Without this, large seeds (2000+ conversations with 5000-char entries)
+		// cause a WAL write spike that crashes the local Postgres instance.
+		// 50ms between batches = ~20 batches/sec max throughput for indexing.
+		if i+batchSize < total {
+			time.Sleep(50 * time.Millisecond)
 		}
 	}
 	return nil
