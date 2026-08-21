@@ -135,12 +135,13 @@ func appendEntry(
 //
 // indexedContent for each entry is the entry's text content — the same words
 // used in the entry body, which guarantees "load test" search terms will match.
-func indexEntries(client *http.Client, cfg GeneratorConfig, entries []indexEntryRequest) error {
+func indexEntries(client *http.Client, cfg GeneratorConfig, entries []indexEntryRequest, batchSize int) error {
 	if len(entries) == 0 {
 		return nil
 	}
-	// Index in batches of 100 to avoid oversized requests.
-	const batchSize = 100
+	if batchSize <= 0 {
+		batchSize = 50
+	}
 	for i := 0; i < len(entries); i += batchSize {
 		end := i + batchSize
 		if end > len(entries) {

@@ -112,8 +112,8 @@ func main() {
 	wg.Wait()
 
 	// --- index all seeded entries for search ---
-	fmt.Fprintf(os.Stderr, "Indexing %d entries for search...\n", len(indexQueue))
-	if err := indexEntries(client, cfg, indexQueue); err != nil {
+	fmt.Fprintf(os.Stderr, "Indexing %d entries for search (batch size %d)...\n", len(indexQueue), cfg.IndexBatchSize)
+	if err := indexEntries(client, cfg, indexQueue, cfg.IndexBatchSize); err != nil {
 		fmt.Fprintf(os.Stderr, "WARNING: indexEntries failed: %v (search tests may return 0 results)\n", err)
 		// Non-fatal: continue writing manifest
 	} else {
