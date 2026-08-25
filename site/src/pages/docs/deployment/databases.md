@@ -71,21 +71,24 @@ MongoDB is supported for teams already using MongoDB infrastructure.
 ```bash
 docker run -d \
   --name mongodb \
-  -e MONGO_INITDB_ROOT_USERNAME=admin \
-  -e MONGO_INITDB_ROOT_PASSWORD=password \
   -p 27017:27017 \
-  mongo:7
+  mongo:7 --replSet rs0 --bind_ip_all
+
+docker exec mongodb mongosh --quiet --eval \
+  'rs.initiate({_id:"rs0",members:[{_id:0,host:"localhost:27017"}]})'
 ```
 
 ### Configuration
 
 ```bash
 MEMORY_SERVICE_DB_KIND=mongo
-MEMORY_SERVICE_DB_URL=mongodb://admin:password@localhost:27017/memoryservice
+MEMORY_SERVICE_DB_URL=mongodb://localhost:27017/memoryservice?replicaSet=rs0
 MEMORY_SERVICE_ATTACHMENTS_KIND=s3
 ```
 
-MongoDB does not provide attachment blob storage. Use the S3 backend for durable deployments, or configure `MEMORY_SERVICE_ATTACHMENTS_KIND=fs` together with `MEMORY_SERVICE_ATTACHMENTS_FS_DIR` for a single-node deployment.
+Episodic memory writes use MongoDB transactions, so the server requires a replica set or mongos and rejects standalone MongoDB during startup. For production, use a managed replica set/sharded deployment and its authenticated connection URI.
+
+MongoDB does not provide attachment blob storage. Use the S3 backend for durable deployments, or configure `MEMORY_SERVICE_ATTACHMENTS_KIND=fs` together with `MEMORY_SERVICE_ATTACHMENTS_FS_DIR` for a single-node service deployment.
 
 ## SQLite
 

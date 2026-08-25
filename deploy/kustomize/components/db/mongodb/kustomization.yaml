@@ -23,4 +23,4 @@ secretGenerator:
   - name: memory-service-secret
     behavior: merge
     literals:
-      - MEMORY_SERVICE_DB_URL=mongodb://mongo:mongo@mongodb:27017/memory_service?authSource=admin
+      - MEMORY_SERVICE_DB_URL=mongodb://mongo:mongo@mongodb:27017/memory_service?authSource=admin&replicaSet=rs0&directConnection=true

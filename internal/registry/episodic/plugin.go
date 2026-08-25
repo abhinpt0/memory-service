@@ -14,12 +14,23 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chirino/memory-service/internal/model"
 	"github.com/google/uuid"
 )
 
 var ErrAdminStatsSummaryUnsupported = errors.New("admin stats summary unsupported")
 var ErrMemoryRevisionConflict = errors.New("memory revision conflict")
+var ErrMemoryKindMigrationStateConflict = errors.New("memory kind migration state changed")
 var ErrSemanticSearchUnavailable = errors.New("semantic search unavailable")
+
+// ErrMemoryKindNotFound is returned when a write selector names a schema version that does not exist.
+var ErrMemoryKindNotFound = errors.New("schema version not found")
+
+// ErrMemoryKindNotWritable is returned when a write selector names a schema version that is not writable.
+var ErrMemoryKindNotWritable = errors.New("schema version is not writable")
+
+// ErrMemoryKindInvalid is returned when a write kind is neither empty nor an exact canonical name.
+var ErrMemoryKindInvalid = errors.New("invalid memory kind selector")
 
 var attributeFilterFieldPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 
@@ -42,6 +53,25 @@ type PutMemoryRequest struct {
 	PolicyAttributes map[string]interface{} `json:"-"`
 	// ExpectedRevision gates the write with optimistic concurrency when non-nil.
 	ExpectedRevision *int64 `json:"-"`
+	// AuthorizedPredecessor records the active row observed during write authorization.
+	// A non-nil check is presence-aware: Exists=false means the key was absent and
+	// must still be absent; Exists=true requires the same row and revision.
+	AuthorizedPredecessor *MemoryPredecessorExpectation `json:"-"`
+	// MemoryKind is the resolved canonical schema name for this write (set by the handler).
+	// Must be non-empty before PutMemory is called; stores reject empty kind.
+	MemoryKind string `json:"-"`
+}
+
+type MemoryPredecessor struct {
+	ID         uuid.UUID
+	Revision   int64
+	MemoryKind string
+}
+
+type MemoryPredecessorExpectation struct {
+	Exists   bool
+	ID       uuid.UUID
+	Revision int64
 }
 
 // MemoryItem is the external representation of an active memory (returned by GET / search).
@@ -51,6 +81,7 @@ type MemoryItem struct {
 	Key            string                 `json:"key"`
 	Value          map[string]interface{} `json:"value,omitempty"`
 	Attributes     map[string]interface{} `json:"attributes,omitempty"`
+	MemoryKind     string                 `json:"memoryKind,omitempty"`
 	Score          *float64               `json:"score,omitempty"`          // nil for non-vector results
 	MatchedQueries []string               `json:"matchedQueries,omitempty"` // attribution for multi-query results
 	Usage          *MemoryUsage           `json:"usage,omitempty"`
@@ -118,6 +149,30 @@ type AdminMemoryQuery struct {
 	IncludeUsage    bool
 	Limit           int
 	AfterCursor     string
+	// MemoryKind is the optional top-level kind selector (canonical name, family, or empty for all).
+	MemoryKind string
+	// Filter is the optional projected-attribute filter (same semantics as SearchMemories/AdminSearch).
+	Filter AttributeFilter
+}
+
+// MemoryAttributeSort is a one-field typed sort for attribute-only searches.
+type MemoryAttributeSort struct {
+	Field     string // declared attribute name
+	Direction string // "asc" or "desc"
+	// Type is the declared attribute type from the selected schema version.
+	// Empty string or "string" means text/binary collation sort.
+	// Use episodic.AttributeType* constants ("number", "boolean", "timestamp").
+	Type string
+}
+
+// MemorySearchQuery is the input for attribute-only SearchMemories calls.
+type MemorySearchQuery struct {
+	NamespacePrefix []string
+	Filter          AttributeFilter
+	Limit           int
+	Archived        ArchiveFilter
+	MemoryKind      string // canonical name, family, or empty for all
+	Sort            *MemoryAttributeSort
 }
 
 type AdminMemorySearchQuery struct {
@@ -128,6 +183,8 @@ type AdminMemorySearchQuery struct {
 	Archived        ArchiveFilter
 	IncludeUsage    bool
 	Limit           int
+	MemoryKind      string // canonical name, family, or empty for all
+	Sort            *MemoryAttributeSort
 }
 
 type AdminMemoryPage struct {
@@ -155,6 +212,7 @@ type MemoryWriteResult struct {
 	Namespace  []string               `json:"namespace"`
 	Key        string                 `json:"key"`
 	Attributes map[string]interface{} `json:"attributes,omitempty"`
+	MemoryKind string                 `json:"memoryKind,omitempty"`
 	CreatedAt  time.Time              `json:"createdAt"`
 	ExpiresAt  *time.Time             `json:"expiresAt"`
 	Revision   int64                  `json:"revision"`
@@ -237,11 +295,42 @@ func NormalizeAttributeFilters(filters ...map[string]interface{}) (AttributeFilt
 	return out, nil
 }
 
-func validateAttributeFilterField(field string) error {
+// MergeAttributeFilters combines two already-normalized AttributeFilters into one.
+// It preserves range-kind conflict detection (cannot mix numeric and timestamp bounds
+// on the same field across the two inputs).
+// This is used to combine a schema-validated+normalized caller filter with a
+// separately-normalized policy filter without re-parsing raw JSON.
+func MergeAttributeFilters(a, b AttributeFilter) (AttributeFilter, error) {
+	var out AttributeFilter
+	rangeKindByField := map[string]AttributeFilterRangeKind{}
+	for _, cond := range a.Conditions {
+		if cond.RangeKind != "" {
+			rangeKindByField[cond.Field] = cond.RangeKind
+		}
+		out.Conditions = append(out.Conditions, cond)
+	}
+	for _, cond := range b.Conditions {
+		if cond.RangeKind != "" {
+			if existing := rangeKindByField[cond.Field]; existing != "" && existing != cond.RangeKind {
+				return AttributeFilter{}, fmt.Errorf("invalid filter for %q: cannot mix numeric and timestamp range bounds", cond.Field)
+			}
+			rangeKindByField[cond.Field] = cond.RangeKind
+		}
+		out.Conditions = append(out.Conditions, cond)
+	}
+	return out, nil
+}
+
+// ValidateAttributeFilterField validates an attribute field name for use in filters and sorts.
+func ValidateAttributeFilterField(field string) error {
 	if field == "" || strings.HasPrefix(field, "$") || !attributeFilterFieldPattern.MatchString(field) {
 		return fmt.Errorf("invalid attribute filter field %q", field)
 	}
 	return nil
+}
+
+func validateAttributeFilterField(field string) error {
+	return ValidateAttributeFilterField(field)
 }
 
 func normalizeAttributeFilterField(field string, expr interface{}) ([]AttributeFilterCondition, error) {
@@ -398,6 +487,10 @@ type ListNamespacesRequest struct {
 	Suffix   []string
 	MaxDepth int
 	Archived ArchiveFilter
+	// MemoryKind is an exact or family selector injected by filter.rego.
+	MemoryKind string
+	// Filter is the normalized attribute filter injected by filter.rego.
+	Filter AttributeFilter
 }
 
 type ArchiveFilter string
@@ -430,12 +523,17 @@ type MemoryVectorUpsert struct {
 	PolicyAttributes map[string]interface{}
 	Archived         bool
 	Embedding        []float32
+	MemoryKind       string // canonical schema name; always non-empty after fresh write
+	MemoryRevision   int64  // memory revision at time of indexing
 }
 
 // MemoryVectorSearch is the result of a vector search over memory_vectors.
 type MemoryVectorSearch struct {
-	MemoryID uuid.UUID
-	Score    float64
+	MemoryID         uuid.UUID
+	Score            float64
+	MemoryRevision   int64  // positive revision; missing/nonpositive candidates are invalid
+	MemoryKind       string // "" = unknown
+	PrimaryValidated bool   // true = SQL JOIN already validated freshness & schema; skip client checks
 }
 
 // PendingMemory is the internal type returned by FindMemoriesPendingIndexing.
@@ -446,6 +544,8 @@ type PendingMemory struct {
 	IndexedContent   map[string]string
 	ArchivedAt       *time.Time
 	DeletedReason    *int32
+	MemoryKind       string // canonical schema name; always non-empty after fresh write
+	Revision         int64  // memory revision, used by SetMemoryKindIndexedAtCAS
 }
 
 // Event kind constants for MemoryEvent.Kind.
@@ -475,6 +575,10 @@ type ListEventsRequest struct {
 	AfterCursor string
 	// Limit is the max events per page (default 50, capped by server configuration).
 	Limit int
+	// MemoryKind is an exact or family selector injected by filter.rego.
+	MemoryKind string
+	// Filter is the normalized attribute filter injected by filter.rego.
+	Filter AttributeFilter
 }
 
 // MemoryEvent is a single lifecycle event in the event timeline.
@@ -487,6 +591,7 @@ type MemoryEvent struct {
 	Value      map[string]interface{} // nil for expired tombstones
 	Attributes map[string]interface{} // nil for expired tombstones
 	ExpiresAt  *time.Time
+	MemoryKind string // canonical schema name; always non-empty after fresh write
 }
 
 // MemoryEventPage is the paginated response from ListMemoryEvents.
@@ -494,6 +599,126 @@ type MemoryEventPage struct {
 	Events      []MemoryEvent
 	AfterCursor string // empty when no more pages
 }
+
+// EpisodicKindStore is the subset of EpisodicStore that handles schema version persistence.
+// All EpisodicStore implementations must implement every method in this interface.
+type EpisodicKindStore interface {
+	// CreateMemoryKindVersion persists an immutable schema version.
+	// If a version with the same name already exists and is byte-identical, it returns the existing resource.
+	// If a version exists with a different definition it returns ErrMemoryKindVersionConflict.
+	CreateMemoryKindVersion(ctx context.Context, version model.MemoryKindVersion) (*model.MemoryKindVersion, error)
+
+	// GetMemoryKindVersion retrieves a schema version by canonical name.
+	// Returns nil, nil if not found.
+	GetMemoryKindVersion(ctx context.Context, name string) (*model.MemoryKindVersion, error)
+
+	// ListMemoryKindVersions lists all known schema versions, optionally filtered by family.
+	ListMemoryKindVersions(ctx context.Context, family string) ([]model.MemoryKindVersion, error)
+
+	// CreateMemoryKindMigration persists only a new migration resource.
+	// Returns ErrMemoryKindMigrationActiveForSource if an active migration for source already exists.
+	CreateMemoryKindMigration(ctx context.Context, m model.MemoryKindMigration) (*model.MemoryKindMigration, error)
+
+	// CreateMemoryKindMigrationAndTask atomically persists a queued migration and
+	// its uniquely named initial task in the same datastore transaction.
+	CreateMemoryKindMigrationAndTask(ctx context.Context, m model.MemoryKindMigration) (*model.MemoryKindMigration, error)
+	// CreateMemoryKindMigrationTask queues a continuation/restart task using the
+	// same transaction and physical datastore as migration state.
+	CreateMemoryKindMigrationTask(ctx context.Context, body map[string]interface{}) error
+
+	// DeleteMemoryKindMigration permanently removes a migration record by UUID.
+	// No-ops if the migration does not exist.
+	DeleteMemoryKindMigration(ctx context.Context, id uuid.UUID) error
+
+	// GetMemoryKindMigration retrieves a migration by UUID.
+	// Returns nil, nil if not found.
+	GetMemoryKindMigration(ctx context.Context, id uuid.UUID) (*model.MemoryKindMigration, error)
+
+	// ListMemoryKindMigrations returns migrations, optionally filtered by state.
+	ListMemoryKindMigrations(ctx context.Context, state string) ([]model.MemoryKindMigration, error)
+
+	// UpdateMemoryKindMigrationCancelRequested marks a queued or running migration as canceling.
+	// Returns ErrMemoryKindMigrationNotFound if no migration with the given ID exists.
+	// If the migration already has state canceling/canceled/succeeded/failed, the call is a no-op (returns nil).
+	UpdateMemoryKindMigrationCancelRequested(ctx context.Context, id uuid.UUID) error
+
+	// UpdateMemoryKindMigrationState atomically updates state and timestamps on a migration.
+	UpdateMemoryKindMigrationState(ctx context.Context, id uuid.UUID, state string, startedAt, completedAt *time.Time) error
+
+	// UpdateMemoryKindMigrationStateFailed atomically sets state=failed, last_error_code, and
+	// completed_at in one operation.  Use instead of UpdateMemoryKindMigrationState for terminal
+	// failures so the stable error code is persisted atomically with the state transition.
+	UpdateMemoryKindMigrationStateFailed(ctx context.Context, id uuid.UUID, errorCode string, completedAt time.Time) error
+
+	// UpdateMemoryKindMigrationSucceeded atomically sets state=succeeded, completed_at, and
+	// persists the ABSOLUTE (not delta) skipped_tombstone_count observed during the final
+	// verification sweep.  Using an absolute count means retries are idempotent: re-sweeping
+	// and re-running finalization overwrites with the same value rather than accumulating.
+	// Does NOT take or update migrated_count (increments happen per-row via
+	// UpdateMemoryKindMigrationIncrementMigrated during the batch phase).
+	UpdateMemoryKindMigrationSucceeded(ctx context.Context, id uuid.UUID, completedAt time.Time, absoluteSkippedTombstoneCount int64) error
+
+	// UpdateMemoryKindMigrationIncrementMigrated increments migrated_count by 1.
+	// Must be called inside the same InWriteTx callback as MigrateOneMemoryKindCAS so
+	// both the schema cutover and the counter increment are in the same SQL transaction
+	// and roll back together on failure.  Does NOT touch tombstone counters;
+	// the absolute tombstone count is computed once during the final verification sweep.
+	UpdateMemoryKindMigrationIncrementMigrated(ctx context.Context, id uuid.UUID) error
+
+	// UpdateMemoryKindMigrationCounters increments per-migration progress counters.
+	// Retained for vector_pending_count updates from the indexer path.
+	UpdateMemoryKindMigrationCounters(ctx context.Context, id uuid.UUID, migratedDelta, tombstoneDelta, vectorPendingDelta int64) error
+
+	// UpdateMemoryKindMigrationRetry increments retry_count by 1 and sets last_error_code.
+	// Called when a migration batch fails transiently and the task is rescheduled for retry.
+	UpdateMemoryKindMigrationRetry(ctx context.Context, id uuid.UUID, errorCode string) error
+
+	// ResolveKindForWrite resolves the canonical schema name to use for a write.
+	// sel is empty for the fixed default/v1 kind or an exact canonical name.
+	ResolveKindForWrite(ctx context.Context, sel string) (string, error)
+
+	// SetMemoryKindIndexedAtCAS sets indexed_at on a memory row only if schema, revision, and lifecycle
+	// still match expected values. Returns ErrMemoryRevisionConflict if the row changed.
+	SetMemoryKindIndexedAtCAS(ctx context.Context, memoryID uuid.UUID, expectedKind string, expectedRevision int64, indexedAt time.Time) error
+
+	// FindMemoriesToMigrateByKind returns up to limit rows whose effective schema is sourceKind
+	// and optionally matching the given namespace prefix. Tombstones (null ValueEncrypted) are
+	// included so the cursor advances past them; the absolute tombstone count is computed during
+	// the final verification sweep after the cursor is exhausted, not accumulated per batch.
+	FindMemoriesToMigrateByKind(ctx context.Context, sourceKind string, namespacePrefix []string, afterCreatedAt time.Time, afterID uuid.UUID, limit int) ([]MigrationCandidate, error)
+
+	// MigrateOneMemoryKindCAS atomically updates the projected attributes and memory_schema on a
+	// memory row, only if it still has expectedKind and expectedRevision. Returns
+	// ErrMemoryRevisionConflict if the row has changed. The operation also clears indexed_at
+	// so the existing indexer re-syncs the vector payload.
+	MigrateOneMemoryKindCAS(ctx context.Context, id uuid.UUID, expectedKind string, expectedRevision int64, newAttributes map[string]interface{}, newSchema string) error
+
+	// CountMemoriesPendingIndexByKind returns the number of memory rows with the given
+	// targetKind and indexed_at IS NULL (i.e. awaiting the ordinary vector indexer).
+	// namespacePrefix scopes the count to the migration's target namespace; nil/empty
+	// counts across all namespaces.
+	// This is used to compute an accurate race-safe vector_pending_count at read time.
+	CountMemoriesPendingIndexByKind(ctx context.Context, targetKind string, namespacePrefix []string) (int64, error)
+}
+
+// MigrationCandidate is a row returned by FindMemoriesToMigrateByKind.
+type MigrationCandidate struct {
+	ID               uuid.UUID
+	CreatedAt        time.Time
+	Namespace        string // RS-encoded
+	Key              string
+	ValueEncrypted   []byte // nil for tombstones
+	PolicyAttributes map[string]interface{}
+	IndexedContent   map[string]string
+	MemoryKind       string // effective schema; never empty
+	Revision         int64
+}
+
+var (
+	ErrMemoryKindVersionConflict          = errors.New("schema version already exists with a different definition")
+	ErrMemoryKindMigrationActiveForSource = errors.New("an active migration for this source version already exists")
+	ErrMemoryKindMigrationNotFound        = errors.New("migration not found")
+)
 
 // EpisodicStore defines the primary data access interface for namespaced episodic memories.
 type EpisodicStore interface {
@@ -503,8 +728,24 @@ type EpisodicStore interface {
 	// InWriteTx runs fn in a write transaction scope.
 	InWriteTx(ctx context.Context, fn func(context.Context) error) error
 
+	// EpisodicKindStore provides schema version/default/migration operations.
+	EpisodicKindStore
+
 	// PutMemory upserts a memory. On update, the previous active row is archived.
 	PutMemory(ctx context.Context, req PutMemoryRequest) (*MemoryWriteResult, error)
+
+	// GetMemoryRowKind returns the exact canonical kind of the latest row for
+	// (namespace, key) that satisfies the archive filter, without loading or decrypting
+	// the value.  Returns ("", false, nil) if no matching row exists.
+	//
+	// For write-path authz (PutMemory, ArchiveMemory) pass ArchiveFilterExclude
+	// so only the active row is checked.  For read-path authz (GetMemory) pass the
+	// caller's requested archive filter so the row authorized matches the row read.
+	GetMemoryRowKind(ctx context.Context, namespace []string, key string, archived ArchiveFilter) (kind string, found bool, err error)
+
+	// GetMemoryPredecessor returns the active row identity used for optimistic
+	// authorization-to-mutation validation. It returns nil when the key is absent.
+	GetMemoryPredecessor(ctx context.Context, namespace []string, key string) (*MemoryPredecessor, error)
 
 	// GetMemory retrieves the current memory for the given (namespace, key), filtered by archive state.
 	// Returns nil, nil if no matching current row exists.
@@ -525,8 +766,7 @@ type EpisodicStore interface {
 	ArchiveMemory(ctx context.Context, namespace []string, key string, expectedRevision *int64) error
 
 	// SearchMemories performs an attribute-filter-only search within the namespace prefix.
-	// filter is a parsed attribute filter map (nil = no filter).
-	SearchMemories(ctx context.Context, namespacePrefix []string, filter AttributeFilter, limit int, archived ArchiveFilter) ([]MemoryItem, error)
+	SearchMemories(ctx context.Context, query MemorySearchQuery) ([]MemoryItem, error)
 
 	// ListNamespaces returns the distinct current namespaces that match the prefix/suffix constraints.
 	ListNamespaces(ctx context.Context, req ListNamespacesRequest) ([][]string, error)
@@ -549,7 +789,7 @@ type EpisodicStore interface {
 
 	// SearchMemoryVectors performs ANN search within the namespace prefix,
 	// optionally filtered by policy_attributes. Returns memory IDs ranked by score.
-	SearchMemoryVectors(ctx context.Context, namespacePrefix string, embedding []float32, filter AttributeFilter, limit int, archived ArchiveFilter) ([]MemoryVectorSearch, error)
+	SearchMemoryVectors(ctx context.Context, namespacePrefix string, embedding []float32, filter AttributeFilter, memoryKind string, limit int, archived ArchiveFilter) ([]MemoryVectorSearch, error)
 
 	// GetMemoriesByIDs retrieves current memories by UUID, decrypting values and filtering by archive state.
 	GetMemoriesByIDs(ctx context.Context, ids []uuid.UUID, archived ArchiveFilter) ([]MemoryItem, error)

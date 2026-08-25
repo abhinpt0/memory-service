@@ -1,0 +1,7 @@
+kind: memory-kind
+name: default/v1
+attributes:
+  namespace: string
+  sub: string
+projectionRegoFile: projection.rego
+writable: true

@@ -15,6 +15,7 @@ import (
 	"github.com/charmbracelet/log"
 	"github.com/chirino/memory-service/internal/config"
 	"github.com/chirino/memory-service/internal/dataencryption"
+	coreepisodic "github.com/chirino/memory-service/internal/episodic"
 	"github.com/chirino/memory-service/internal/model"
 	registrycache "github.com/chirino/memory-service/internal/registry/cache"
 	registrymigrate "github.com/chirino/memory-service/internal/registry/migrate"
@@ -86,6 +87,15 @@ func (m *mongoMigrator) Migrate(ctx context.Context) error {
 	db := client.Database("memory_service")
 	if err := mongoRequireCurrentSchemaOrEmpty(ctx, db); err != nil {
 		return err
+	}
+	obsoleteDefaults, err := db.ListCollectionNames(ctx, bson.M{"name": "memory_kind_defaults"})
+	if err != nil {
+		return fmt.Errorf("mongo migration: inspect obsolete memory kind defaults: %w", err)
+	}
+	if len(obsoleteDefaults) > 0 {
+		if err := db.Collection("memory_kind_defaults").Drop(ctx); err != nil {
+			return fmt.Errorf("mongo migration: drop obsolete memory kind defaults: %w", err)
+		}
 	}
 
 	// Create collections with indexes
@@ -172,7 +182,11 @@ func (m *mongoMigrator) Migrate(ctx context.Context) error {
 			},
 		},
 		"memories": {
-			{Keys: bson.D{{Key: "namespace", Value: 1}, {Key: "key", Value: 1}, {Key: "archived_at", Value: 1}}},
+			{
+				Keys: bson.D{{Key: "namespace", Value: 1}, {Key: "key", Value: 1}},
+				Options: options.Index().SetName("memories_active_idx").SetUnique(true).
+					SetPartialFilterExpression(bson.M{"archived_at": nil}),
+			},
 			{
 				Keys:    bson.D{{Key: "expires_at", Value: 1}},
 				Options: options.Index().SetSparse(true),
@@ -191,6 +205,15 @@ func (m *mongoMigrator) Migrate(ctx context.Context) error {
 				Keys: bson.D{{Key: "namespace", Value: 1}, {Key: "archived_at", Value: 1}, {Key: "_id", Value: 1}},
 				Options: options.Index().
 					SetPartialFilterExpression(bson.M{"deleted_reason": bson.M{"$in": bson.A{1, 2}}}),
+			},
+			// Enhancement 115: compound index for migration scans (memory_kind, namespace, _id).
+			{
+				Keys:    bson.D{{Key: "memory_kind", Value: 1}, {Key: "namespace", Value: 1}, {Key: "_id", Value: 1}},
+				Options: options.Index().SetName("memories_kind_version_idx"),
+			},
+			{
+				Keys:    bson.D{{Key: "memory_kind", Value: 1}, {Key: "created_at", Value: 1}, {Key: "_id", Value: 1}},
+				Options: options.Index().SetName("memories_kind_cursor_idx"),
 			},
 		},
 		"memory_usage_stats": {
@@ -212,11 +235,29 @@ func (m *mongoMigrator) Migrate(ctx context.Context) error {
 				Options: options.Index().SetSparse(true),
 			},
 		},
+		// Enhancement 115: immutable schema version definitions.
+		"memory_kind_versions": {
+			{Keys: bson.D{{Key: "created_at", Value: 1}}},
+		},
+		// Enhancement 115: online migration job records.
+		"memory_kind_migrations": {
+			{Keys: bson.D{{Key: "state", Value: 1}, {Key: "created_at", Value: 1}}},
+			{
+				Keys: bson.D{{Key: "source", Value: 1}},
+				Options: options.Index().
+					SetName("memory_kind_migrations_active_source_idx").
+					SetUnique(true).
+					SetPartialFilterExpression(bson.M{"state": bson.M{"$in": bson.A{"queued", "running", "canceling"}}}),
+			},
+		},
 	}
 
 	for name, indexes := range collections {
 		// Ensure collection exists
 		db.CreateCollection(ctx, name)
+		if name == "memories" {
+			_ = db.Collection(name).Indexes().DropOne(ctx, "namespace_1_key_1_archived_at_1")
+		}
 		if len(indexes) > 0 {
 			if _, err := db.Collection(name).Indexes().CreateMany(ctx, indexes); err != nil {
 				return fmt.Errorf("mongo migration: failed to create indexes for %s: %w", name, err)
@@ -224,14 +265,31 @@ func (m *mongoMigrator) Migrate(ctx context.Context) error {
 		}
 	}
 	_ = db.Collection("entries").Indexes().DropOne(ctx, "conversation_group_id_1_created_at_1")
+	// Seed the embedded built-in default schema version (idempotent).
+	now := time.Now().UTC()
+	defaultKind, err := coreepisodic.BuiltinDefaultKindVersion(ctx)
+	if err != nil {
+		return fmt.Errorf("mongo migration: load built-in default memory kind: %w", err)
+	}
+	defaultKind.CreatedAt = now
+	defaultKindDoc := schemaVersionToDoc(defaultKind)
+	if _, err := db.Collection("memory_kind_versions").UpdateOne(
+		ctx,
+		bson.M{"_id": defaultKind.Name},
+		bson.M{"$setOnInsert": defaultKindDoc},
+		options.UpdateOne().SetUpsert(true),
+	); err != nil {
+		return fmt.Errorf("mongo migration: seed default memory kind: %w", err)
+	}
 	if _, err := db.Collection("schema_metadata").UpdateOne(
 		ctx,
 		bson.M{"_id": "core_schema_version"},
-		bson.M{"$set": bson.M{"value": "1", "updated_at": time.Now()}},
+		bson.M{"$set": bson.M{"value": "2", "updated_at": time.Now()}},
 		options.UpdateOne().SetUpsert(true),
 	); err != nil {
 		return fmt.Errorf("mongo migration: failed to write schema metadata: %w", err)
 	}
+
 	if err := mongoCleanupOrphanConversationAncestry(ctx, db, 1000); err != nil {
 		log.Warn("MongoDB orphan conversation ancestry cleanup failed", "err", err)
 	}
@@ -241,7 +299,7 @@ func (m *mongoMigrator) Migrate(ctx context.Context) error {
 }
 
 func mongoRequireCurrentSchemaOrEmpty(ctx context.Context, db *mongo.Database) error {
-	const expectedVersion = "1"
+	const expectedVersion = "2"
 	names, err := db.ListCollectionNames(ctx, bson.M{})
 	if err != nil {
 		return fmt.Errorf("mongo migration: failed to inspect collections: %w", err)
@@ -273,7 +331,7 @@ func mongoRequireCurrentSchemaOrEmpty(ctx context.Context, db *mongo.Database) e
 	}
 	if !hasMetadata {
 		if hasCoreCollection {
-			return fmt.Errorf("mongo migration: existing incompatible MongoDB schema detected; reset the datastore before applying schema version %s", expectedVersion)
+			return fmt.Errorf("mongo migration: existing unversioned MongoDB schema detected; reset the datastore before starting schema version %s", expectedVersion)
 		}
 		return nil
 	}
@@ -283,13 +341,13 @@ func mongoRequireCurrentSchemaOrEmpty(ctx context.Context, db *mongo.Database) e
 	}
 	err = db.Collection("schema_metadata").FindOne(ctx, bson.M{"_id": "core_schema_version"}).Decode(&meta)
 	if errors.Is(err, mongo.ErrNoDocuments) {
-		return fmt.Errorf("mongo migration: schema metadata is missing core_schema_version; reset the datastore before applying schema version %s", expectedVersion)
+		return fmt.Errorf("mongo migration: schema metadata is missing core_schema_version; reset the datastore before starting schema version %s", expectedVersion)
 	}
 	if err != nil {
 		return fmt.Errorf("mongo migration: failed to read schema metadata: %w", err)
 	}
 	if meta.Value != expectedVersion {
-		return fmt.Errorf("mongo migration: unsupported MongoDB schema version %s; reset the datastore before applying schema version %s", meta.Value, expectedVersion)
+		return fmt.Errorf("mongo migration: unsupported MongoDB schema version %s; reset the datastore before starting schema version %s", meta.Value, expectedVersion)
 	}
 	return nil
 }

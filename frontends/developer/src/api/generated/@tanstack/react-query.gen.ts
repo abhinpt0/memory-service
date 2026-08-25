@@ -4,6 +4,9 @@ import { type InfiniteData, infiniteQueryOptions, queryOptions, type UseMutation
 
 import { client } from "../client.gen";
 import {
+  adminCancelMemoryKindMigration,
+  adminCreateMemoryKindMigration,
+  adminCreateMemoryKindVersion,
   adminDeleteAttachment,
   adminDeleteMemory,
   adminGetAttachment,
@@ -16,18 +19,20 @@ import {
   adminGetMemberships,
   adminGetMemory,
   adminGetMemoryIndexStatus,
-  adminGetMemoryPolicies,
+  adminGetMemoryKindMigration,
+  adminGetMemoryKindVersion,
   adminGetMemoryUsage,
   adminListAttachments,
   adminListChildConversations,
   adminListConversations,
   adminListForks,
   adminListMemories,
+  adminListMemoryKindMigrations,
+  adminListMemoryKindVersions,
   adminListMemoryNamespaces,
   adminListTopMemoryUsage,
   adminPutCheckpoint,
   adminPutMemory,
-  adminPutMemoryPolicies,
   adminSearchConversations,
   adminSearchMemories,
   adminTriggerMemoryIndex,
@@ -45,6 +50,15 @@ import {
   type Options,
 } from "../sdk.gen";
 import type {
+  AdminCancelMemoryKindMigrationData,
+  AdminCancelMemoryKindMigrationError,
+  AdminCancelMemoryKindMigrationResponse,
+  AdminCreateMemoryKindMigrationData,
+  AdminCreateMemoryKindMigrationError,
+  AdminCreateMemoryKindMigrationResponse,
+  AdminCreateMemoryKindVersionData,
+  AdminCreateMemoryKindVersionError,
+  AdminCreateMemoryKindVersionResponse,
   AdminDeleteAttachmentData,
   AdminDeleteAttachmentError,
   AdminDeleteAttachmentResponse,
@@ -80,9 +94,12 @@ import type {
   AdminGetMemoryIndexStatusData,
   AdminGetMemoryIndexStatusError,
   AdminGetMemoryIndexStatusResponse,
-  AdminGetMemoryPoliciesData,
-  AdminGetMemoryPoliciesError,
-  AdminGetMemoryPoliciesResponse,
+  AdminGetMemoryKindMigrationData,
+  AdminGetMemoryKindMigrationError,
+  AdminGetMemoryKindMigrationResponse,
+  AdminGetMemoryKindVersionData,
+  AdminGetMemoryKindVersionError,
+  AdminGetMemoryKindVersionResponse,
   AdminGetMemoryResponse,
   AdminGetMemoryUsageData,
   AdminGetMemoryUsageError,
@@ -102,6 +119,12 @@ import type {
   AdminListMemoriesData,
   AdminListMemoriesError,
   AdminListMemoriesResponse2,
+  AdminListMemoryKindMigrationsData,
+  AdminListMemoryKindMigrationsError,
+  AdminListMemoryKindMigrationsResponse,
+  AdminListMemoryKindVersionsData,
+  AdminListMemoryKindVersionsError,
+  AdminListMemoryKindVersionsResponse,
   AdminListMemoryNamespacesData,
   AdminListMemoryNamespacesError,
   AdminListMemoryNamespacesResponse2,
@@ -113,9 +136,6 @@ import type {
   AdminPutCheckpointResponse,
   AdminPutMemoryData,
   AdminPutMemoryError,
-  AdminPutMemoryPoliciesData,
-  AdminPutMemoryPoliciesError,
-  AdminPutMemoryPoliciesResponse,
   AdminPutMemoryResponse,
   AdminSearchConversationsData,
   AdminSearchConversationsError,
@@ -348,23 +368,21 @@ export const adminListMemoryNamespacesOptions = (options?: Options<AdminListMemo
     queryKey: adminListMemoryNamespacesQueryKey(options),
   });
 
-export const adminGetMemoryPoliciesQueryKey = (options?: Options<AdminGetMemoryPoliciesData>) =>
-  createQueryKey("adminGetMemoryPolicies", options);
+export const adminListMemoryKindVersionsQueryKey = (options?: Options<AdminListMemoryKindVersionsData>) =>
+  createQueryKey("adminListMemoryKindVersions", options);
 
 /**
- * Download active episodic memory policy bundle
- *
- * Returns the currently active OPA/Rego policy sources for episodic memory.
+ * List memory schema versions
  */
-export const adminGetMemoryPoliciesOptions = (options?: Options<AdminGetMemoryPoliciesData>) =>
+export const adminListMemoryKindVersionsOptions = (options?: Options<AdminListMemoryKindVersionsData>) =>
   queryOptions<
-    AdminGetMemoryPoliciesResponse,
-    AdminGetMemoryPoliciesError,
-    AdminGetMemoryPoliciesResponse,
-    ReturnType<typeof adminGetMemoryPoliciesQueryKey>
+    AdminListMemoryKindVersionsResponse,
+    AdminListMemoryKindVersionsError,
+    AdminListMemoryKindVersionsResponse,
+    ReturnType<typeof adminListMemoryKindVersionsQueryKey>
   >({
     queryFn: async ({ queryKey, signal }) => {
-      const { data } = await adminGetMemoryPolicies({
+      const { data } = await adminListMemoryKindVersions({
         ...options,
         ...queryKey[0],
         signal,
@@ -372,28 +390,31 @@ export const adminGetMemoryPoliciesOptions = (options?: Options<AdminGetMemoryPo
       });
       return data;
     },
-    queryKey: adminGetMemoryPoliciesQueryKey(options),
+    queryKey: adminListMemoryKindVersionsQueryKey(options),
   });
 
 /**
- * Upload episodic memory policy bundle
+ * Create an immutable memory schema version
  *
- * Replaces active episodic OPA/Rego policies and hot-reloads evaluation without restart.
+ * Creates a new immutable MemoryKindVersion. Each version defines how a memory
+ * value is projected into typed plaintext attributes for filtering and sorting.
+ * Creation is idempotent: repeating the request with identical source and types
+ * returns the existing resource. Any difference returns 409 Conflict.
  */
-export const adminPutMemoryPoliciesMutation = (
-  options?: Partial<Options<AdminPutMemoryPoliciesData>>,
+export const adminCreateMemoryKindVersionMutation = (
+  options?: Partial<Options<AdminCreateMemoryKindVersionData>>,
 ): UseMutationOptions<
-  AdminPutMemoryPoliciesResponse,
-  AdminPutMemoryPoliciesError,
-  Options<AdminPutMemoryPoliciesData>
+  AdminCreateMemoryKindVersionResponse,
+  AdminCreateMemoryKindVersionError,
+  Options<AdminCreateMemoryKindVersionData>
 > => {
   const mutationOptions: UseMutationOptions<
-    AdminPutMemoryPoliciesResponse,
-    AdminPutMemoryPoliciesError,
-    Options<AdminPutMemoryPoliciesData>
+    AdminCreateMemoryKindVersionResponse,
+    AdminCreateMemoryKindVersionError,
+    Options<AdminCreateMemoryKindVersionData>
   > = {
     mutationFn: async (fnOptions) => {
-      const { data } = await adminPutMemoryPolicies({
+      const { data } = await adminCreateMemoryKindVersion({
         ...options,
         ...fnOptions,
         throwOnError: true,
@@ -403,6 +424,144 @@ export const adminPutMemoryPoliciesMutation = (
   };
   return mutationOptions;
 };
+
+export const adminGetMemoryKindVersionQueryKey = (options: Options<AdminGetMemoryKindVersionData>) =>
+  createQueryKey("adminGetMemoryKindVersion", options);
+
+/**
+ * Get a memory schema version
+ *
+ * Returns the schema version including its projection Rego source. Administrator only.
+ */
+export const adminGetMemoryKindVersionOptions = (options: Options<AdminGetMemoryKindVersionData>) =>
+  queryOptions<
+    AdminGetMemoryKindVersionResponse,
+    AdminGetMemoryKindVersionError,
+    AdminGetMemoryKindVersionResponse,
+    ReturnType<typeof adminGetMemoryKindVersionQueryKey>
+  >({
+    queryFn: async ({ queryKey, signal }) => {
+      const { data } = await adminGetMemoryKindVersion({
+        ...options,
+        ...queryKey[0],
+        signal,
+        throwOnError: true,
+      });
+      return data;
+    },
+    queryKey: adminGetMemoryKindVersionQueryKey(options),
+  });
+
+export const adminListMemoryKindMigrationsQueryKey = (options?: Options<AdminListMemoryKindMigrationsData>) =>
+  createQueryKey("adminListMemoryKindMigrations", options);
+
+/**
+ * List memory schema migrations
+ */
+export const adminListMemoryKindMigrationsOptions = (options?: Options<AdminListMemoryKindMigrationsData>) =>
+  queryOptions<
+    AdminListMemoryKindMigrationsResponse,
+    AdminListMemoryKindMigrationsError,
+    AdminListMemoryKindMigrationsResponse,
+    ReturnType<typeof adminListMemoryKindMigrationsQueryKey>
+  >({
+    queryFn: async ({ queryKey, signal }) => {
+      const { data } = await adminListMemoryKindMigrations({
+        ...options,
+        ...queryKey[0],
+        signal,
+        throwOnError: true,
+      });
+      return data;
+    },
+    queryKey: adminListMemoryKindMigrationsQueryKey(options),
+  });
+
+/**
+ * Create a memory schema migration
+ *
+ * Starts an online background migration from source schema version to target.
+ * The target must be writable. Only one active migration per source version is
+ * allowed; a second request returns 409 Conflict.
+ */
+export const adminCreateMemoryKindMigrationMutation = (
+  options?: Partial<Options<AdminCreateMemoryKindMigrationData>>,
+): UseMutationOptions<
+  AdminCreateMemoryKindMigrationResponse,
+  AdminCreateMemoryKindMigrationError,
+  Options<AdminCreateMemoryKindMigrationData>
+> => {
+  const mutationOptions: UseMutationOptions<
+    AdminCreateMemoryKindMigrationResponse,
+    AdminCreateMemoryKindMigrationError,
+    Options<AdminCreateMemoryKindMigrationData>
+  > = {
+    mutationFn: async (fnOptions) => {
+      const { data } = await adminCreateMemoryKindMigration({
+        ...options,
+        ...fnOptions,
+        throwOnError: true,
+      });
+      return data;
+    },
+  };
+  return mutationOptions;
+};
+
+/**
+ * Request cancellation of a migration
+ *
+ * Marks a queued or running migration as cancel-requested. The worker stops
+ * after the current row operation. Already migrated rows are preserved.
+ */
+export const adminCancelMemoryKindMigrationMutation = (
+  options?: Partial<Options<AdminCancelMemoryKindMigrationData>>,
+): UseMutationOptions<
+  AdminCancelMemoryKindMigrationResponse,
+  AdminCancelMemoryKindMigrationError,
+  Options<AdminCancelMemoryKindMigrationData>
+> => {
+  const mutationOptions: UseMutationOptions<
+    AdminCancelMemoryKindMigrationResponse,
+    AdminCancelMemoryKindMigrationError,
+    Options<AdminCancelMemoryKindMigrationData>
+  > = {
+    mutationFn: async (fnOptions) => {
+      const { data } = await adminCancelMemoryKindMigration({
+        ...options,
+        ...fnOptions,
+        throwOnError: true,
+      });
+      return data;
+    },
+  };
+  return mutationOptions;
+};
+
+export const adminGetMemoryKindMigrationQueryKey = (options: Options<AdminGetMemoryKindMigrationData>) =>
+  createQueryKey("adminGetMemoryKindMigration", options);
+
+/**
+ * Get a memory schema migration
+ */
+export const adminGetMemoryKindMigrationOptions = (options: Options<AdminGetMemoryKindMigrationData>) =>
+  queryOptions<
+    AdminGetMemoryKindMigrationResponse,
+    AdminGetMemoryKindMigrationError,
+    AdminGetMemoryKindMigrationResponse,
+    ReturnType<typeof adminGetMemoryKindMigrationQueryKey>
+  >({
+    queryFn: async ({ queryKey, signal }) => {
+      const { data } = await adminGetMemoryKindMigration({
+        ...options,
+        ...queryKey[0],
+        signal,
+        throwOnError: true,
+      });
+      return data;
+    },
+    queryKey: adminGetMemoryKindMigrationQueryKey(options),
+  });
 
 /**
  * Force-delete an episodic memory by ID

@@ -842,11 +842,11 @@ func episodicFlags(cfg *config.Config) []cli.Flag {
 			Usage:       "Maximum namespace depth for episodic memory",
 		},
 		&cli.StringFlag{
-			Name:        "episodic-policy-dir",
-			Category:    "Episodic Memory:",
-			Sources:     cli.EnvVars("MEMORY_SERVICE_EPISODIC_POLICY_DIR"),
-			Destination: &cfg.EpisodicPolicyDir,
-			Usage:       "Directory containing OPA Rego policies for episodic memory (authz.rego, attributes.rego, filter.rego); defaults to built-in policies",
+			Name:        "policy-import-dir",
+			Category:    "Policy Imports:",
+			Sources:     cli.EnvVars("MEMORY_SERVICE_POLICY_IMPORT_DIR"),
+			Destination: &cfg.PolicyImportDir,
+			Usage:       "Directory containing policy definitions imported at startup, including optional authz.rego, filter.rego, and memory-kind manifests",
 		},
 		&cli.IntFlag{
 			Name:        "episodic-indexing-batch-size",

@@ -169,6 +169,7 @@ export type {
   ListUnindexedEntriesErrors,
   ListUnindexedEntriesResponse,
   ListUnindexedEntriesResponses,
+  MemoryAttributeSort,
   MemoryEventItem,
   MemoryItem,
   MemorySearchQuery,

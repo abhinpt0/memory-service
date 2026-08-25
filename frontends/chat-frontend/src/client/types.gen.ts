@@ -268,6 +268,11 @@ export type PutMemoryRequest = {
    * Optional optimistic concurrency revision expected for the active memory.
    */
   expected_revision?: number;
+  /**
+   * Optional exact canonical schema name ("profile/v2"). Omission always uses
+   * the fixed built-in "default/v1" kind.
+   */
+  kind?: string;
 };
 
 export type MemoryWriteResult = {
@@ -277,6 +282,10 @@ export type MemoryWriteResult = {
   attributes?: {
     [key: string]: unknown;
   };
+  /**
+   * Exact canonical schema name used for this write (e.g. "default/v1").
+   */
+  kind: string;
   createdAt?: string;
   expiresAt?: string;
   revision?: number;
@@ -303,6 +312,10 @@ export type MemoryItem = {
   attributes?: {
     [key: string]: unknown;
   };
+  /**
+   * Canonical schema name for this memory row (e.g. "default/v1"). Always non-empty.
+   */
+  kind: string;
   score?: number;
   /**
    * Attribution — purposes (or texts) of all queries that matched this item. Present only in multi-query responses.
@@ -356,10 +369,28 @@ export type SearchMemoriesRequest = {
   limit?: number;
   include_usage?: boolean;
   archived?: "exclude" | "include" | "only";
+  /**
+   * Optional schema selector. An exact canonical name searches that version only.
+   * A family name searches all versions in that family. Omission searches all schemas.
+   */
+  kind?: string;
+  sort?: MemoryAttributeSort;
 };
 
 export type SearchMemoriesResponse = {
   items?: Array<MemoryItem>;
+};
+
+/**
+ * One-field typed sort for attribute-only memory searches. Rejected when query or queries
+ * is present (semantic results are ordered by similarity score).
+ */
+export type MemoryAttributeSort = {
+  /**
+   * The attribute name to sort by. Must be declared in the selected schema(s).
+   */
+  field: string;
+  direction?: "asc" | "desc";
 };
 
 export type ListMemoryNamespacesResponse = {
@@ -378,6 +409,10 @@ export type MemoryEventItem = {
   attributes?: {
     [key: string]: unknown;
   };
+  /**
+   * Canonical schema name for this memory event (e.g. "default/v1"). Always non-empty.
+   */
+  memoryKind: string;
   expires_at?: string;
 };
 

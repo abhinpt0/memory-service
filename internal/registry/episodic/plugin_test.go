@@ -47,7 +47,7 @@ func TestNormalizeAttributeFiltersCombinesCallerAndPolicyConstraints(t *testing.
 }
 
 // TestNormalizeAttributeFiltersTemporalFields verifies that the temporal policy
-// attributes emitted by the cognition attributes.rego policy (observedAt,
+// attributes emitted by the cognition projection.rego policy (observedAt,
 // effectiveAt) are accepted as valid filter fields with range operators, making
 // them queryable through the search API.
 func TestNormalizeAttributeFiltersTemporalFields(t *testing.T) {
@@ -179,4 +179,42 @@ func TestNormalizeAttributeFiltersTemporalFields(t *testing.T) {
 			t.Errorf("op = %q, want %q", filter.Conditions[0].Op, AttributeFilterOpEq)
 		}
 	})
+}
+
+func TestValidateAttributeFilterFieldAcceptsValidNames(t *testing.T) {
+	valid := []string{
+		"sub",
+		"observedAt",
+		"score",
+		"my_field",
+		"field-name",
+		"field.name",
+		"a",
+		"field123",
+	}
+	for _, name := range valid {
+		t.Run(name, func(t *testing.T) {
+			if err := ValidateAttributeFilterField(name); err != nil {
+				t.Fatalf("ValidateAttributeFilterField(%q) returned unexpected error: %v", name, err)
+			}
+		})
+	}
+}
+
+func TestValidateAttributeFilterFieldRejectsInvalidNames(t *testing.T) {
+	invalid := []string{
+		"",
+		"$eq",
+		"a b",
+		"x'--",
+		"field\n",
+		"col; DROP",
+	}
+	for _, name := range invalid {
+		t.Run(name, func(t *testing.T) {
+			if err := ValidateAttributeFilterField(name); err == nil {
+				t.Fatalf("ValidateAttributeFilterField(%q) expected error, got nil", name)
+			}
+		})
+	}
 }

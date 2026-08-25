@@ -236,9 +236,9 @@ Conversation memberships do not authorize `/v1/memories`. Every user-facing epis
 
 The built-in policy restricts user-facing direct operations to the caller's own `["user", userID, ...]` namespace subtree and limits writes to eight index fields. Deployments can replace the policy bundle with:
 
-| Configuration                                                            | Default           | Purpose                                                                 |
-| ------------------------------------------------------------------------ | ----------------- | ----------------------------------------------------------------------- |
-| <Cfg p="--episodic-policy-dir" e="MEMORY_SERVICE_EPISODIC_POLICY_DIR" /> | Built-in policies | Directory containing `authz.rego`, `attributes.rego`, and `filter.rego` |
+| Configuration                                                        | Default         | Purpose                                                                                                                                                                                                                                                                                              |
+| -------------------------------------------------------------------- | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| <Cfg p="--policy-import-dir" e="MEMORY_SERVICE_POLICY_IMPORT_DIR" /> | Image-dependent | Shared policy import root containing optional global `authz.rego` and `filter.rego` files plus recursively discovered `.yaml` and `.yml` policy documents. Only documents with `kind: memory-kind` are imported as memory-kind versions. The distributed image uses `/etc/memory-service/policies/`. |
 
 The administrative memory routes bypass the normal user namespace boundary and enforce their documented admin or auditor role instead. See [Memories](/docs/concepts/memories/#access-control) for policy inputs and behavior.
 

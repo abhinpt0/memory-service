@@ -108,8 +108,6 @@ deploying and maintaining that data plane.
   malformed proxy CIDRs, dual plaintext/TLS TCP listeners, missing management-listener
   decisions, non-loopback management binds without an explicit acknowledgement, or a missing
   developer frontend base URL.
-- Stop all old replicas before the breaking release. Mixed old/new binaries are unsupported.
-- Take coordinated database and attachment-object backups, then reset the datastore and
-  attachment store before startup initializes schema version 1.
-- Rollback requires restoring both backups; the breaking release does not read pre-release
-  schemas, MSEH v1 fields, or MSEH v2 attachment streams.
+- Stop old replicas before adopting the version-2 datastore baseline; mixed schema-version-1 and version-2 binaries are unsupported.
+- This breaking baseline does not migrate version-1, unknown, or unversioned populated datastores. Back up any data that must be retained, then reset the datastore before startup. Attachment objects are separate and should be handled according to the deployment's retention plan.
+- Rollback requires restoring the coordinated pre-reset backups and the matching older binary.

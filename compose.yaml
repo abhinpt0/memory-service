@@ -156,8 +156,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    volumes:
-      - ./deploy/episodic-policies/cognition:/etc/memory-service/episodic-policy:ro
 
     ### <dev-mode> Uncomment below and Comment above to enable dev mode ###
     # image: ghcr.io/chirino/memory-service-dev:latest
@@ -201,8 +199,6 @@ services:
       MEMORY_SERVICE_API_KEYS_DEVELOPER_FRONTEND: developer-frontend-api-key
       MEMORY_SERVICE_API_KEYS_TURN_TRACES_PROCESSOR: turn-traces-processor-key
       MEMORY_SERVICE_API_KEYS_COGNITION_PROCESSOR: cognition-processor-key-123
-      MEMORY_SERVICE_EPISODIC_POLICY_DIR: /etc/memory-service/episodic-policy
-
       # ── CORS ───────────────────────────────────────────────────
       MEMORY_SERVICE_HOST: 0.0.0.0
       MEMORY_SERVICE_TLS: "false"

@@ -57,6 +57,7 @@ func startScenarioServer(s *cucumber.TestScenario, cfg *config.Config, db cucumb
 	s.DB = db
 	s.Extra = cucumberCloneExtras(s.Extra, extra)
 	s.Extra["grpcAddr"] = fmt.Sprintf("localhost:%d", srv.Running.Port)
+	s.Extra["config"] = cfg
 
 	return func(context.Context) error {
 		return srv.Shutdown(context.Background())

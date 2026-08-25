@@ -588,7 +588,7 @@ Feature: Quarkus cognition processor
 | --- | --- |
 | `docs/enhancements/099-quarkus-cognition-processor.md` | This enhancement doc |
 | `docs/memory-cognition.md` | Add a pointer to this enhancement under "Relationship to Existing Enhancement Work" |
-| `internal/episodic/policy.go` and configured `attributes.rego` examples | Extract safe cognition attributes from cognition memory values/index payloads |
+| `internal/episodic/policy.go` and configured `projection.rego` examples | Extract safe cognition attributes from cognition memory values/index payloads |
 | `java/pom.xml` | Register the new Quarkus cognition module in the reactor |
 | `java/quarkus/pom.xml` | Add the cognition processor module to the Quarkus reactor |
 | `java/quarkus/cognition-processor-quarkus/pom.xml` | New module with Quarkus + LangChain4j + memory-service-contracts dependencies |

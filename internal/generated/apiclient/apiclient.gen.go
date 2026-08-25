@@ -87,6 +87,24 @@ func (e Channel) Valid() bool {
 	}
 }
 
+// Defines values for MemoryAttributeSortDirection.
+const (
+	Asc  MemoryAttributeSortDirection = "asc"
+	Desc MemoryAttributeSortDirection = "desc"
+)
+
+// Valid indicates whether the value is a known member of the MemoryAttributeSortDirection enum.
+func (e MemoryAttributeSortDirection) Valid() bool {
+	switch e {
+	case Asc:
+		return true
+	case Desc:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for MemoryEventItemKind.
 const (
 	MemoryEventItemKindAdd     MemoryEventItemKind = "add"
@@ -894,6 +912,18 @@ type ListMemoryNamespacesResponse struct {
 	Namespaces *[][]string `json:"namespaces,omitempty"`
 }
 
+// MemoryAttributeSort One-field typed sort for attribute-only memory searches. Rejected when query or queries
+// is present (semantic results are ordered by similarity score).
+type MemoryAttributeSort struct {
+	Direction *MemoryAttributeSortDirection `json:"direction,omitempty"`
+
+	// Field The attribute name to sort by. Must be declared in the selected schema(s).
+	Field string `json:"field"`
+}
+
+// MemoryAttributeSortDirection defines model for MemoryAttributeSort.Direction.
+type MemoryAttributeSortDirection string
+
 // MemoryEventItem defines model for MemoryEventItem.
 type MemoryEventItem struct {
 	Attributes *map[string]interface{} `json:"attributes,omitempty"`
@@ -901,6 +931,9 @@ type MemoryEventItem struct {
 	Id         *openapi_types.UUID     `json:"id,omitempty"`
 	Key        *string                 `json:"key,omitempty"`
 	Kind       *MemoryEventItemKind    `json:"kind,omitempty"`
+
+	// MemoryKind Canonical schema name for this memory event (e.g. "default/v1"). Always non-empty.
+	MemoryKind string                  `json:"memoryKind"`
 	Namespace  *[]string               `json:"namespace,omitempty"`
 	OccurredAt *time.Time              `json:"occurred_at,omitempty"`
 	Value      *map[string]interface{} `json:"value,omitempty"`
@@ -918,6 +951,9 @@ type MemoryItem struct {
 	ExpiresAt  *time.Time              `json:"expiresAt,omitempty"`
 	Id         *openapi_types.UUID     `json:"id,omitempty"`
 	Key        *string                 `json:"key,omitempty"`
+
+	// Kind Canonical schema name for this memory row (e.g. "default/v1"). Always non-empty.
+	Kind string `json:"kind"`
 
 	// MatchedQueries Attribution — purposes (or texts) of all queries that matched this item. Present only in multi-query responses.
 	MatchedQueries *[]string               `json:"matchedQueries,omitempty"`
@@ -949,8 +985,11 @@ type MemoryWriteResult struct {
 	ExpiresAt  *time.Time              `json:"expiresAt,omitempty"`
 	Id         *openapi_types.UUID     `json:"id,omitempty"`
 	Key        *string                 `json:"key,omitempty"`
-	Namespace  *[]string               `json:"namespace,omitempty"`
-	Revision   *int64                  `json:"revision,omitempty"`
+
+	// Kind Exact canonical schema name used for this write (e.g. "default/v1").
+	Kind      string    `json:"kind"`
+	Namespace *[]string `json:"namespace,omitempty"`
+	Revision  *int64    `json:"revision,omitempty"`
 }
 
 // OwnershipTransfer Represents a pending ownership transfer request.
@@ -979,12 +1018,16 @@ type OwnershipTransfer struct {
 // PutMemoryRequest defines model for PutMemoryRequest.
 type PutMemoryRequest struct {
 	// ExpectedRevision Optional optimistic concurrency revision expected for the active memory.
-	ExpectedRevision *int64                 `json:"expected_revision,omitempty"`
-	Index            *map[string]string     `json:"index,omitempty"`
-	Key              string                 `json:"key"`
-	Namespace        []string               `json:"namespace"`
-	TtlSeconds       *int                   `json:"ttl_seconds,omitempty"`
-	Value            map[string]interface{} `json:"value"`
+	ExpectedRevision *int64             `json:"expected_revision,omitempty"`
+	Index            *map[string]string `json:"index,omitempty"`
+	Key              string             `json:"key"`
+
+	// Kind Optional exact canonical schema name ("profile/v2"). Omission always uses
+	// the fixed built-in "default/v1" kind.
+	Kind       *string                `json:"kind,omitempty"`
+	Namespace  []string               `json:"namespace"`
+	TtlSeconds *int                   `json:"ttl_seconds,omitempty"`
+	Value      map[string]interface{} `json:"value"`
 }
 
 // SearchConversationsRequest defines model for SearchConversationsRequest.
@@ -1049,6 +1092,10 @@ type SearchMemoriesRequest struct {
 	Filter       *map[string]interface{}        `json:"filter,omitempty"`
 	IncludeUsage *bool                          `json:"include_usage,omitempty"`
 
+	// Kind Optional schema selector. An exact canonical name searches that version only.
+	// A family name searches all versions in that family. Omission searches all schemas.
+	Kind *string `json:"kind,omitempty"`
+
 	// Limit Maximum number of results to return. The server may enforce a lower configured maximum.
 	Limit           *int     `json:"limit,omitempty"`
 	NamespacePrefix []string `json:"namespace_prefix"`
@@ -1061,6 +1108,10 @@ type SearchMemoriesRequest struct {
 
 	// Query Single semantic search string. Mutually exclusive with queries.
 	Query *string `json:"query,omitempty"`
+
+	// Sort One-field typed sort for attribute-only memory searches. Rejected when query or queries
+	// is present (semantic results are ordered by similarity score).
+	Sort *MemoryAttributeSort `json:"sort,omitempty"`
 }
 
 // SearchMemoriesRequestArchived defines model for SearchMemoriesRequest.Archived.

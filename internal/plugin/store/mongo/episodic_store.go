@@ -44,7 +44,12 @@ func init() {
 				return nil, fmt.Errorf("episodic mongo: connect: %w", err)
 			}
 			if err := client.Ping(ctx, nil); err != nil {
+				_ = client.Disconnect(ctx)
 				return nil, fmt.Errorf("episodic mongo: ping: %w", err)
+			}
+			if err := requireEpisodicTransactionTopology(ctx, client); err != nil {
+				_ = client.Disconnect(ctx)
+				return nil, err
 			}
 			s := &mongoEpisodicStore{
 				col:     client.Database("memory_service").Collection("memories"),
@@ -67,6 +72,24 @@ func init() {
 	})
 }
 
+func requireEpisodicTransactionTopology(ctx context.Context, client *mongo.Client) error {
+	var hello struct {
+		SetName string `bson:"setName"`
+		Msg     string `bson:"msg"`
+	}
+	if err := client.Database("admin").RunCommand(ctx, bson.D{{Key: "hello", Value: 1}}).Decode(&hello); err != nil {
+		return fmt.Errorf("episodic mongo: inspect topology: %w", err)
+	}
+	return validateEpisodicTransactionTopology(hello.SetName, hello.Msg)
+}
+
+func validateEpisodicTransactionTopology(setName, msg string) error {
+	if setName == "" && msg != "isdbgrid" {
+		return fmt.Errorf("episodic mongo requires a replica set or mongos because memory writes use transactions; standalone MongoDB is unsupported")
+	}
+	return nil
+}
+
 // mongoEpisodicStore implements registryepisodic.EpisodicStore using MongoDB.
 type mongoEpisodicStore struct {
 	col     *mongo.Collection
@@ -81,7 +104,18 @@ func (s *mongoEpisodicStore) InReadTx(ctx context.Context, fn func(context.Conte
 }
 
 func (s *mongoEpisodicStore) InWriteTx(ctx context.Context, fn func(context.Context) error) error {
-	return fn(txscope.WithIntent(ctx, txscope.IntentWrite))
+	if session := mongo.SessionFromContext(ctx); session != nil && session.TransactionRunning() {
+		return fn(txscope.WithIntent(ctx, txscope.IntentWrite))
+	}
+	session, err := s.col.Database().Client().StartSession()
+	if err != nil {
+		return fmt.Errorf("start MongoDB write transaction: %w", err)
+	}
+	defer session.EndSession(ctx)
+	_, err = session.WithTransaction(ctx, func(txCtx context.Context) (any, error) {
+		return nil, fn(txscope.WithIntent(txCtx, txscope.IntentWrite))
+	})
+	return err
 }
 
 // memoryDoc is the BSON document representation of a memory row.
@@ -99,6 +133,7 @@ type memoryDoc struct {
 	ArchivedAt       *time.Time             `bson:"archived_at,omitempty"`
 	DeletedReason    *int32                 `bson:"deleted_reason,omitempty"` // nil=active, 0=updated, 1=deleted, 2=expired
 	IndexedAt        *time.Time             `bson:"indexed_at,omitempty"`
+	MemoryKind       string                 `bson:"memory_kind"` // always non-empty
 }
 
 type memoryVectorDoc struct {
@@ -109,6 +144,8 @@ type memoryVectorDoc struct {
 	Archived         bool                   `bson:"archived"`
 	PolicyAttributes map[string]interface{} `bson:"policy_attributes,omitempty"`
 	Embedding        []float32              `bson:"embedding"`
+	MemoryKind       string                 `bson:"memory_kind"`     // canonical schema name; always non-empty after fresh write
+	MemoryRevision   int64                  `bson:"memory_revision"` // positive revision at time of indexing
 }
 
 type memoryUsageDoc struct {
@@ -155,6 +192,26 @@ func nsPrefixFilter(nsEncoded string) bson.M {
 		bson.M{"namespace": nsEncoded},
 		bson.M{"namespace": bson.M{"$regex": "^" + escaped + "\x1e"}},
 	}}
+}
+
+func mongoMemoryKindMatch(selector string) bson.M {
+	if selector == "" {
+		return bson.M{}
+	}
+	if strings.Contains(selector, "/") {
+		return bson.M{"memory_kind": selector}
+	}
+	return bson.M{"memory_kind": bson.M{"$regex": "^" + regexp.QuoteMeta(selector) + "/"}}
+}
+
+func mergeMongoFilters(filters ...bson.M) bson.M {
+	out := bson.M{}
+	for _, filter := range filters {
+		for key, value := range filter {
+			out[key] = value
+		}
+	}
+	return out
 }
 
 func matchesMemoryArchiveFilter(archivedAt *time.Time, deletedReason *int32, archived registryepisodic.ArchiveFilter) bool {
@@ -236,6 +293,25 @@ func (s *mongoEpisodicStore) PutMemory(ctx context.Context, req registryepisodic
 			return nil, registryepisodic.ErrMemoryRevisionConflict
 		}
 	}
+	if expected := req.AuthorizedPredecessor; expected != nil {
+		if !expected.Exists {
+			if hasActive {
+				return nil, registryepisodic.ErrMemoryRevisionConflict
+			}
+		} else if !hasActive || active.ID != expected.ID.String() || active.Revision != expected.Revision {
+			return nil, registryepisodic.ErrMemoryRevisionConflict
+		}
+	}
+	predecessor := req.AuthorizedPredecessor
+	if predecessor == nil && req.ExpectedRevision != nil {
+		activeID, parseErr := uuid.Parse(active.ID)
+		if parseErr != nil {
+			return nil, fmt.Errorf("load active memory id: %w", parseErr)
+		}
+		predecessor = &registryepisodic.MemoryPredecessorExpectation{
+			Exists: true, ID: activeID, Revision: active.Revision,
+		}
+	}
 	revision := int64(1)
 	if hasActive {
 		revision = active.Revision + 1
@@ -244,26 +320,40 @@ func (s *mongoEpisodicStore) PutMemory(ctx context.Context, req registryepisodic
 	// Soft-delete the current active row for (namespace, key).
 	// Set deleted_reason=0 (superseded by update) and reset indexed_at.
 	deletedReason0 := int32(0)
-	activeFilter := bson.M{
-		"namespace":   nsEncoded,
-		"key":         req.Key,
-		"archived_at": bson.M{"$exists": false},
-	}
-	updateResult, err := s.col.UpdateMany(ctx, activeFilter, bson.M{
-		"$set":   bson.M{"archived_at": now, "deleted_reason": deletedReason0},
-		"$unset": bson.M{"indexed_at": ""},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("archive previous memory: %w", err)
+	var archivedCount int64
+	if expected := predecessor; expected == nil || expected.Exists {
+		activeFilter := bson.M{"archived_at": bson.M{"$exists": false}}
+		if expected != nil {
+			activeFilter["_id"] = expected.ID.String()
+			activeFilter["revision"] = expected.Revision
+		} else {
+			activeFilter["namespace"] = nsEncoded
+			activeFilter["key"] = req.Key
+		}
+		updateResult, err := s.col.UpdateMany(ctx, activeFilter, bson.M{
+			"$set":   bson.M{"archived_at": now, "deleted_reason": deletedReason0},
+			"$inc":   bson.M{"revision": int64(1)},
+			"$unset": bson.M{"indexed_at": ""},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("archive previous memory: %w", err)
+		}
+		archivedCount = updateResult.ModifiedCount
+		if expected != nil && archivedCount != 1 {
+			return nil, registryepisodic.ErrMemoryRevisionConflict
+		}
 	}
 
 	// kind=0 (add) if no previous row existed; kind=1 (update) if one was archived.
 	var kind int32
-	if updateResult.ModifiedCount > 0 {
+	if archivedCount > 0 {
 		kind = 1
 	}
 
-	// Insert the new document.
+	// Insert the new document. MemoryKind must be non-empty.
+	if req.MemoryKind == "" {
+		return nil, fmt.Errorf("internal error: MemoryKind must be resolved before PutMemory")
+	}
 	doc := memoryDoc{
 		ID:               newID.String(),
 		Namespace:        nsEncoded,
@@ -275,9 +365,13 @@ func (s *mongoEpisodicStore) PutMemory(ctx context.Context, req registryepisodic
 		Revision:         revision,
 		CreatedAt:        now,
 		ExpiresAt:        expiresAt,
+		MemoryKind:       req.MemoryKind,
 		// IndexedAt omitted = pending vector sync
 	}
 	if _, err := s.col.InsertOne(ctx, doc); err != nil {
+		if mongo.IsDuplicateKeyError(err) {
+			return nil, registryepisodic.ErrMemoryRevisionConflict
+		}
 		return nil, fmt.Errorf("insert memory: %w", err)
 	}
 
@@ -286,10 +380,73 @@ func (s *mongoEpisodicStore) PutMemory(ctx context.Context, req registryepisodic
 		Namespace:  req.Namespace,
 		Key:        req.Key,
 		Attributes: req.PolicyAttributes,
+		MemoryKind: req.MemoryKind,
 		CreatedAt:  now,
 		ExpiresAt:  expiresAt,
 		Revision:   revision,
 	}, nil
+}
+
+// GetMemoryRowKind returns the canonical kind of the latest row matching the archive filter
+// without loading the encrypted value.
+func (s *mongoEpisodicStore) GetMemoryRowKind(ctx context.Context, namespace []string, key string, archived registryepisodic.ArchiveFilter) (string, bool, error) {
+	nsEncoded, err := encodeNS(namespace)
+	if err != nil {
+		return "", false, err
+	}
+	filter := bson.M{"namespace": nsEncoded, "key": key}
+	// Merge archive filter into the query.
+	for k, v := range mongoMemoryArchiveMatch(archived) {
+		filter[k] = v
+	}
+	// Project only memory_kind — no value_encrypted exposed before authz.
+	var result struct {
+		MemoryKind string `bson:"memory_kind"`
+	}
+	if err := s.col.FindOne(
+		ctx,
+		filter,
+		options.FindOne().
+			SetSort(bson.D{{Key: "created_at", Value: -1}, {Key: "_id", Value: -1}}).
+			SetProjection(bson.M{"memory_kind": 1}),
+	).Decode(&result); err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("get memory kind: %w", err)
+	}
+	if result.MemoryKind == "" {
+		return "", false, fmt.Errorf("internal error: memory row has empty memory_kind")
+	}
+	return result.MemoryKind, true, nil
+}
+
+func (s *mongoEpisodicStore) GetMemoryPredecessor(ctx context.Context, namespace []string, key string) (*registryepisodic.MemoryPredecessor, error) {
+	nsEncoded, err := encodeNS(namespace)
+	if err != nil {
+		return nil, err
+	}
+	var row struct {
+		ID         string `bson:"_id"`
+		Revision   int64  `bson:"revision"`
+		MemoryKind string `bson:"memory_kind"`
+	}
+	err = s.col.FindOne(ctx,
+		bson.M{"namespace": nsEncoded, "key": key, "archived_at": bson.M{"$exists": false}},
+		options.FindOne().SetSort(bson.D{{Key: "created_at", Value: -1}, {Key: "_id", Value: -1}}).
+			SetProjection(bson.M{"_id": 1, "revision": 1, "memory_kind": 1}),
+	).Decode(&row)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get memory predecessor: %w", err)
+	}
+	id, err := uuid.Parse(row.ID)
+	if err != nil {
+		return nil, fmt.Errorf("get memory predecessor: invalid memory id: %w", err)
+	}
+	return &registryepisodic.MemoryPredecessor{ID: id, Revision: row.Revision, MemoryKind: row.MemoryKind}, nil
 }
 
 // GetMemory retrieves the current memory for the given (namespace, key).
@@ -302,16 +459,13 @@ func (s *mongoEpisodicStore) GetMemory(ctx context.Context, namespace []string, 
 	var doc memoryDoc
 	if err := s.col.FindOne(
 		ctx,
-		bson.M{"namespace": nsEncoded, "key": key},
+		mergeMongoFilters(bson.M{"namespace": nsEncoded, "key": key}, mongoMemoryArchiveMatch(archived)),
 		options.FindOne().SetSort(bson.D{{Key: "created_at", Value: -1}, {Key: "_id", Value: -1}}),
 	).Decode(&doc); err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("get memory: %w", err)
-	}
-	if !matchesMemoryArchiveFilter(doc.ArchivedAt, doc.DeletedReason, archived) {
-		return nil, nil
 	}
 	return s.docToItem(doc, namespace)
 }
@@ -466,30 +620,71 @@ func (s *mongoEpisodicStore) ArchiveMemory(ctx context.Context, namespace []stri
 }
 
 // SearchMemories performs attribute-filter-only search within the namespace prefix.
-func (s *mongoEpisodicStore) SearchMemories(ctx context.Context, namespacePrefix []string, filter registryepisodic.AttributeFilter, limit int, archived registryepisodic.ArchiveFilter) ([]registryepisodic.MemoryItem, error) {
-	nsEncoded, err := encodeNS(namespacePrefix)
+func (s *mongoEpisodicStore) SearchMemories(ctx context.Context, sq registryepisodic.MemorySearchQuery) ([]registryepisodic.MemoryItem, error) {
+	nsEncoded, err := encodeNS(sq.NamespacePrefix)
 	if err != nil {
 		return nil, err
 	}
 
 	pipeline := mongo.Pipeline{
 		{{Key: "$match", Value: nsPrefixFilter(nsEncoded)}},
+		{{Key: "$match", Value: mongoMemoryArchiveMatch(sq.Archived)}},
 		{{Key: "$sort", Value: bson.D{{Key: "created_at", Value: -1}, {Key: "_id", Value: -1}}}},
 		{{Key: "$group", Value: bson.D{
 			{Key: "_id", Value: bson.D{{Key: "namespace", Value: "$namespace"}, {Key: "key", Value: "$key"}}},
 			{Key: "doc", Value: bson.D{{Key: "$first", Value: "$$ROOT"}}},
 		}}},
 		{{Key: "$replaceRoot", Value: bson.D{{Key: "newRoot", Value: "$doc"}}}},
-		{{Key: "$match", Value: mongoMemoryArchiveMatch(archived)}},
 	}
-	if !filter.Empty() {
+	if !sq.Filter.Empty() {
 		match := bson.M{}
-		applyMongoFilter(match, filter)
+		applyMongoFilter(match, sq.Filter)
 		pipeline = append(pipeline, bson.D{{Key: "$match", Value: match}})
 	}
+	if sq.MemoryKind != "" {
+		if strings.Contains(sq.MemoryKind, "/") {
+			pipeline = append(pipeline, bson.D{{Key: "$match", Value: bson.M{"memory_kind": sq.MemoryKind}}})
+		} else {
+			pipeline = append(pipeline, bson.D{{Key: "$match", Value: bson.M{
+				"memory_kind": bson.M{"$regex": "^" + regexp.QuoteMeta(sq.MemoryKind) + "/"},
+			}}})
+		}
+	}
+	if sq.Sort != nil {
+		sortVal := 1
+		if strings.ToLower(sq.Sort.Direction) == "desc" {
+			sortVal = -1
+		}
+		attrField := "policy_attributes." + sq.Sort.Field
+		// MongoDB places documents with a missing sort field FIRST on ascending sort,
+		// which is the opposite of SQL behaviour (missing last for ASC, missing first for DESC).
+		// Inject a synthetic field via $addFields+$ifNull: MaxKey sentinel for ASC (sorts after
+		// all real values), MinKey sentinel for DESC (sorts before all real values in descending
+		// order, i.e. last in the result set).
+		syntheticField := "__sort_" + sq.Sort.Field
+		var missingSentinel interface{}
+		if sortVal == 1 {
+			missingSentinel = bson.MaxKey{}
+		} else {
+			missingSentinel = bson.MinKey{}
+		}
+		pipeline = append(pipeline,
+			bson.D{{Key: "$addFields", Value: bson.M{
+				syntheticField: bson.M{"$ifNull": bson.A{"$" + attrField, missingSentinel}},
+			}}},
+			bson.D{{Key: "$sort", Value: bson.D{
+				{Key: syntheticField, Value: sortVal},
+				{Key: "created_at", Value: -1},
+				{Key: "_id", Value: -1},
+			}}},
+		)
+	} else {
+		pipeline = append(pipeline,
+			bson.D{{Key: "$sort", Value: bson.D{{Key: "created_at", Value: -1}, {Key: "_id", Value: -1}}}},
+		)
+	}
 	pipeline = append(pipeline,
-		bson.D{{Key: "$sort", Value: bson.D{{Key: "created_at", Value: -1}, {Key: "_id", Value: -1}}}},
-		bson.D{{Key: "$limit", Value: int64(limit)}},
+		bson.D{{Key: "$limit", Value: int64(sq.Limit)}},
 	)
 
 	cursor, err := s.col.Aggregate(ctx, pipeline)
@@ -526,6 +721,7 @@ func (s *mongoEpisodicStore) ListNamespaces(ctx context.Context, req registryepi
 		}
 		pipeline = append(pipeline, bson.D{{Key: "$match", Value: nsPrefixFilter(nsEncoded)}})
 	}
+	pipeline = append(pipeline, bson.D{{Key: "$match", Value: mongoMemoryArchiveMatch(req.Archived)}})
 	pipeline = append(pipeline,
 		bson.D{{Key: "$sort", Value: bson.D{{Key: "created_at", Value: -1}, {Key: "_id", Value: -1}}}},
 		bson.D{{Key: "$group", Value: bson.D{
@@ -533,9 +729,16 @@ func (s *mongoEpisodicStore) ListNamespaces(ctx context.Context, req registryepi
 			{Key: "doc", Value: bson.D{{Key: "$first", Value: "$$ROOT"}}},
 		}}},
 		bson.D{{Key: "$replaceRoot", Value: bson.D{{Key: "newRoot", Value: "$doc"}}}},
-		bson.D{{Key: "$match", Value: mongoMemoryArchiveMatch(req.Archived)}},
-		bson.D{{Key: "$project", Value: bson.M{"namespace": 1}}},
 	)
+	if req.MemoryKind != "" {
+		pipeline = append(pipeline, bson.D{{Key: "$match", Value: mongoMemoryKindMatch(req.MemoryKind)}})
+	}
+	if !req.Filter.Empty() {
+		filter := bson.M{}
+		applyMongoFilter(filter, req.Filter)
+		pipeline = append(pipeline, bson.D{{Key: "$match", Value: filter}})
+	}
+	pipeline = append(pipeline, bson.D{{Key: "$project", Value: bson.M{"namespace": 1}}})
 
 	cursor, err := s.col.Aggregate(ctx, pipeline)
 	if err != nil {
@@ -608,6 +811,8 @@ func (s *mongoEpisodicStore) FindMemoriesPendingIndexing(ctx context.Context, li
 			IndexedContent:   doc.IndexedContent,
 			ArchivedAt:       doc.ArchivedAt,
 			DeletedReason:    doc.DeletedReason,
+			MemoryKind:       doc.MemoryKind,
+			Revision:         doc.Revision,
 		}
 		id, err := uuid.Parse(doc.ID)
 		if err != nil {
@@ -636,6 +841,9 @@ func (s *mongoEpisodicStore) UpsertMemoryVectors(ctx context.Context, items []re
 		return s.qdrant.UpsertMemoryVectors(ctx, items)
 	}
 	for _, item := range items {
+		if item.MemoryKind == "" {
+			return fmt.Errorf("internal error: MemoryVectorUpsert.MemoryKind must be non-empty for memory %s", item.MemoryID)
+		}
 		docID := item.MemoryID.String() + ":" + item.FieldName
 		filter := bson.M{"memory_id": item.MemoryID.String(), "field_name": item.FieldName}
 		update := bson.M{
@@ -647,6 +855,8 @@ func (s *mongoEpisodicStore) UpsertMemoryVectors(ctx context.Context, items []re
 				Archived:         item.Archived,
 				PolicyAttributes: item.PolicyAttributes,
 				Embedding:        item.Embedding,
+				MemoryKind:       item.MemoryKind,
+				MemoryRevision:   item.MemoryRevision,
 			},
 		}
 		if _, err := s.vectors.UpdateOne(ctx, filter, update, options.UpdateOne().SetUpsert(true)); err != nil {
@@ -666,9 +876,9 @@ func (s *mongoEpisodicStore) DeleteMemoryVectors(ctx context.Context, memoryID u
 }
 
 // SearchMemoryVectors searches memory_vectors using in-memory cosine scoring.
-func (s *mongoEpisodicStore) SearchMemoryVectors(ctx context.Context, namespacePrefix string, embedding []float32, filter registryepisodic.AttributeFilter, limit int, archived registryepisodic.ArchiveFilter) ([]registryepisodic.MemoryVectorSearch, error) {
+func (s *mongoEpisodicStore) SearchMemoryVectors(ctx context.Context, namespacePrefix string, embedding []float32, filter registryepisodic.AttributeFilter, memoryKind string, limit int, archived registryepisodic.ArchiveFilter) ([]registryepisodic.MemoryVectorSearch, error) {
 	if s.qdrant != nil {
-		return s.qdrant.SearchMemoryVectors(ctx, namespacePrefix, embedding, filter, limit, archived)
+		return s.qdrant.SearchMemoryVectors(ctx, namespacePrefix, embedding, filter, memoryKind, limit, archived)
 	}
 	if limit <= 0 || len(embedding) == 0 {
 		return nil, nil
@@ -678,6 +888,9 @@ func (s *mongoEpisodicStore) SearchMemoryVectors(ctx context.Context, namespaceP
 		f = nsPrefixFilter(namespacePrefix)
 	}
 	applyMongoFilter(f, filter)
+	for key, value := range mongoMemoryKindMatch(memoryKind) {
+		f[key] = value
+	}
 	switch archived {
 	case registryepisodic.ArchiveFilterOnly:
 		f["archived"] = true
@@ -691,11 +904,21 @@ func (s *mongoEpisodicStore) SearchMemoryVectors(ctx context.Context, namespaceP
 	}
 	defer cursor.Close(ctx)
 
-	bestByID := make(map[uuid.UUID]float64)
+	type bestEntry struct {
+		score          float64
+		memoryRevision int64
+		memoryKind     string
+	}
+	bestByID := make(map[uuid.UUID]bestEntry)
 	for cursor.Next(ctx) {
 		var doc memoryVectorDoc
 		if err := cursor.Decode(&doc); err != nil {
 			log.Warn("Decode memory vector", "err", err)
+			continue
+		}
+		if doc.MemoryKind == "" {
+			// Fresh-only invariant: skip vectors without a memory_kind.
+			log.Warn("Skipping memory vector with empty memory_kind", "memory_id", doc.MemoryID)
 			continue
 		}
 		memID, err := uuid.Parse(doc.MemoryID)
@@ -703,8 +926,8 @@ func (s *mongoEpisodicStore) SearchMemoryVectors(ctx context.Context, namespaceP
 			continue
 		}
 		score := cosineSimilarity(embedding, doc.Embedding)
-		if prev, exists := bestByID[memID]; !exists || score > prev {
-			bestByID[memID] = score
+		if prev, exists := bestByID[memID]; !exists || score > prev.score {
+			bestByID[memID] = bestEntry{score: score, memoryRevision: doc.MemoryRevision, memoryKind: doc.MemoryKind}
 		}
 	}
 	if err := cursor.Err(); err != nil {
@@ -712,10 +935,12 @@ func (s *mongoEpisodicStore) SearchMemoryVectors(ctx context.Context, namespaceP
 	}
 
 	results := make([]registryepisodic.MemoryVectorSearch, 0, len(bestByID))
-	for id, score := range bestByID {
+	for id, entry := range bestByID {
 		results = append(results, registryepisodic.MemoryVectorSearch{
-			MemoryID: id,
-			Score:    score,
+			MemoryID:       id,
+			Score:          entry.score,
+			MemoryRevision: entry.memoryRevision,
+			MemoryKind:     entry.memoryKind,
 		})
 	}
 	sort.Slice(results, func(i, j int) bool {
@@ -776,6 +1001,7 @@ func (s *mongoEpisodicStore) ExpireMemories(ctx context.Context) (int64, error) 
 	}
 	result, err := s.col.UpdateMany(ctx, filter, bson.M{
 		"$set":   bson.M{"archived_at": now, "deleted_reason": deletedReason2},
+		"$inc":   bson.M{"revision": int64(1)},
 		"$unset": bson.M{"indexed_at": ""},
 	})
 	if err != nil {
@@ -860,7 +1086,10 @@ func (s *mongoEpisodicStore) TombstoneDeletedMemories(ctx context.Context, limit
 	}
 	result, err := s.col.UpdateMany(ctx,
 		bson.M{"_id": bson.M{"$in": ids}},
-		bson.M{"$unset": bson.M{"value_encrypted": ""}},
+		bson.M{
+			"$unset": bson.M{"value_encrypted": "", "policy_attributes": "", "indexed_at": ""},
+			"$inc":   bson.M{"revision": int64(1)},
+		},
 	)
 	if err != nil {
 		return 0, fmt.Errorf("tombstone deleted memories: %w", err)
@@ -968,6 +1197,7 @@ func (s *mongoEpisodicStore) ListMemoryEvents(ctx context.Context, req registrye
 		valueEnc   []byte
 		attrs      map[string]interface{}
 		expiresAt  *time.Time
+		memoryKind string
 	}
 
 	fetchN := limit + 1
@@ -1025,6 +1255,8 @@ func (s *mongoEpisodicStore) ListMemoryEvents(ctx context.Context, req registrye
 		if nsPrefixF != nil {
 			writeFilter = mergeBsonM(writeFilter, nsPrefixF)
 		}
+		writeFilter = mergeBsonM(writeFilter, mongoMemoryKindMatch(req.MemoryKind))
+		applyMongoFilter(writeFilter, req.Filter)
 		writeCursor, err := s.col.Find(ctx, writeFilter,
 			options.Find().
 				SetSort(bson.D{{Key: "created_at", Value: 1}, {Key: "_id", Value: 1}}).
@@ -1052,6 +1284,7 @@ func (s *mongoEpisodicStore) ListMemoryEvents(ctx context.Context, req registrye
 				id: id, namespace: ns, key: doc.Key, kind: kindStr,
 				occurredAt: doc.CreatedAt, valueEnc: doc.ValueEncrypted,
 				attrs: doc.PolicyAttributes, expiresAt: doc.ExpiresAt,
+				memoryKind: doc.MemoryKind,
 			})
 		}
 		if err := writeCursor.Err(); err != nil {
@@ -1068,6 +1301,8 @@ func (s *mongoEpisodicStore) ListMemoryEvents(ctx context.Context, req registrye
 		if nsPrefixF != nil {
 			updateFilter = mergeBsonM(updateFilter, nsPrefixF)
 		}
+		updateFilter = mergeBsonM(updateFilter, mongoMemoryKindMatch(req.MemoryKind))
+		applyMongoFilter(updateFilter, req.Filter)
 		updateCursor, err := s.col.Find(ctx, updateFilter,
 			options.Find().
 				SetSort(bson.D{{Key: "archived_at", Value: 1}, {Key: "_id", Value: 1}}).
@@ -1091,6 +1326,7 @@ func (s *mongoEpisodicStore) ListMemoryEvents(ctx context.Context, req registrye
 				id: id, namespace: ns, key: doc.Key, kind: registryepisodic.EventKindUpdate,
 				occurredAt: *doc.ArchivedAt, valueEnc: doc.ValueEncrypted,
 				attrs: doc.PolicyAttributes, expiresAt: doc.ExpiresAt,
+				memoryKind: doc.MemoryKind,
 			})
 		}
 		if err := updateCursor.Err(); err != nil {
@@ -1106,6 +1342,8 @@ func (s *mongoEpisodicStore) ListMemoryEvents(ctx context.Context, req registrye
 		if nsPrefixF != nil {
 			expiredFilter = mergeBsonM(expiredFilter, nsPrefixF)
 		}
+		expiredFilter = mergeBsonM(expiredFilter, mongoMemoryKindMatch(req.MemoryKind))
+		applyMongoFilter(expiredFilter, req.Filter)
 		expiredCursor, err := s.col.Find(ctx, expiredFilter,
 			options.Find().
 				SetSort(bson.D{{Key: "archived_at", Value: 1}, {Key: "_id", Value: 1}}).
@@ -1128,6 +1366,7 @@ func (s *mongoEpisodicStore) ListMemoryEvents(ctx context.Context, req registrye
 			allItems = append(allItems, eventItem{
 				id: id, namespace: ns, key: doc.Key, kind: registryepisodic.EventKindExpired,
 				occurredAt: *doc.ArchivedAt, expiresAt: doc.ExpiresAt,
+				memoryKind: doc.MemoryKind,
 			})
 		}
 		if err := expiredCursor.Err(); err != nil {
@@ -1178,6 +1417,7 @@ func (s *mongoEpisodicStore) ListMemoryEvents(ctx context.Context, req registrye
 			Value:      value,
 			Attributes: attrs,
 			ExpiresAt:  item.expiresAt,
+			MemoryKind: item.memoryKind,
 		})
 	}
 
@@ -1226,7 +1466,7 @@ func (s *mongoEpisodicStore) AdminListMemories(ctx context.Context, query regist
 		limit = 50
 	}
 	limit = config.ClampPageSize(ctx, limit)
-	pipeline, err := adminLatestMemoryPipeline(query.NamespacePrefix)
+	pipeline, err := adminLatestMemoryPipeline(query.NamespacePrefix, query.Archived)
 	if err != nil {
 		return registryepisodic.AdminMemoryPage{}, err
 	}
@@ -1259,6 +1499,22 @@ func (s *mongoEpisodicStore) AdminListMemories(ctx context.Context, query regist
 	if len(match) > 0 {
 		pipeline = append(pipeline, bson.D{{Key: "$match", Value: match}})
 	}
+	if query.MemoryKind != "" {
+		if strings.Contains(query.MemoryKind, "/") {
+			pipeline = append(pipeline, bson.D{{Key: "$match", Value: bson.M{"memory_kind": query.MemoryKind}}})
+		} else {
+			pipeline = append(pipeline, bson.D{{Key: "$match", Value: bson.M{
+				"memory_kind": bson.M{"$regex": "^" + regexp.QuoteMeta(query.MemoryKind) + "/"},
+			}}})
+		}
+	}
+	if !query.Filter.Empty() {
+		filterMatch := bson.M{}
+		applyMongoFilter(filterMatch, query.Filter)
+		if len(filterMatch) > 0 {
+			pipeline = append(pipeline, bson.D{{Key: "$match", Value: filterMatch}})
+		}
+	}
 	pipeline = append(pipeline,
 		bson.D{{Key: "$sort", Value: bson.D{{Key: "created_at", Value: -1}, {Key: "_id", Value: -1}}}},
 		bson.D{{Key: "$limit", Value: int64(limit + 1)}},
@@ -1282,7 +1538,7 @@ func (s *mongoEpisodicStore) AdminSearchMemories(ctx context.Context, query regi
 		limit = 10
 	}
 	limit = config.ClampPageSize(ctx, limit)
-	pipeline, err := adminLatestMemoryPipeline(query.NamespacePrefix)
+	pipeline, err := adminLatestMemoryPipeline(query.NamespacePrefix, query.Archived)
 	if err != nil {
 		return nil, err
 	}
@@ -1297,10 +1553,46 @@ func (s *mongoEpisodicStore) AdminSearchMemories(ctx context.Context, query regi
 	if len(match) > 0 {
 		pipeline = append(pipeline, bson.D{{Key: "$match", Value: match}})
 	}
-	pipeline = append(pipeline,
-		bson.D{{Key: "$sort", Value: bson.D{{Key: "created_at", Value: -1}, {Key: "_id", Value: -1}}}},
-		bson.D{{Key: "$limit", Value: int64(limit)}},
-	)
+	if query.MemoryKind != "" {
+		if strings.Contains(query.MemoryKind, "/") {
+			pipeline = append(pipeline, bson.D{{Key: "$match", Value: bson.M{"memory_kind": query.MemoryKind}}})
+		} else {
+			pipeline = append(pipeline, bson.D{{Key: "$match", Value: bson.M{
+				"memory_kind": bson.M{"$regex": "^" + regexp.QuoteMeta(query.MemoryKind) + "/"},
+			}}})
+		}
+	}
+	if query.Sort != nil {
+		sortVal := 1
+		if strings.ToLower(query.Sort.Direction) == "desc" {
+			sortVal = -1
+		}
+		attrField := "policy_attributes." + query.Sort.Field
+		// Apply the same missing-last sentinel pattern as SearchMemories.
+		syntheticField := "__sort_" + query.Sort.Field
+		var missingSentinel interface{}
+		if sortVal == 1 {
+			missingSentinel = bson.MaxKey{}
+		} else {
+			missingSentinel = bson.MinKey{}
+		}
+		pipeline = append(pipeline,
+			bson.D{{Key: "$addFields", Value: bson.M{
+				syntheticField: bson.M{"$ifNull": bson.A{"$" + attrField, missingSentinel}},
+			}}},
+			bson.D{{Key: "$sort", Value: bson.D{
+				{Key: syntheticField, Value: sortVal},
+				{Key: "created_at", Value: -1},
+				{Key: "_id", Value: -1},
+			}}},
+			bson.D{{Key: "$limit", Value: int64(limit)}},
+		)
+	} else {
+		pipeline = append(pipeline,
+			bson.D{{Key: "$sort", Value: bson.D{{Key: "created_at", Value: -1}, {Key: "_id", Value: -1}}}},
+			bson.D{{Key: "$limit", Value: int64(limit)}},
+		)
+	}
 	cursor, err := s.col.Aggregate(ctx, pipeline)
 	if err != nil {
 		return nil, fmt.Errorf("admin search memories: %w", err)
@@ -1355,7 +1647,7 @@ func (s *mongoEpisodicStore) AdminListNamespaces(ctx context.Context, query regi
 	return page, nil
 }
 
-func adminLatestMemoryPipeline(namespacePrefix []string) (mongo.Pipeline, error) {
+func adminLatestMemoryPipeline(namespacePrefix []string, archived registryepisodic.ArchiveFilter) (mongo.Pipeline, error) {
 	pipeline := mongo.Pipeline{}
 	if len(namespacePrefix) > 0 {
 		nsEncoded, err := encodeNS(namespacePrefix)
@@ -1364,6 +1656,7 @@ func adminLatestMemoryPipeline(namespacePrefix []string) (mongo.Pipeline, error)
 		}
 		pipeline = append(pipeline, bson.D{{Key: "$match", Value: nsPrefixFilter(nsEncoded)}})
 	}
+	pipeline = append(pipeline, bson.D{{Key: "$match", Value: mongoMemoryArchiveMatch(archived)}})
 	pipeline = append(pipeline,
 		bson.D{{Key: "$sort", Value: bson.D{{Key: "created_at", Value: -1}, {Key: "_id", Value: -1}}}},
 		bson.D{{Key: "$group", Value: bson.D{
@@ -1456,6 +1749,7 @@ func (s *mongoEpisodicStore) docToItem(doc memoryDoc, namespace []string) (*regi
 		Key:        doc.Key,
 		Value:      value,
 		Attributes: doc.PolicyAttributes,
+		MemoryKind: doc.MemoryKind,
 		CreatedAt:  doc.CreatedAt,
 		ExpiresAt:  doc.ExpiresAt,
 		ArchivedAt: doc.ArchivedAt,

@@ -6,6 +6,34 @@ Feature: Episodic Memory gRPC API
   Background:
     Given I am authenticated as user "alice"
 
+  @memory-kind-regression
+  Scenario: Admin kind list omits Rego while get includes it via gRPC
+    Given I am authenticated as admin user "alice"
+    When I send gRPC request "AdminMemoryKindService/CreateMemoryKindVersion" with body:
+    """
+    name: "grpc-listing/v1"
+    attributes { key: "tag" value: "string" }
+    projection_rego: "package memories.attributes\n# grpc-listing-secret-marker\nattributes := {\"tag\": \"safe\"}"
+    justification: "verify list redaction"
+    """
+    Then the gRPC response should not have an error
+    When I send gRPC request "AdminMemoryKindService/ListMemoryKindVersions" with body:
+    """
+    family: "grpc-listing"
+    justification: "verify list redaction"
+    """
+    Then the gRPC response should not have an error
+    And the gRPC response field "items" should have size 1
+    And the gRPC response should not contain field "items[0].projectionRego"
+    When I send gRPC request "AdminMemoryKindService/GetMemoryKindVersion" with body:
+    """
+    family: "grpc-listing"
+    version: "v1"
+    justification: "verify single get"
+    """
+    Then the gRPC response should not have an error
+    And the gRPC response field "projectionRego" should not be null
+
   Scenario: Put and get a memory via gRPC
     When I send gRPC request "MemoriesService/PutMemory" with body:
     """
@@ -22,6 +50,7 @@ Feature: Episodic Memory gRPC API
     """
     Then the gRPC response should not have an error
     And set "memoryId" to the gRPC response field "id"
+    And the gRPC response field "kind" should be "default/v1"
     And the gRPC response field "namespace[0]" should be "user"
     And the gRPC response field "namespace[1]" should be "alice"
     And the gRPC response field "key" should be "theme"
@@ -35,6 +64,7 @@ Feature: Episodic Memory gRPC API
     Then the gRPC response should not have an error
     And the gRPC response field "id" should be "${memoryId}"
     And the gRPC response field "value.color" should be "dark"
+    And the gRPC response field "kind" should be "default/v1"
 
   Scenario: List memory lifecycle events via gRPC
     Given I send gRPC request "MemoriesService/PutMemory" with body:
@@ -63,6 +93,7 @@ Feature: Episodic Memory gRPC API
     And the gRPC response field "events[0].kind" should be "add"
     And the gRPC response field "events[0].key" should be "seen"
     And the gRPC response field "events[0].value.enabled" should be true
+    And the gRPC response field "events[0].memoryKind" should be "default/v1"
 
   Scenario: Put replaces an existing value
     Given I send gRPC request "MemoriesService/PutMemory" with body:
@@ -163,6 +194,69 @@ Feature: Episodic Memory gRPC API
     Then the gRPC response should not have an error
     And the gRPC response field "archived" should be true
 
+  @memory-kind-regression
+  Scenario: Archived-only and include select matching kind and content via gRPC
+    Given I am authenticated as admin user "alice"
+    And I call POST "/admin/v1/memory-kinds" with body:
+    """
+    {"name":"grpc-archive-select/v1","attributes":{},"projectionRego":"package memories.attributes\nattributes := {}"}
+    """
+    And the response status should be 200
+    And I call POST "/admin/v1/memory-kinds" with body:
+    """
+    {"name":"grpc-archive-select/v2","attributes":{},"projectionRego":"package memories.attributes\nattributes := {}"}
+    """
+    And the response status should be 200
+    And I am authenticated as user "alice"
+    And I send gRPC request "MemoriesService/PutMemory" with body:
+    """
+    namespace: "user"
+    namespace: "alice"
+    namespace: "grpc-archive-select"
+    key: "same-key"
+    value { fields { key: "version" value { string_value: "a" } } }
+    kind: "grpc-archive-select/v1"
+    """
+    And I send gRPC request "MemoriesService/UpdateMemory" with body:
+    """
+    namespace: "user"
+    namespace: "alice"
+    namespace: "grpc-archive-select"
+    key: "same-key"
+    archived: true
+    """
+    And I send gRPC request "MemoriesService/PutMemory" with body:
+    """
+    namespace: "user"
+    namespace: "alice"
+    namespace: "grpc-archive-select"
+    key: "same-key"
+    value { fields { key: "version" value { string_value: "b" } } }
+    kind: "grpc-archive-select/v2"
+    """
+    When I send gRPC request "MemoriesService/GetMemory" with body:
+    """
+    namespace: "user"
+    namespace: "alice"
+    namespace: "grpc-archive-select"
+    key: "same-key"
+    archived: ARCHIVE_FILTER_ONLY
+    """
+    Then the gRPC response should not have an error
+    And the gRPC response field "kind" should be "grpc-archive-select/v1"
+    And the gRPC response field "value.version" should be "a"
+    When I send gRPC request "MemoriesService/GetMemory" with body:
+    """
+    namespace: "user"
+    namespace: "alice"
+    namespace: "grpc-archive-select"
+    key: "same-key"
+    archived: ARCHIVE_FILTER_INCLUDE
+    """
+    Then the gRPC response should not have an error
+    And the gRPC response field "kind" should be "grpc-archive-select/v2"
+    And the gRPC response field "value.version" should be "b"
+
   Scenario: Search memories under prefix
     Given I send gRPC request "MemoriesService/PutMemory" with body:
     """
@@ -199,6 +293,7 @@ Feature: Episodic Memory gRPC API
     """
     Then the gRPC response should not have an error
     And the gRPC response field "items" should have size 2
+    And the gRPC response field "items[0].kind" should be "default/v1"
 
   Scenario: SearchMemories supports enhanced attribute filters via gRPC
     Given I am authenticated as user "alice"
@@ -686,3 +781,34 @@ Feature: Episodic Memory gRPC API
     Then the gRPC response should not have an error
     And the gRPC response field "items" should have size 1
     And the gRPC response field "items[0].key" should be "grpc-bob-note"
+
+  Scenario: gRPC non-admin can search a custom kind without reserved projection attributes
+    Given I am authenticated as admin user "alice"
+    And I call POST "/admin/v1/memory-kinds?justification=custom-kind-search" with body:
+    """
+    {"name":"grpctagonly/v1","attributes":{"tag":"string"},"projectionRego":"package memories.attributes\nattributes := {\"tag\": input.value.tag}"}
+    """
+    And the response status should be 200
+    And I am authenticated as user "bob"
+    And I send gRPC request "MemoriesService/PutMemory" with body:
+    """
+    namespace: "user"
+    namespace: "bob"
+    namespace: "grpc-tag-only"
+    key: "grpc-custom-visible"
+    kind: "grpctagonly/v1"
+    value { fields { key: "tag" value { string_value: "find-me" } } }
+    """
+    And the gRPC response should not have an error
+    When I send gRPC request "MemoriesService/SearchMemories" with body:
+    """
+    namespace_prefix: "user"
+    namespace_prefix: "bob"
+    namespace_prefix: "grpc-tag-only"
+    kind: "grpctagonly/v1"
+    filter { fields { key: "tag" value { string_value: "find-me" } } }
+    limit: 10
+    """
+    Then the gRPC response should not have an error
+    And the gRPC response field "items" should have size 1
+    And the gRPC response field "items[0].key" should be "grpc-custom-visible"

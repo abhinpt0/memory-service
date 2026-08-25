@@ -2227,8 +2227,16 @@ components:
           type: integer
           format: int64
           description: Optional optimistic concurrency revision expected for the active memory.
+        kind:
+          type: string
+          description: |-
+            Optional exact canonical schema name ("profile/v2"). Omission always uses
+            the fixed built-in "default/v1" kind.
+          pattern: '^[a-z][a-z0-9-]{0,62}/[a-z][a-z0-9-]{0,62}$'
+          nullable: true
     MemoryWriteResult:
       type: object
+      required: [kind]
       properties:
         id:
           type: string
@@ -2242,6 +2250,9 @@ components:
         attributes:
           type: object
           additionalProperties: true
+        kind:
+          type: string
+          description: Exact canonical schema name used for this write (e.g. "default/v1").
         createdAt:
           type: string
           format: date-time
@@ -2265,6 +2276,7 @@ components:
           description: Human-readable label used as attribution in matchedQueries. Defaults to text when absent.
     MemoryItem:
       type: object
+      required: [kind]
       properties:
         id:
           type: string
@@ -2281,6 +2293,9 @@ components:
         attributes:
           type: object
           additionalProperties: true
+        kind:
+          type: string
+          description: Canonical schema name for this memory row (e.g. "default/v1"). Always non-empty.
         score:
           type: number
           format: double
@@ -2358,6 +2373,14 @@ components:
           type: string
           enum: [exclude, include, only]
           default: exclude
+        kind:
+          type: string
+          description: |-
+            Optional schema selector. An exact canonical name searches that version only.
+            A family name searches all versions in that family. Omission searches all schemas.
+          nullable: true
+        sort:
+          $ref: '#/components/schemas/MemoryAttributeSort'
     SearchMemoriesResponse:
       type: object
       properties:
@@ -2365,6 +2388,21 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/MemoryItem'
+    MemoryAttributeSort:
+      type: object
+      description: |-
+        One-field typed sort for attribute-only memory searches. Rejected when query or queries
+        is present (semantic results are ordered by similarity score).
+      required:
+        - field
+      properties:
+        field:
+          type: string
+          description: The attribute name to sort by. Must be declared in the selected schema(s).
+        direction:
+          type: string
+          enum: [asc, desc]
+          default: asc
     ListMemoryNamespacesResponse:
       type: object
       properties:
@@ -2376,6 +2414,7 @@ components:
               type: string
     MemoryEventItem:
       type: object
+      required: [memoryKind]
       properties:
         id:
           type: string
@@ -2400,6 +2439,9 @@ components:
           type: object
           additionalProperties: true
           nullable: true
+        memoryKind:
+          type: string
+          description: Canonical schema name for this memory event (e.g. "default/v1"). Always non-empty.
         expires_at:
           type: string
           format: date-time

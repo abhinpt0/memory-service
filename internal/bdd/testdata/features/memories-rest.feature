@@ -16,6 +16,7 @@ Feature: Episodic Memory REST API
     }
     """
     Then the response status should be 200
+    And the response body field "kind" should be "default/v1"
     And the response body should contain json:
     """
     {
@@ -26,6 +27,7 @@ Feature: Episodic Memory REST API
     And set "memoryId" to the json response field "id"
     When I call GET "/v1/memories?ns=user&ns=alice&ns=prefs&key=theme"
     Then the response status should be 200
+    And the response body field "kind" should be "default/v1"
     And the response body should contain json:
     """
     {
@@ -130,6 +132,7 @@ Feature: Episodic Memory REST API
     """
     Then the response status should be 200
     And the response body "items" should have at least 2 items
+    And the response body field "items[0].kind" should be "default/v1"
 
   Scenario: Multi-query memory search validates request shape
     When I call POST "/v1/memories/search" with body:
@@ -455,6 +458,28 @@ Feature: Episodic Memory REST API
     Then the response status should be 200
     And the response body "items" should have at most 0 items
 
+  Scenario: Admin role does not broaden public memory search
+    Given I am authenticated as user "bob"
+    And I call PUT "/v1/memories" with body:
+    """
+    {
+      "namespace": ["user", "bob", "admin-public-search"],
+      "key": "bob-private-note",
+      "value": { "text": "Bob private note" }
+    }
+    """
+    And the response status should be 200
+    And I am authenticated as admin user "alice"
+    When I call POST "/v1/memories/search" with body:
+    """
+    {
+      "namespace_prefix": ["user", "bob", "admin-public-search"],
+      "limit": 10
+    }
+    """
+    Then the response status should be 200
+    And the response body "items" should have at most 0 items
+
   Scenario: Admin index status endpoint returns pending count
     When I am authenticated as admin user "alice"
     And I call GET "/admin/v1/memory-index/status"
@@ -560,23 +585,6 @@ Feature: Episodic Memory REST API
     """
     { "events": [] }
     """
-
-  Scenario: Admin can download and upload episodic policy bundle
-    When I am authenticated as admin user "alice"
-    And I call GET "/admin/v1/memory-policies"
-    Then the response status should be 200
-    And the response body field "authz" should not be null
-    And the response body field "attributes" should not be null
-    And the response body field "filter" should not be null
-    When I call PUT "/admin/v1/memory-policies" with body:
-    """
-    {
-      "authz": "package memories.authz\ndefault decision = {\"allow\": false, \"reason\": \"access denied\"}\ndecision = {\"allow\": true} if { input.namespace[0] == \"user\"; input.namespace[1] == input.context.user_id }",
-      "attributes": "package memories.attributes\ndefault attributes = {}\nattributes = {\"namespace\": input.namespace[0], \"sub\": input.namespace[1]} if { count(input.namespace) >= 2 }",
-      "filter": "package memories.filter\nuser_prefix := [\"user\", input.context.user_id]\nis_admin if { \"admin\" in input.context.jwt_claims.roles }\nnamespace_prefix := input.namespace_prefix if { is_admin }\nnamespace_prefix := user_prefix if { not is_admin }\nattribute_filter := {} if { is_admin }\nattribute_filter := {\"namespace\": \"user\", \"sub\": input.context.user_id} if { not is_admin }"
-    }
-    """
-    Then the response status should be 204
 
   Scenario: Auditor can list and get memories across users
     Given I am authenticated as user "alice"

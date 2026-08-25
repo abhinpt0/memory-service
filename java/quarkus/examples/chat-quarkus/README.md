@@ -32,7 +32,7 @@ task dev:memory-service
 
 When enabled, the first turn of a conversation fetches `profile_context/latest` from `["user", <userId>, "cognition.v1", "profile_context"]`. Every turn also searches the user's cognition namespace and injects only close semantic matches; `profile_context` and `profile_input` memories are excluded from ad hoc injection.
 
-The repo-root `compose.yaml` mounts `deploy/episodic-policies/cognition` into Memory Service and sets `MEMORY_SERVICE_EPISODIC_POLICY_DIR` so cognition-safe attributes such as `memoryKind` and confidence buckets can be extracted for search.
+The distributed Memory Service image copies `deploy/episodic-policies/` to `/etc/memory-service/policies/`, keeps the cognition bundle in its `cognition/` subdirectory, and sets the parent directory as `MEMORY_SERVICE_POLICY_IMPORT_DIR` by default. At startup, `cognition/cognition.yaml` is identified by `kind: memory-kind` and imports the cognition projection as an immutable database-backed memory kind. Writers must select its exact canonical name, `cognition/v1`; omitted kinds use the fixed built-in `default/v1`. Repeated identical imports are harmless; changing the same canonical version is logged as a conflict and does not overwrite stored content. The repo-root `compose.yaml` relies on this packaged import directory without additional policy configuration.
 
 The frontend can display and edit profile context inputs through narrow chat-app endpoints:
 

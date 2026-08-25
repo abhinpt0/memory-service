@@ -2537,6 +2537,337 @@ var AdminMemoriesService_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
+	AdminMemoryKindService_CreateMemoryKindVersion_FullMethodName   = "/memory.v1.AdminMemoryKindService/CreateMemoryKindVersion"
+	AdminMemoryKindService_ListMemoryKindVersions_FullMethodName    = "/memory.v1.AdminMemoryKindService/ListMemoryKindVersions"
+	AdminMemoryKindService_GetMemoryKindVersion_FullMethodName      = "/memory.v1.AdminMemoryKindService/GetMemoryKindVersion"
+	AdminMemoryKindService_CreateMemoryKindMigration_FullMethodName = "/memory.v1.AdminMemoryKindService/CreateMemoryKindMigration"
+	AdminMemoryKindService_ListMemoryKindMigrations_FullMethodName  = "/memory.v1.AdminMemoryKindService/ListMemoryKindMigrations"
+	AdminMemoryKindService_GetMemoryKindMigration_FullMethodName    = "/memory.v1.AdminMemoryKindService/GetMemoryKindMigration"
+	AdminMemoryKindService_CancelMemoryKindMigration_FullMethodName = "/memory.v1.AdminMemoryKindService/CancelMemoryKindMigration"
+)
+
+// AdminMemoryKindServiceClient is the client API for AdminMemoryKindService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+type AdminMemoryKindServiceClient interface {
+	CreateMemoryKindVersion(ctx context.Context, in *CreateMemoryKindVersionRequest, opts ...grpc.CallOption) (*MemoryKindVersion, error)
+	ListMemoryKindVersions(ctx context.Context, in *ListMemoryKindVersionsRequest, opts ...grpc.CallOption) (*ListMemoryKindVersionsResponse, error)
+	GetMemoryKindVersion(ctx context.Context, in *GetMemoryKindVersionRequest, opts ...grpc.CallOption) (*MemoryKindVersion, error)
+	CreateMemoryKindMigration(ctx context.Context, in *CreateMemoryKindMigrationRequest, opts ...grpc.CallOption) (*MemoryKindMigration, error)
+	ListMemoryKindMigrations(ctx context.Context, in *ListMemoryKindMigrationsRequest, opts ...grpc.CallOption) (*ListMemoryKindMigrationsResponse, error)
+	GetMemoryKindMigration(ctx context.Context, in *GetMemoryKindMigrationRequest, opts ...grpc.CallOption) (*MemoryKindMigration, error)
+	CancelMemoryKindMigration(ctx context.Context, in *CancelMemoryKindMigrationRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+}
+
+type adminMemoryKindServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewAdminMemoryKindServiceClient(cc grpc.ClientConnInterface) AdminMemoryKindServiceClient {
+	return &adminMemoryKindServiceClient{cc}
+}
+
+func (c *adminMemoryKindServiceClient) CreateMemoryKindVersion(ctx context.Context, in *CreateMemoryKindVersionRequest, opts ...grpc.CallOption) (*MemoryKindVersion, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MemoryKindVersion)
+	err := c.cc.Invoke(ctx, AdminMemoryKindService_CreateMemoryKindVersion_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *adminMemoryKindServiceClient) ListMemoryKindVersions(ctx context.Context, in *ListMemoryKindVersionsRequest, opts ...grpc.CallOption) (*ListMemoryKindVersionsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListMemoryKindVersionsResponse)
+	err := c.cc.Invoke(ctx, AdminMemoryKindService_ListMemoryKindVersions_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *adminMemoryKindServiceClient) GetMemoryKindVersion(ctx context.Context, in *GetMemoryKindVersionRequest, opts ...grpc.CallOption) (*MemoryKindVersion, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MemoryKindVersion)
+	err := c.cc.Invoke(ctx, AdminMemoryKindService_GetMemoryKindVersion_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *adminMemoryKindServiceClient) CreateMemoryKindMigration(ctx context.Context, in *CreateMemoryKindMigrationRequest, opts ...grpc.CallOption) (*MemoryKindMigration, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MemoryKindMigration)
+	err := c.cc.Invoke(ctx, AdminMemoryKindService_CreateMemoryKindMigration_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *adminMemoryKindServiceClient) ListMemoryKindMigrations(ctx context.Context, in *ListMemoryKindMigrationsRequest, opts ...grpc.CallOption) (*ListMemoryKindMigrationsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListMemoryKindMigrationsResponse)
+	err := c.cc.Invoke(ctx, AdminMemoryKindService_ListMemoryKindMigrations_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *adminMemoryKindServiceClient) GetMemoryKindMigration(ctx context.Context, in *GetMemoryKindMigrationRequest, opts ...grpc.CallOption) (*MemoryKindMigration, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MemoryKindMigration)
+	err := c.cc.Invoke(ctx, AdminMemoryKindService_GetMemoryKindMigration_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *adminMemoryKindServiceClient) CancelMemoryKindMigration(ctx context.Context, in *CancelMemoryKindMigrationRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, AdminMemoryKindService_CancelMemoryKindMigration_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// AdminMemoryKindServiceServer is the server API for AdminMemoryKindService service.
+// All implementations must embed UnimplementedAdminMemoryKindServiceServer
+// for forward compatibility.
+type AdminMemoryKindServiceServer interface {
+	CreateMemoryKindVersion(context.Context, *CreateMemoryKindVersionRequest) (*MemoryKindVersion, error)
+	ListMemoryKindVersions(context.Context, *ListMemoryKindVersionsRequest) (*ListMemoryKindVersionsResponse, error)
+	GetMemoryKindVersion(context.Context, *GetMemoryKindVersionRequest) (*MemoryKindVersion, error)
+	CreateMemoryKindMigration(context.Context, *CreateMemoryKindMigrationRequest) (*MemoryKindMigration, error)
+	ListMemoryKindMigrations(context.Context, *ListMemoryKindMigrationsRequest) (*ListMemoryKindMigrationsResponse, error)
+	GetMemoryKindMigration(context.Context, *GetMemoryKindMigrationRequest) (*MemoryKindMigration, error)
+	CancelMemoryKindMigration(context.Context, *CancelMemoryKindMigrationRequest) (*emptypb.Empty, error)
+	mustEmbedUnimplementedAdminMemoryKindServiceServer()
+}
+
+// UnimplementedAdminMemoryKindServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedAdminMemoryKindServiceServer struct{}
+
+func (UnimplementedAdminMemoryKindServiceServer) CreateMemoryKindVersion(context.Context, *CreateMemoryKindVersionRequest) (*MemoryKindVersion, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateMemoryKindVersion not implemented")
+}
+func (UnimplementedAdminMemoryKindServiceServer) ListMemoryKindVersions(context.Context, *ListMemoryKindVersionsRequest) (*ListMemoryKindVersionsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListMemoryKindVersions not implemented")
+}
+func (UnimplementedAdminMemoryKindServiceServer) GetMemoryKindVersion(context.Context, *GetMemoryKindVersionRequest) (*MemoryKindVersion, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetMemoryKindVersion not implemented")
+}
+func (UnimplementedAdminMemoryKindServiceServer) CreateMemoryKindMigration(context.Context, *CreateMemoryKindMigrationRequest) (*MemoryKindMigration, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateMemoryKindMigration not implemented")
+}
+func (UnimplementedAdminMemoryKindServiceServer) ListMemoryKindMigrations(context.Context, *ListMemoryKindMigrationsRequest) (*ListMemoryKindMigrationsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListMemoryKindMigrations not implemented")
+}
+func (UnimplementedAdminMemoryKindServiceServer) GetMemoryKindMigration(context.Context, *GetMemoryKindMigrationRequest) (*MemoryKindMigration, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetMemoryKindMigration not implemented")
+}
+func (UnimplementedAdminMemoryKindServiceServer) CancelMemoryKindMigration(context.Context, *CancelMemoryKindMigrationRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method CancelMemoryKindMigration not implemented")
+}
+func (UnimplementedAdminMemoryKindServiceServer) mustEmbedUnimplementedAdminMemoryKindServiceServer() {
+}
+func (UnimplementedAdminMemoryKindServiceServer) testEmbeddedByValue() {}
+
+// UnsafeAdminMemoryKindServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to AdminMemoryKindServiceServer will
+// result in compilation errors.
+type UnsafeAdminMemoryKindServiceServer interface {
+	mustEmbedUnimplementedAdminMemoryKindServiceServer()
+}
+
+func RegisterAdminMemoryKindServiceServer(s grpc.ServiceRegistrar, srv AdminMemoryKindServiceServer) {
+	// If the following call panics, it indicates UnimplementedAdminMemoryKindServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&AdminMemoryKindService_ServiceDesc, srv)
+}
+
+func _AdminMemoryKindService_CreateMemoryKindVersion_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateMemoryKindVersionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AdminMemoryKindServiceServer).CreateMemoryKindVersion(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AdminMemoryKindService_CreateMemoryKindVersion_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AdminMemoryKindServiceServer).CreateMemoryKindVersion(ctx, req.(*CreateMemoryKindVersionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AdminMemoryKindService_ListMemoryKindVersions_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListMemoryKindVersionsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AdminMemoryKindServiceServer).ListMemoryKindVersions(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AdminMemoryKindService_ListMemoryKindVersions_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AdminMemoryKindServiceServer).ListMemoryKindVersions(ctx, req.(*ListMemoryKindVersionsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AdminMemoryKindService_GetMemoryKindVersion_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetMemoryKindVersionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AdminMemoryKindServiceServer).GetMemoryKindVersion(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AdminMemoryKindService_GetMemoryKindVersion_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AdminMemoryKindServiceServer).GetMemoryKindVersion(ctx, req.(*GetMemoryKindVersionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AdminMemoryKindService_CreateMemoryKindMigration_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateMemoryKindMigrationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AdminMemoryKindServiceServer).CreateMemoryKindMigration(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AdminMemoryKindService_CreateMemoryKindMigration_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AdminMemoryKindServiceServer).CreateMemoryKindMigration(ctx, req.(*CreateMemoryKindMigrationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AdminMemoryKindService_ListMemoryKindMigrations_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListMemoryKindMigrationsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AdminMemoryKindServiceServer).ListMemoryKindMigrations(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AdminMemoryKindService_ListMemoryKindMigrations_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AdminMemoryKindServiceServer).ListMemoryKindMigrations(ctx, req.(*ListMemoryKindMigrationsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AdminMemoryKindService_GetMemoryKindMigration_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetMemoryKindMigrationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AdminMemoryKindServiceServer).GetMemoryKindMigration(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AdminMemoryKindService_GetMemoryKindMigration_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AdminMemoryKindServiceServer).GetMemoryKindMigration(ctx, req.(*GetMemoryKindMigrationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AdminMemoryKindService_CancelMemoryKindMigration_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CancelMemoryKindMigrationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AdminMemoryKindServiceServer).CancelMemoryKindMigration(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AdminMemoryKindService_CancelMemoryKindMigration_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AdminMemoryKindServiceServer).CancelMemoryKindMigration(ctx, req.(*CancelMemoryKindMigrationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// AdminMemoryKindService_ServiceDesc is the grpc.ServiceDesc for AdminMemoryKindService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var AdminMemoryKindService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "memory.v1.AdminMemoryKindService",
+	HandlerType: (*AdminMemoryKindServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "CreateMemoryKindVersion",
+			Handler:    _AdminMemoryKindService_CreateMemoryKindVersion_Handler,
+		},
+		{
+			MethodName: "ListMemoryKindVersions",
+			Handler:    _AdminMemoryKindService_ListMemoryKindVersions_Handler,
+		},
+		{
+			MethodName: "GetMemoryKindVersion",
+			Handler:    _AdminMemoryKindService_GetMemoryKindVersion_Handler,
+		},
+		{
+			MethodName: "CreateMemoryKindMigration",
+			Handler:    _AdminMemoryKindService_CreateMemoryKindMigration_Handler,
+		},
+		{
+			MethodName: "ListMemoryKindMigrations",
+			Handler:    _AdminMemoryKindService_ListMemoryKindMigrations_Handler,
+		},
+		{
+			MethodName: "GetMemoryKindMigration",
+			Handler:    _AdminMemoryKindService_GetMemoryKindMigration_Handler,
+		},
+		{
+			MethodName: "CancelMemoryKindMigration",
+			Handler:    _AdminMemoryKindService_CancelMemoryKindMigration_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "memory/v1/memory_service.proto",
+}
+
+const (
 	ResponseRecorderService_Record_FullMethodName          = "/memory.v1.ResponseRecorderService/Record"
 	ResponseRecorderService_Replay_FullMethodName          = "/memory.v1.ResponseRecorderService/Replay"
 	ResponseRecorderService_Cancel_FullMethodName          = "/memory.v1.ResponseRecorderService/Cancel"

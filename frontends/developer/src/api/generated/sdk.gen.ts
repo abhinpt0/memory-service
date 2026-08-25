@@ -10,6 +10,15 @@ import type {
 } from "./client";
 import { client } from "./client.gen";
 import type {
+  AdminCancelMemoryKindMigrationData,
+  AdminCancelMemoryKindMigrationErrors,
+  AdminCancelMemoryKindMigrationResponses,
+  AdminCreateMemoryKindMigrationData,
+  AdminCreateMemoryKindMigrationErrors,
+  AdminCreateMemoryKindMigrationResponses,
+  AdminCreateMemoryKindVersionData,
+  AdminCreateMemoryKindVersionErrors,
+  AdminCreateMemoryKindVersionResponses,
   AdminDeleteAttachmentData,
   AdminDeleteAttachmentErrors,
   AdminDeleteAttachmentResponses,
@@ -49,9 +58,12 @@ import type {
   AdminGetMemoryIndexStatusData,
   AdminGetMemoryIndexStatusErrors,
   AdminGetMemoryIndexStatusResponses,
-  AdminGetMemoryPoliciesData,
-  AdminGetMemoryPoliciesErrors,
-  AdminGetMemoryPoliciesResponses,
+  AdminGetMemoryKindMigrationData,
+  AdminGetMemoryKindMigrationErrors,
+  AdminGetMemoryKindMigrationResponses,
+  AdminGetMemoryKindVersionData,
+  AdminGetMemoryKindVersionErrors,
+  AdminGetMemoryKindVersionResponses,
   AdminGetMemoryResponses,
   AdminGetMemoryUsageData,
   AdminGetMemoryUsageErrors,
@@ -71,6 +83,12 @@ import type {
   AdminListMemoriesData,
   AdminListMemoriesErrors,
   AdminListMemoriesResponses,
+  AdminListMemoryKindMigrationsData,
+  AdminListMemoryKindMigrationsErrors,
+  AdminListMemoryKindMigrationsResponses,
+  AdminListMemoryKindVersionsData,
+  AdminListMemoryKindVersionsErrors,
+  AdminListMemoryKindVersionsResponses,
   AdminListMemoryNamespacesData,
   AdminListMemoryNamespacesErrors,
   AdminListMemoryNamespacesResponses,
@@ -82,9 +100,6 @@ import type {
   AdminPutCheckpointResponses,
   AdminPutMemoryData,
   AdminPutMemoryErrors,
-  AdminPutMemoryPoliciesData,
-  AdminPutMemoryPoliciesErrors,
-  AdminPutMemoryPoliciesResponses,
   AdminPutMemoryResponses,
   AdminSearchConversationsData,
   AdminSearchConversationsErrors,
@@ -258,42 +273,153 @@ export const adminListMemoryNamespaces = <ThrowOnError extends boolean = false>(
   });
 
 /**
- * Download active episodic memory policy bundle
- *
- * Returns the currently active OPA/Rego policy sources for episodic memory.
+ * List memory schema versions
  */
-export const adminGetMemoryPolicies = <ThrowOnError extends boolean = false>(
-  options?: Options<AdminGetMemoryPoliciesData, ThrowOnError>,
-): RequestResult<AdminGetMemoryPoliciesResponses, AdminGetMemoryPoliciesErrors, ThrowOnError> =>
-  (options?.client ?? client).get<AdminGetMemoryPoliciesResponses, AdminGetMemoryPoliciesErrors, ThrowOnError>({
+export const adminListMemoryKindVersions = <ThrowOnError extends boolean = false>(
+  options?: Options<AdminListMemoryKindVersionsData, ThrowOnError>,
+): RequestResult<AdminListMemoryKindVersionsResponses, AdminListMemoryKindVersionsErrors, ThrowOnError> =>
+  (options?.client ?? client).get<
+    AdminListMemoryKindVersionsResponses,
+    AdminListMemoryKindVersionsErrors,
+    ThrowOnError
+  >({
     security: [
       { scheme: "bearer", type: "http" },
       { name: "X-API-Key", type: "apiKey" },
     ],
-    url: "/admin/v1/memory-policies",
+    url: "/admin/v1/memory-kinds",
     ...options,
   });
 
 /**
- * Upload episodic memory policy bundle
+ * Create an immutable memory schema version
  *
- * Replaces active episodic OPA/Rego policies and hot-reloads evaluation without restart.
+ * Creates a new immutable MemoryKindVersion. Each version defines how a memory
+ * value is projected into typed plaintext attributes for filtering and sorting.
+ * Creation is idempotent: repeating the request with identical source and types
+ * returns the existing resource. Any difference returns 409 Conflict.
  */
-export const adminPutMemoryPolicies = <ThrowOnError extends boolean = false>(
-  options: Options<AdminPutMemoryPoliciesData, ThrowOnError>,
-): RequestResult<AdminPutMemoryPoliciesResponses, AdminPutMemoryPoliciesErrors, ThrowOnError> =>
-  (options.client ?? client).put<AdminPutMemoryPoliciesResponses, AdminPutMemoryPoliciesErrors, ThrowOnError>({
+export const adminCreateMemoryKindVersion = <ThrowOnError extends boolean = false>(
+  options: Options<AdminCreateMemoryKindVersionData, ThrowOnError>,
+): RequestResult<AdminCreateMemoryKindVersionResponses, AdminCreateMemoryKindVersionErrors, ThrowOnError> =>
+  (options.client ?? client).post<
+    AdminCreateMemoryKindVersionResponses,
+    AdminCreateMemoryKindVersionErrors,
+    ThrowOnError
+  >({
     security: [
       { scheme: "bearer", type: "http" },
       { name: "X-API-Key", type: "apiKey" },
     ],
-    url: "/admin/v1/memory-policies",
+    url: "/admin/v1/memory-kinds",
     ...options,
     headers: {
       "Content-Type": "application/json",
       ...options.headers,
     },
   });
+
+/**
+ * Get a memory schema version
+ *
+ * Returns the schema version including its projection Rego source. Administrator only.
+ */
+export const adminGetMemoryKindVersion = <ThrowOnError extends boolean = false>(
+  options: Options<AdminGetMemoryKindVersionData, ThrowOnError>,
+): RequestResult<AdminGetMemoryKindVersionResponses, AdminGetMemoryKindVersionErrors, ThrowOnError> =>
+  (options.client ?? client).get<AdminGetMemoryKindVersionResponses, AdminGetMemoryKindVersionErrors, ThrowOnError>({
+    security: [
+      { scheme: "bearer", type: "http" },
+      { name: "X-API-Key", type: "apiKey" },
+    ],
+    url: "/admin/v1/memory-kinds/{family}/{version}",
+    ...options,
+  });
+
+/**
+ * List memory schema migrations
+ */
+export const adminListMemoryKindMigrations = <ThrowOnError extends boolean = false>(
+  options?: Options<AdminListMemoryKindMigrationsData, ThrowOnError>,
+): RequestResult<AdminListMemoryKindMigrationsResponses, AdminListMemoryKindMigrationsErrors, ThrowOnError> =>
+  (options?.client ?? client).get<
+    AdminListMemoryKindMigrationsResponses,
+    AdminListMemoryKindMigrationsErrors,
+    ThrowOnError
+  >({
+    security: [
+      { scheme: "bearer", type: "http" },
+      { name: "X-API-Key", type: "apiKey" },
+    ],
+    url: "/admin/v1/memory-kind-migrations",
+    ...options,
+  });
+
+/**
+ * Create a memory schema migration
+ *
+ * Starts an online background migration from source schema version to target.
+ * The target must be writable. Only one active migration per source version is
+ * allowed; a second request returns 409 Conflict.
+ */
+export const adminCreateMemoryKindMigration = <ThrowOnError extends boolean = false>(
+  options: Options<AdminCreateMemoryKindMigrationData, ThrowOnError>,
+): RequestResult<AdminCreateMemoryKindMigrationResponses, AdminCreateMemoryKindMigrationErrors, ThrowOnError> =>
+  (options.client ?? client).post<
+    AdminCreateMemoryKindMigrationResponses,
+    AdminCreateMemoryKindMigrationErrors,
+    ThrowOnError
+  >({
+    security: [
+      { scheme: "bearer", type: "http" },
+      { name: "X-API-Key", type: "apiKey" },
+    ],
+    url: "/admin/v1/memory-kind-migrations",
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      ...options.headers,
+    },
+  });
+
+/**
+ * Request cancellation of a migration
+ *
+ * Marks a queued or running migration as cancel-requested. The worker stops
+ * after the current row operation. Already migrated rows are preserved.
+ */
+export const adminCancelMemoryKindMigration = <ThrowOnError extends boolean = false>(
+  options: Options<AdminCancelMemoryKindMigrationData, ThrowOnError>,
+): RequestResult<AdminCancelMemoryKindMigrationResponses, AdminCancelMemoryKindMigrationErrors, ThrowOnError> =>
+  (options.client ?? client).delete<
+    AdminCancelMemoryKindMigrationResponses,
+    AdminCancelMemoryKindMigrationErrors,
+    ThrowOnError
+  >({
+    security: [
+      { scheme: "bearer", type: "http" },
+      { name: "X-API-Key", type: "apiKey" },
+    ],
+    url: "/admin/v1/memory-kind-migrations/{id}",
+    ...options,
+  });
+
+/**
+ * Get a memory schema migration
+ */
+export const adminGetMemoryKindMigration = <ThrowOnError extends boolean = false>(
+  options: Options<AdminGetMemoryKindMigrationData, ThrowOnError>,
+): RequestResult<AdminGetMemoryKindMigrationResponses, AdminGetMemoryKindMigrationErrors, ThrowOnError> =>
+  (options.client ?? client).get<AdminGetMemoryKindMigrationResponses, AdminGetMemoryKindMigrationErrors, ThrowOnError>(
+    {
+      security: [
+        { scheme: "bearer", type: "http" },
+        { name: "X-API-Key", type: "apiKey" },
+      ],
+      url: "/admin/v1/memory-kind-migrations/{id}",
+      ...options,
+    },
+  );
 
 /**
  * Force-delete an episodic memory by ID

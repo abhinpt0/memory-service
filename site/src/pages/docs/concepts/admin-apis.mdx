@@ -122,20 +122,156 @@ The entry-by-ID endpoint is useful for audit trails, debugging, or when you have
 
 Episodic memory admin routes use `/admin/v1/...` instead of `/v1/admin/...`. Read-only exploration endpoints allow `admin` or `auditor`; operational and destructive endpoints require `admin`.
 
-| Endpoint                                                                    | Role             | Purpose                                          |
-| --------------------------------------------------------------------------- | ---------------- | ------------------------------------------------ |
-| `GET /admin/v1/memories`                                                    | admin or auditor | List latest memory rows across users             |
-| `PUT /admin/v1/memories`                                                    | admin            | Upsert a memory in any namespace                 |
-| `PATCH /admin/v1/memories`                                                  | admin            | Archive a memory by namespace and key            |
-| `GET /admin/v1/memories/{id}`                                               | admin or auditor | Read a retained memory row by UUID               |
-| `POST /admin/v1/memories/search`                                            | admin or auditor | Search memories across users or as a target user |
-| `GET /admin/v1/memory-namespaces`                                           | admin or auditor | Browse memory namespace trees                    |
-| `DELETE /admin/v1/memories/{id}`                                            | admin            | Delete or tombstone a memory row                 |
-| `GET /admin/v1/memory-policies` / `PUT /admin/v1/memory-policies`           | admin            | Read or update the memory policy bundle          |
-| `GET /admin/v1/memory-index/status` / `POST /admin/v1/memory-index/trigger` | admin            | Inspect or trigger memory vector indexing        |
-| `GET /admin/v1/memory-usage` / `GET /admin/v1/memory-usage/top`             | admin            | Inspect memory usage counters                    |
+### Memory CRUD and Search
+
+| Endpoint                              | Role             | Purpose                                           |
+| ------------------------------------- | ---------------- | ------------------------------------------------- |
+| `GET /admin/v1/memories`              | admin or auditor | List latest memory rows across users              |
+| `PUT /admin/v1/memories`              | admin            | Upsert a memory in any namespace                  |
+| `PATCH /admin/v1/memories`            | admin            | Archive a memory by namespace and key             |
+| `GET /admin/v1/memories/{id}`         | admin or auditor | Read a retained memory row by UUID                |
+| `POST /admin/v1/memories/search`      | admin or auditor | Search memories across users or as a target user  |
+| `GET /admin/v1/memory-namespaces`     | admin or auditor | Browse memory namespace trees                     |
+| `DELETE /admin/v1/memories/{id}`      | admin            | Delete or tombstone a memory row                  |
+| `GET /admin/v1/memory-index/status`   | admin            | Inspect memory vector index status                |
+| `POST /admin/v1/memory-index/trigger` | admin            | Trigger a memory vector index run                 |
+| `GET /admin/v1/memory-usage`          | admin            | Inspect memory usage counters                     |
+| `GET /admin/v1/memory-usage/top`      | admin            | Top memory usage ranked by fetch count or recency |
+
+These dedicated admin endpoints bypass the user-facing `memories.filter` Rego policy. The exception is `POST /admin/v1/memories/search` with `as_user_id`: that mode deliberately evaluates the filter as the target user with no administrative roles. Having an admin role does not broaden searches made through the public `/v1/memories/search` endpoint; public calls remain scoped to the authenticated caller's own user namespace.
 
 See [Memories](/docs/concepts/memories/#admin-memory-exploration) for request parameters and examples.
+
+### Memory Kind Versions and Migrations
+
+Administrators create immutable **memory kind versions** that define how a memory value is projected into plaintext filter attributes. Each version owns one Rego program; the projected attributes are typed, replayable, and stored per-memory row. Operators can then migrate existing memories to a new version online, one row at a time, without stopping writes.
+
+#### Kind Version Lifecycle
+
+```bash
+# 1. Create an immutable schema version
+curl -X POST http://localhost:8080/admin/v1/memory-kinds \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <admin-token>" \
+  -d '{
+    "name": "customer-profile/v2",
+    "attributes": {
+      "observedAt": "timestamp",
+      "channel":    "string",
+      "score":      "number",
+      "active":     "boolean",
+      "tags":       "string[]"
+    },
+    "projectionRego": "package memories.attributes\nattributes := {\"channel\": input.value.channel, \"score\": input.value.score}"
+  }'
+```
+
+Response:
+
+```json
+{
+  "name": "customer-profile/v2",
+  "attributes": {
+    "observedAt": "timestamp",
+    "channel": "string",
+    "score": "number",
+    "active": "boolean",
+    "tags": "string[]"
+  },
+  "projectionRego": "package memories.attributes\nattributes := {\"channel\": input.value.channel, \"score\": input.value.score}",
+  "writable": true,
+  "createdAt": "2026-08-01T00:00:00Z"
+}
+```
+
+Creation is idempotent: repeating the same request with an identical type map and source returns the existing resource. Any change to the type map or source under the same name returns `409 Conflict`.
+
+The `projectionRego` program receives only `input.namespace`, `input.key`, `input.value`, and `input.index`. Transient caller context such as JWT claims is not available, making the projection replayable from persisted data. All returned attribute fields must be declared in `attributes`; undeclared fields, explicit nulls, and non-finite numbers are rejected.
+
+Supported attribute types:
+
+| Type        | Stored as           | Supported filters                    | Sortable            |
+| ----------- | ------------------- | ------------------------------------ | ------------------- |
+| `string`    | JSON string         | `$eq`, `$in`, `$exists`              | Yes                 |
+| `number`    | JSON number         | `$eq`, `$in`, `$exists`, `$gte/$lte` | Yes                 |
+| `boolean`   | JSON boolean        | `$eq`, `$in`, `$exists`              | Yes                 |
+| `timestamp` | UTC RFC 3339 string | `$eq`, `$in`, `$exists`, `$gte/$lte` | Yes (chronological) |
+| `string[]`  | JSON string array   | membership `$eq/$in`, `$exists`      | No                  |
+
+```bash
+# 2. List all versions (filter by family with ?family=customer-profile)
+curl "http://localhost:8080/admin/v1/memory-kinds?family=customer-profile" \
+  -H "Authorization: Bearer <admin-token>"
+
+# 3. Get a specific version (exact GET includes projectionRego; list responses omit it)
+curl "http://localhost:8080/admin/v1/memory-kinds/customer-profile/v2" \
+  -H "Authorization: Bearer <admin-token>"
+```
+
+#### Online Migration
+
+A migration moves all memories currently on a source schema version to a target version, one row at a time, while the service continues accepting writes. The migration re-evaluates the target schema's Rego program against each memory's persisted namespace, key, value, and index and writes the new attributes atomically.
+
+```bash
+# Create a migration from v1 to v2 (optionally scoped by namespace prefix)
+curl -X POST http://localhost:8080/admin/v1/memory-kind-migrations \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <admin-token>" \
+  -d '{
+    "source": "customer-profile/v1",
+    "target": "customer-profile/v2",
+    "namespace_prefix": ["user"]
+  }'
+```
+
+Response:
+
+```json
+{
+  "id": "f1a2b3c4-d5e6-7890-abcd-111122223333",
+  "source": "customer-profile/v1",
+  "target": "customer-profile/v2",
+  "state": "queued",
+  "migrated_count": 0,
+  "skipped_tombstone_count": 0,
+  "vector_pending_count": 0,
+  "created_at": "2026-08-01T00:00:00Z"
+}
+```
+
+States: `queued` → `running` → `succeeded` / `failed` / `canceled` / `canceling`.
+
+Only one active migration is allowed per source version at a time; a second `POST` for the same source returns `409 Conflict`.
+
+`succeeded` means all replayable rows with the source schema were cut over. `vector_pending_count` reports rows whose vector payload update was deferred to the background indexer.
+
+```bash
+# Poll migration progress
+curl "http://localhost:8080/admin/v1/memory-kind-migrations/f1a2b3c4-d5e6-7890-abcd-111122223333" \
+  -H "Authorization: Bearer <admin-token>"
+
+# List all migrations
+curl "http://localhost:8080/admin/v1/memory-kind-migrations" \
+  -H "Authorization: Bearer <admin-token>"
+
+# Cancel a running migration (already-migrated rows are kept on the target)
+curl -X DELETE "http://localhost:8080/admin/v1/memory-kind-migrations/f1a2b3c4-d5e6-7890-abcd-111122223333" \
+  -H "Authorization: Bearer <admin-token>"
+```
+
+To resume a canceled or failed migration, create a new migration with the same source and target. Retrying is naturally idempotent because only rows still on the source version are scanned.
+
+#### Schema Version Admin Endpoint Reference
+
+| Endpoint                                        | Role  | Purpose                                |
+| ----------------------------------------------- | ----- | -------------------------------------- |
+| `POST /admin/v1/memory-kinds`                   | admin | Create an immutable schema version     |
+| `GET /admin/v1/memory-kinds`                    | admin | List versions (optional `?family=`)    |
+| `GET /admin/v1/memory-kinds/{family}/{version}` | admin | Get one version (includes Rego source) |
+| `POST /admin/v1/memory-kind-migrations`         | admin | Create a migration job                 |
+| `GET /admin/v1/memory-kind-migrations`          | admin | List all migration jobs                |
+| `GET /admin/v1/memory-kind-migrations/{id}`     | admin | Get one migration job                  |
+| `DELETE /admin/v1/memory-kind-migrations/{id}`  | admin | Request cancellation                   |
 
 ## Updating Conversations
 

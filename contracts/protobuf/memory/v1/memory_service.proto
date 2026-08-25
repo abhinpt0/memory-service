@@ -706,6 +706,8 @@ message PutMemoryRequest {
   optional int64 expected_revision = 6;
   reserved 7;
   reserved "actor";
+  // Optional exact canonical schema name. Absence always uses the fixed default/v1 kind.
+  optional string kind = 8;
 }
 
 message MemoryWriteResult {
@@ -717,6 +719,8 @@ message MemoryWriteResult {
   string created_at = 5;
   optional string expires_at = 6;
   int64 revision = 7;
+  // Exact canonical schema name used for this write (e.g. "default/v1").
+  string kind = 8;
 }
 
 message GetMemoryRequest {
@@ -756,6 +760,15 @@ message MemoryItem {
   bool archived = 10;
   int64 revision = 11;
   repeated string matched_queries = 12;
+  // Canonical schema name for this memory row (e.g. "default/v1"). Always non-empty.
+  string kind = 13;
+}
+
+// MemoryAttributeSort requests a one-field typed sort for attribute-only searches.
+// Rejected when query or queries is present.
+message MemoryAttributeSort {
+  string field = 1;
+  string direction = 2; // "asc" or "desc"; defaults to "asc"
 }
 
 message SearchMemoriesRequest {
@@ -770,6 +783,10 @@ message SearchMemoriesRequest {
   reserved "actor";
   repeated MemorySearchQuery queries = 10;
   int32 per_query_limit = 11;
+  // Optional schema selector: exact canonical name, family, or absent for all schemas.
+  optional string kind = 12;
+  // Optional one-field typed sort (attribute-only searches only).
+  optional MemoryAttributeSort sort = 13;
 }
 
 message SearchMemoriesResponse {
@@ -829,6 +846,10 @@ message AdminListMemoriesRequest {
   int32 limit = 8;
   optional string after_cursor = 9;
   optional string justification = 10;
+  // Optional schema selector: exact canonical name, family, or absent for all schemas.
+  optional string kind = 11;
+  // Optional projected-attribute filter (same JSON-object format as AdminSearch filter).
+  optional google.protobuf.Struct filter = 12;
 }
 
 message AdminGetMemoryRequest {
@@ -845,6 +866,8 @@ message AdminPutMemoryRequest {
   map<string, string> index = 5;
   optional int64 expected_revision = 6;
   optional string justification = 7;
+  // Optional exact canonical schema name. Absence always uses the fixed default/v1 kind.
+  optional string kind = 8;
 }
 
 message AdminUpdateMemoryRequest {
@@ -889,6 +912,10 @@ message AdminSearchMemoriesRequest {
   optional string as_user_id = 9;
   repeated MemorySearchQuery queries = 10;
   int32 per_query_limit = 11;
+  // Optional schema selector: exact canonical name, family, or absent for all schemas.
+  optional string kind = 12;
+  // Optional one-field typed sort (attribute-only searches only).
+  optional MemoryAttributeSort sort = 13;
 }
 
 message AdminListMemoryNamespacesRequest {
@@ -915,6 +942,84 @@ message AdminMemoryItem {
   optional MemoryUsage usage = 11;
   int64 revision = 12;
   repeated string matched_queries = 13;
+  // Canonical schema name for this memory row (e.g. "default/v1"). Always non-empty.
+  string kind = 14;
+}
+
+// MemoryKindVersion resource definition.
+message MemoryKindVersion {
+  string name = 1;                         // Canonical schema name (family/version)
+  map<string, string> attributes = 2;      // Declared attribute types
+  optional string projection_rego = 3;     // Rego source (admin-only endpoints)
+  bool writable = 4;
+  google.protobuf.Timestamp created_at = 5;
+}
+
+message CreateMemoryKindVersionRequest {
+  string name = 1;
+  map<string, string> attributes = 2;
+  string projection_rego = 3;
+  optional string justification = 4;
+  optional bool writable = 5; // Defaults to true when omitted.
+}
+
+message ListMemoryKindVersionsRequest {
+  optional string family = 1;
+  optional string justification = 2;
+}
+
+message ListMemoryKindVersionsResponse {
+  repeated MemoryKindVersion items = 1;
+}
+
+message GetMemoryKindVersionRequest {
+  string family = 1;
+  string version = 2;
+  optional string justification = 3;
+}
+
+// MemoryKindMigration resource.
+message MemoryKindMigration {
+  bytes id = 1;
+  string source = 2;
+  string target = 3;
+  repeated string namespace_prefix = 4;
+  string state = 5;
+  bool cancel_requested = 6;
+  int64 migrated_count = 7;
+  int64 skipped_tombstone_count = 8;
+  int64 vector_pending_count = 9;
+  int32 retry_count = 10;
+  optional string last_error_code = 11;
+  google.protobuf.Timestamp created_at = 12;
+  optional google.protobuf.Timestamp started_at = 13;
+  optional google.protobuf.Timestamp completed_at = 14;
+}
+
+message CreateMemoryKindMigrationRequest {
+  string source = 1;
+  string target = 2;
+  repeated string namespace_prefix = 3;
+  optional string justification = 4;
+}
+
+message ListMemoryKindMigrationsRequest {
+  optional string state = 1;
+  optional string justification = 2;
+}
+
+message ListMemoryKindMigrationsResponse {
+  repeated MemoryKindMigration items = 1;
+}
+
+message GetMemoryKindMigrationRequest {
+  bytes id = 1;
+  optional string justification = 2;
+}
+
+message CancelMemoryKindMigrationRequest {
+  bytes id = 1;
+  optional string justification = 2;
 }
 
 message AdminListMemoriesResponse {
@@ -1089,6 +1194,7 @@ message MemoryEventItem {
   google.protobuf.Struct value = 6;
   google.protobuf.Struct attributes = 7;
   optional google.protobuf.Timestamp expires_at = 8;
+  string memory_kind = 9;
 }
 
 message ListMemoryEventsResponse {
@@ -1107,6 +1213,16 @@ service AdminMemoriesService {
   rpc GetMemoryIndexStatus(AdminGetMemoryIndexStatusRequest) returns (MemoryIndexStatusResponse);
   rpc PutMemory(AdminPutMemoryRequest) returns (MemoryWriteResult);
   rpc UpdateMemory(AdminUpdateMemoryRequest) returns (google.protobuf.Empty);
+}
+
+service AdminMemoryKindService {
+  rpc CreateMemoryKindVersion(CreateMemoryKindVersionRequest) returns (MemoryKindVersion);
+  rpc ListMemoryKindVersions(ListMemoryKindVersionsRequest) returns (ListMemoryKindVersionsResponse);
+  rpc GetMemoryKindVersion(GetMemoryKindVersionRequest) returns (MemoryKindVersion);
+  rpc CreateMemoryKindMigration(CreateMemoryKindMigrationRequest) returns (MemoryKindMigration);
+  rpc ListMemoryKindMigrations(ListMemoryKindMigrationsRequest) returns (ListMemoryKindMigrationsResponse);
+  rpc GetMemoryKindMigration(GetMemoryKindMigrationRequest) returns (MemoryKindMigration);
+  rpc CancelMemoryKindMigration(CancelMemoryKindMigrationRequest) returns (google.protobuf.Empty);
 }
 
 service ResponseRecorderService {

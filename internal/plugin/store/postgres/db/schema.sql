@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS schema_metadata (
 );
 
 INSERT INTO schema_metadata (key, value)
-VALUES ('core_schema_version', '1')
+VALUES ('core_schema_version', '2')
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW();
 
 CREATE TABLE IF NOT EXISTS conversation_groups (
@@ -372,6 +372,45 @@ CREATE TABLE IF NOT EXISTS encryption_deks (
 );
 
 ------------------------------------------------------------
+-- Memory Schema Versions, Defaults, and Migrations (Enhancement 115)
+-- Defined BEFORE memories and memory_vectors so FK references resolve on fresh boot.
+------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS memory_kind_versions (
+    name            TEXT PRIMARY KEY,
+    attribute_types JSONB NOT NULL DEFAULT '{}'::JSONB,
+    attributes_rego TEXT,
+    writable        BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Mutable per-family defaults were removed. Clean up the obsolete version-2 table.
+DROP TABLE IF EXISTS memory_kind_defaults;
+
+CREATE TABLE IF NOT EXISTS memory_kind_migrations (
+    id                      UUID PRIMARY KEY,
+    source                  TEXT NOT NULL REFERENCES memory_kind_versions(name),
+    target                  TEXT NOT NULL REFERENCES memory_kind_versions(name),
+    namespace_prefix        JSONB,    -- serialized namespace array (NULL = no prefix restriction)
+    state                   TEXT NOT NULL,
+    cancel_requested        BOOLEAN NOT NULL DEFAULT FALSE,
+    migrated_count          BIGINT NOT NULL DEFAULT 0,
+    skipped_tombstone_count BIGINT NOT NULL DEFAULT 0,
+    vector_pending_count    BIGINT NOT NULL DEFAULT 0,
+    retry_count             INT NOT NULL DEFAULT 0,
+    last_error_code         TEXT,
+    created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    started_at              TIMESTAMPTZ,
+    completed_at            TIMESTAMPTZ,
+    CHECK (source <> target),
+    CHECK (state IN ('queued', 'running', 'canceling', 'succeeded', 'failed', 'canceled'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS memory_kind_migrations_active_source_idx
+    ON memory_kind_migrations (source)
+    WHERE state IN ('queued', 'running', 'canceling');
+
+------------------------------------------------------------
 -- Namespaced Episodic Memory
 -- Each row is a write event for a (namespace, key).
 -- The active value of a key is the single row where archived_at IS NULL.
@@ -387,6 +426,8 @@ CREATE TABLE IF NOT EXISTS encryption_deks (
 --   0 = updated  — superseded by a newer write; hard-deleted on eviction
 --   1 = archived — explicit archive; tombstoned on eviction (data cleared, row kept for event history)
 --   2 = expired  — TTL elapsed;    tombstoned on eviction (data cleared, row kept for event history)
+-- memory_kind is the canonical schema version name (e.g. "default/v1"). NOT NULL; every row carries
+-- an explicit schema reference. FK to memory_kind_versions is resolved because that table is created above.
 CREATE TABLE IF NOT EXISTS memories (
     id                UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     namespace         TEXT        NOT NULL,   -- RS-encoded: "users\x1ealice\x1ememories"
@@ -400,7 +441,8 @@ CREATE TABLE IF NOT EXISTS memories (
     expires_at        TIMESTAMPTZ,            -- NULL = no TTL
     archived_at       TIMESTAMPTZ,            -- NULL = active; non-NULL = superseded or archived
     deleted_reason    SMALLINT,               -- NULL=active, 0=updated, 1=deleted, 2=expired
-    indexed_at        TIMESTAMPTZ             -- NULL = pending vector index sync
+    indexed_at        TIMESTAMPTZ,            -- NULL = pending vector index sync
+    memory_kind       TEXT        NOT NULL DEFAULT 'default/v1' REFERENCES memory_kind_versions(name)
 );
 
 -- History / audit queries: all versions of a key, ordered by creation
@@ -408,7 +450,7 @@ CREATE INDEX IF NOT EXISTS memories_namespace_key_idx
     ON memories (namespace, key, created_at DESC);
 
 -- Active-record point lookups (GET, search)
-CREATE INDEX IF NOT EXISTS memories_active_idx
+CREATE UNIQUE INDEX IF NOT EXISTS memories_active_idx
     ON memories (namespace, key) WHERE archived_at IS NULL;
 
 -- TTL expiry cleanup
@@ -429,13 +471,11 @@ CREATE INDEX IF NOT EXISTS memories_write_events_idx
 CREATE INDEX IF NOT EXISTS memories_delete_events_idx
     ON memories (namespace, archived_at, id) WHERE deleted_reason IN (1, 2);
 
--- Schema reconciliation for existing databases.
-ALTER TABLE memories
-    DROP COLUMN IF EXISTS attributes,
-    DROP COLUMN IF EXISTS index_fields,
-    DROP COLUMN IF EXISTS index_disabled,
-    ADD COLUMN IF NOT EXISTS indexed_content JSONB NOT NULL DEFAULT '{}'::JSONB,
-    ADD COLUMN IF NOT EXISTS revision BIGINT NOT NULL DEFAULT 1;
+-- Index for migration scans: find all rows of a given schema version within an optional namespace prefix.
+CREATE INDEX IF NOT EXISTS memories_kind_version_idx
+    ON memories (memory_kind, namespace, id);
+CREATE INDEX IF NOT EXISTS memories_kind_cursor_idx
+	ON memories (memory_kind, created_at, id);
 
 ------------------------------------------------------------
 -- Episodic Memory Usage Stats

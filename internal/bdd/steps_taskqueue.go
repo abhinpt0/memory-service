@@ -8,6 +8,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/chirino/memory-service/internal/config"
+	registryepisodic "github.com/chirino/memory-service/internal/registry/episodic"
+	registrystore "github.com/chirino/memory-service/internal/registry/store"
+	"github.com/chirino/memory-service/internal/service"
 	"github.com/chirino/memory-service/internal/testutil/cucumber"
 	"github.com/cucumber/godog"
 	"github.com/google/uuid"
@@ -20,6 +24,7 @@ func init() {
 		ctx.Step(`^all tasks are deleted$`, t.allTasksAreDeleted)
 		ctx.Step(`^I create a task with type "([^"]*)" and body:$`, t.iCreateATaskWithTypeAndBody)
 		ctx.Step(`^the task processor runs$`, t.theTaskProcessorRuns)
+		ctx.Step(`^the memory kind migration processor runs$`, t.theMemoryKindMigrationProcessorRuns)
 		ctx.Step(`^the task should be deleted$`, t.theTaskShouldBeDeleted)
 		ctx.Step(`^the task should still exist$`, t.theTaskShouldStillExist)
 		ctx.Step(`^the task retry_at should be in the future$`, t.theTaskRetryAtShouldBeInTheFuture)
@@ -63,6 +68,40 @@ func (t *taskQueueSteps) iCreateATaskWithTypeAndBody(taskType string, body *godo
 
 func (t *taskQueueSteps) theTaskProcessorRuns() error {
 	return t.processTasksOnce()
+}
+
+func (t *taskQueueSteps) theMemoryKindMigrationProcessorRuns() error {
+	cfg, ok := t.s.Extra["config"].(*config.Config)
+	if !ok || cfg == nil {
+		return fmt.Errorf("scenario server config is unavailable")
+	}
+	ctx := config.WithContext(context.Background(), cfg)
+	mainLoader, err := registrystore.Select(cfg.DatastoreType)
+	if err != nil {
+		return err
+	}
+	mainStore, err := mainLoader(ctx)
+	if err != nil {
+		return err
+	}
+	episodicLoader, err := registryepisodic.Select(cfg.DatastoreType)
+	if err != nil {
+		return err
+	}
+	episodicStore, err := episodicLoader(ctx)
+	if err != nil {
+		return err
+	}
+	processor := service.NewTaskProcessor(mainStore, nil)
+	processor.SetEpisodicStore(episodicStore, nil)
+	// A non-empty migration schedules one continuation and then a verification
+	// sweep. Extra empty passes are harmless and keep the step deterministic.
+	for range 4 {
+		if err := processor.ProcessOnce(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (t *taskQueueSteps) processTasksOnce() error {

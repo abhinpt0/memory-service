@@ -143,6 +143,8 @@ tasks:
         CGO_ENABLED=1 go run gotest.tools/gotestsum --format {{.GOTESTSUM_FMT | default .DEFAULT_GOTESTSUM_FMT}} -- -race -tags='sqlite_fts5' "$@" {{.CLI_ARGS}}
       - |
         CGO_ENABLED=1 go run gotest.tools/gotestsum --format {{.GOTESTSUM_FMT | default .DEFAULT_GOTESTSUM_FMT}} -- -race -tags='sqlite_fts5' -run 'TestFeaturesPg(APIKeys|Keycloak|KeycloakAuthClients)$' ./internal/bdd/ {{.CLI_ARGS}}
+      - |
+        CGO_ENABLED=1 go run gotest.tools/gotestsum --format {{.GOTESTSUM_FMT | default .DEFAULT_GOTESTSUM_FMT}} -- -race -tags='sqlite_fts5 auth_testfixtures' -run 'TestFeaturesSQLiteMemoryKindRegressions$' ./internal/bdd/ {{.CLI_ARGS}}
       - task: test:go:fixtures
         vars:
           CLI_ARGS: '{{.CLI_ARGS}}'
@@ -154,6 +156,8 @@ tasks:
         CGO_ENABLED=1 go run gotest.tools/gotestsum --format {{.GOTESTSUM_FMT | default .DEFAULT_GOTESTSUM_FMT}} -- -race -tags='sqlite_fts5 auth_testfixtures' ./internal/security {{.CLI_ARGS}}
       - |
         CGO_ENABLED=1 go run gotest.tools/gotestsum --format {{.GOTESTSUM_FMT | default .DEFAULT_GOTESTSUM_FMT}} -- -race -tags='sqlite_fts5 auth_testfixtures' -run 'TestFeaturesAuthFixturesSQLite$' ./internal/bdd/ {{.CLI_ARGS}}
+      - |
+        CGO_ENABLED=1 go run gotest.tools/gotestsum --format {{.GOTESTSUM_FMT | default .DEFAULT_GOTESTSUM_FMT}} -- -race -tags='sqlite_fts5 auth_testfixtures' -run 'TestFeaturesSQLitePolicy$' ./internal/bdd/ {{.CLI_ARGS}}
       - |
         CGO_ENABLED=1 go run gotest.tools/gotestsum --format {{.GOTESTSUM_FMT | default .DEFAULT_GOTESTSUM_FMT}} -- -race -tags='sqlite_fts5 auth_testfixtures' -run 'TestSessionToolContractFixtures$' ./internal/cmd/mcp/ {{.CLI_ARGS}}
 

@@ -16,6 +16,7 @@ import (
 	"github.com/charmbracelet/log"
 	"github.com/chirino/memory-service/internal/config"
 	"github.com/chirino/memory-service/internal/dataencryption"
+	coreepisodic "github.com/chirino/memory-service/internal/episodic"
 	"github.com/chirino/memory-service/internal/model"
 	"github.com/chirino/memory-service/internal/plugin/store/sqlentry"
 	registrycache "github.com/chirino/memory-service/internal/registry/cache"
@@ -80,9 +81,25 @@ func (m *sqliteMigrator) Migrate(ctx context.Context) error {
 	if err := sqliteRequireCurrentSchemaOrEmpty(ctx, handle.sqlDB); err != nil {
 		return err
 	}
-
+	// The schema creates memory_kind_versions before memories so fresh databases
+	// resolve all FK references in table-definition order.
 	if _, err := handle.sqlDB.ExecContext(ctx, schemaSQL); err != nil {
 		return fmt.Errorf("migration: failed to execute schema: %w", err)
+	}
+	defaultKind, err := coreepisodic.BuiltinDefaultKindVersion(ctx)
+	if err != nil {
+		return fmt.Errorf("migration: load built-in default memory kind: %w", err)
+	}
+	attributeTypes, err := json.Marshal(defaultKind.AttributeTypes)
+	if err != nil {
+		return fmt.Errorf("migration: encode built-in default memory kind attributes: %w", err)
+	}
+	if _, err := handle.sqlDB.ExecContext(ctx,
+		`INSERT OR IGNORE INTO memory_kind_versions (name, attribute_types, attributes_rego, writable, created_at)
+		 VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+		defaultKind.Name, string(attributeTypes), *defaultKind.AttributesRego, defaultKind.Writable,
+	); err != nil {
+		return fmt.Errorf("migration: seed built-in default memory kind: %w", err)
 	}
 	if handle.fts5Enabled {
 		if _, err := handle.sqlDB.ExecContext(ctx, ftsSchemaSQL); err != nil {
@@ -95,7 +112,7 @@ func (m *sqliteMigrator) Migrate(ctx context.Context) error {
 
 func sqliteRequireCurrentSchemaOrEmpty(ctx context.Context, db *sql.DB) error {
 	const versionKey = "core_schema_version"
-	const expectedVersion = "1"
+	const expectedVersion = "2"
 
 	var hasMetadata bool
 	if err := db.QueryRowContext(ctx, "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_metadata')").Scan(&hasMetadata); err != nil {
@@ -126,7 +143,7 @@ func sqliteRequireCurrentSchemaOrEmpty(ctx context.Context, db *sql.DB) error {
 			return fmt.Errorf("migration: failed to inspect existing schema: %w", err)
 		}
 		if hasCoreTables {
-			return fmt.Errorf("migration: existing incompatible SQLite schema detected; reset the datastore before applying schema version %s", expectedVersion)
+			return fmt.Errorf("migration: existing unversioned SQLite schema detected; reset the datastore before starting schema version %s", expectedVersion)
 		}
 		return nil
 	}
@@ -134,13 +151,13 @@ func sqliteRequireCurrentSchemaOrEmpty(ctx context.Context, db *sql.DB) error {
 	var version string
 	err := db.QueryRowContext(ctx, "SELECT value FROM schema_metadata WHERE key = ?", versionKey).Scan(&version)
 	if errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("migration: schema metadata is missing %s; reset the datastore before applying schema version %s", versionKey, expectedVersion)
+		return fmt.Errorf("migration: schema metadata is missing %s; reset the datastore before starting schema version %s", versionKey, expectedVersion)
 	}
 	if err != nil {
 		return fmt.Errorf("migration: failed to read schema metadata: %w", err)
 	}
 	if version != expectedVersion {
-		return fmt.Errorf("migration: unsupported SQLite schema version %s; reset the datastore before applying schema version %s", version, expectedVersion)
+		return fmt.Errorf("migration: unsupported SQLite schema version %s; reset the datastore before starting schema version %s", version, expectedVersion)
 	}
 	return nil
 }

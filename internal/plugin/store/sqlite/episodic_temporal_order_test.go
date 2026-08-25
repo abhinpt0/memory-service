@@ -31,6 +31,7 @@ func TestSQLiteTemporalAttributeRangeOrder(t *testing.T) {
 			Key:              "mem-earlier",
 			Value:            map[string]interface{}{"statement": "earlier fact"},
 			PolicyAttributes: map[string]interface{}{"observedAt": tsEarlier},
+			MemoryKind:       "default/v1",
 		})
 		if err != nil {
 			return err
@@ -40,6 +41,7 @@ func TestSQLiteTemporalAttributeRangeOrder(t *testing.T) {
 			Key:              "mem-later",
 			Value:            map[string]interface{}{"statement": "later fact"},
 			PolicyAttributes: map[string]interface{}{"observedAt": tsLater},
+			MemoryKind:       "default/v1",
 		})
 		return err
 	}))
@@ -51,7 +53,7 @@ func TestSQLiteTemporalAttributeRangeOrder(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		items, err := store.SearchMemories(rctx, ns, filter, 10, registryepisodic.ArchiveFilterExclude)
+		items, err := store.SearchMemories(rctx, registryepisodic.MemorySearchQuery{NamespacePrefix: ns, Filter: filter, Limit: 10, Archived: registryepisodic.ArchiveFilterExclude})
 		require.NoError(t, err)
 		require.Len(t, items, 1, "expected only the later memory to match $gte tsLater")
 		require.Equal(t, "mem-later", items[0].Key)
@@ -62,7 +64,7 @@ func TestSQLiteTemporalAttributeRangeOrder(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		items2, err := store.SearchMemories(rctx, ns, filter2, 10, registryepisodic.ArchiveFilterExclude)
+		items2, err := store.SearchMemories(rctx, registryepisodic.MemorySearchQuery{NamespacePrefix: ns, Filter: filter2, Limit: 10, Archived: registryepisodic.ArchiveFilterExclude})
 		require.NoError(t, err)
 		require.Len(t, items2, 1, "expected only the earlier memory to match $lte tsEarlier")
 		require.Equal(t, "mem-earlier", items2[0].Key)
