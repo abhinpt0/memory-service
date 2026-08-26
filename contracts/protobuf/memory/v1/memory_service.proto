@@ -300,6 +300,9 @@ message SyncEntriesResponse {
 message AppendEntryRequest {
   // Conversation identifier
   string conversation_id = 1;
+  // An exact retry of a sequenced entry returns the stored entry, including
+  // after later sequenced entries have been appended. Conflicting duplicates
+  // return ABORTED.
   CreateEntryRequest entry = 2;
   optional int64 epoch = 3;
   // Optional conversation patch applied with the append. PostgreSQL and SQLite commit

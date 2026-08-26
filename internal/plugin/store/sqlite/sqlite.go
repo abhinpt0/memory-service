@@ -762,6 +762,40 @@ func (s *SQLiteStore) ArchiveConversation(ctx context.Context, userID string, co
 	})
 }
 
+func (s *SQLiteStore) ArchiveConversationIfNeeded(ctx context.Context, userID string, conversationID string) (registrystore.ArchiveConversationResult, error) {
+	db := s.dbFor(ctx)
+	var conv model.Conversation
+	r := db.Where("id = ?", conversationID).Limit(1).Find(&conv)
+	if r.Error != nil {
+		return registrystore.ArchiveConversationResult{}, r.Error
+	}
+	if r.RowsAffected == 0 {
+		return registrystore.ArchiveConversationResult{}, &registrystore.NotFoundError{Resource: "conversation", ID: conversationID}
+	}
+	if _, err := s.requireAccess(ctx, userID, conv.ConversationGroupID, model.AccessLevelOwner); err != nil {
+		return registrystore.ArchiveConversationResult{}, err
+	}
+	result := registrystore.ArchiveConversationResult{ConversationGroupID: conv.ConversationGroupID}
+	now := time.Now()
+	err := s.InWriteTx(ctx, func(txCtx context.Context) error {
+		wdb := s.writeDBFor(txCtx, "sqlite archive conversation if needed")
+		groupIDs, err := s.startedConversationGroupIDsForDelete(txCtx, conv.ConversationGroupID)
+		if err != nil {
+			return err
+		}
+		update := wdb.Model(&model.ConversationGroup{}).Where("id IN ? AND archived_at IS NULL", groupIDs).Update("archived_at", now)
+		if update.Error != nil {
+			return update.Error
+		}
+		result.Changed = update.RowsAffected > 0
+		if !result.Changed {
+			return nil
+		}
+		return wdb.Model(&model.Conversation{}).Where("conversation_group_id IN ? AND archived_at IS NULL", groupIDs).Update("archived_at", now).Error
+	})
+	return result, err
+}
+
 func (s *SQLiteStore) UnarchiveConversation(ctx context.Context, userID string, conversationID string) error {
 	db := s.dbFor(ctx)
 	var conv model.Conversation
@@ -795,6 +829,36 @@ func (s *SQLiteStore) UnarchiveConversation(ctx context.Context, userID string, 
 		}
 		return nil
 	})
+}
+
+func (s *SQLiteStore) UnarchiveConversationIfNeeded(ctx context.Context, userID string, conversationID string) (registrystore.UnarchiveConversationResult, error) {
+	db := s.dbFor(ctx)
+	var conv model.Conversation
+	r := db.Where("id = ?", conversationID).Limit(1).Find(&conv)
+	if r.Error != nil {
+		return registrystore.UnarchiveConversationResult{}, r.Error
+	}
+	if r.RowsAffected == 0 {
+		return registrystore.UnarchiveConversationResult{}, &registrystore.NotFoundError{Resource: "conversation", ID: conversationID}
+	}
+	if _, err := s.requireAccess(ctx, userID, conv.ConversationGroupID, model.AccessLevelOwner); err != nil {
+		return registrystore.UnarchiveConversationResult{}, err
+	}
+	result := registrystore.UnarchiveConversationResult{ConversationGroupID: conv.ConversationGroupID}
+	err := s.InWriteTx(ctx, func(txCtx context.Context) error {
+		wdb := s.writeDBFor(txCtx, "sqlite unarchive conversation if needed")
+		groupIDs, err := s.startedConversationGroupIDsForDelete(txCtx, conv.ConversationGroupID)
+		if err != nil {
+			return err
+		}
+		update := wdb.Model(&model.ConversationGroup{}).Where("id IN ? AND archived_at IS NOT NULL", groupIDs).Update("archived_at", nil)
+		if update.Error != nil {
+			return update.Error
+		}
+		result.Changed = update.RowsAffected > 0
+		return wdb.Model(&model.Conversation{}).Where("conversation_group_id IN ? AND archived_at IS NOT NULL", groupIDs).Update("archived_at", nil).Error
+	})
+	return result, err
 }
 
 // --- Memberships ---
@@ -1488,6 +1552,34 @@ func (s *SQLiteStore) GetEntries(ctx context.Context, userID string, conversatio
 	return &registrystore.PagedEntries{Data: page, AfterCursor: afterCursor, BeforeCursor: beforeCursor}, nil
 }
 
+func (s *SQLiteStore) GetEntriesBySequence(ctx context.Context, userID string, conversationID string, sequences []uint32) ([]model.Entry, error) {
+	if len(sequences) == 0 {
+		return []model.Entry{}, nil
+	}
+	db := s.dbFor(ctx)
+	var conv model.Conversation
+	result := db.Where("id = ?", conversationID).Limit(1).Find(&conv)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	if result.RowsAffected == 0 {
+		return nil, &registrystore.NotFoundError{Resource: "conversation", ID: conversationID}
+	}
+	if _, err := s.requireAccess(ctx, userID, conv.ConversationGroupID, model.AccessLevelWriter); err != nil {
+		return nil, err
+	}
+
+	var entries []model.Entry
+	if err := db.Where("conversation_group_id = ? AND conversation_id = ? AND seq IN ?", conv.ConversationGroupID, conversationID, sequences).
+		Find(&entries).Error; err != nil {
+		return nil, err
+	}
+	if err := decryptEntries(s, entries); err != nil {
+		return nil, err
+	}
+	return entries, nil
+}
+
 func (s *SQLiteStore) GetEntryGroupID(ctx context.Context, entryID uuid.UUID) (uuid.UUID, error) {
 	var entry model.Entry
 	result := s.dbFor(ctx).Select("conversation_group_id").Where("id = ?", entryID).Limit(1).Find(&entry)
@@ -1520,6 +1612,14 @@ func (s *SQLiteStore) AdminGetEntryByID(ctx context.Context, entryID uuid.UUID) 
 }
 
 func (s *SQLiteStore) AppendEntries(ctx context.Context, userID string, conversationID string, entries []registrystore.CreateEntryRequest, clientID *string, agentID *string, epoch *int64) ([]model.Entry, error) {
+	return s.appendEntries(ctx, userID, conversationID, entries, clientID, agentID, epoch, false)
+}
+
+func (s *SQLiteStore) AppendEntriesBeforeUnarchive(ctx context.Context, userID string, conversationID string, entries []registrystore.CreateEntryRequest, clientID *string, agentID *string, epoch *int64) ([]model.Entry, error) {
+	return s.appendEntries(ctx, userID, conversationID, entries, clientID, agentID, epoch, true)
+}
+
+func (s *SQLiteStore) appendEntries(ctx context.Context, userID string, conversationID string, entries []registrystore.CreateEntryRequest, clientID *string, agentID *string, epoch *int64, allowArchived bool) ([]model.Entry, error) {
 	if err := registrystore.ValidateEntryEpochChannels(entries, epoch); err != nil {
 		return nil, &registrystore.ValidationError{Field: "epoch", Message: err.Error()}
 	}
@@ -1602,7 +1702,7 @@ func (s *SQLiteStore) AppendEntries(ctx context.Context, userID string, conversa
 		}
 	}
 	// Block appending to archived conversations. Use explicit unarchive via conversationPatch.archived=false first.
-	if conv.ArchivedAt != nil {
+	if conv.ArchivedAt != nil && !allowArchived {
 		return nil, &registrystore.NotFoundError{Resource: "conversation", ID: conversationID}
 	}
 	if _, err := s.requireAccess(ctx, userID, conv.ConversationGroupID, model.AccessLevelWriter); err != nil {
@@ -1649,7 +1749,7 @@ func (s *SQLiteStore) AppendEntries(ctx context.Context, userID string, conversa
 		}
 		if err := db.Create(&entry).Error; err != nil {
 			if _, ok := sqliteUniqueViolation(err); ok {
-				return nil, &registrystore.ConflictError{Message: "duplicate seq value in this conversation"}
+				return nil, registrystore.NewDuplicateSequenceConflict()
 			}
 			return nil, fmt.Errorf("failed to append entry: %w", err)
 		}
@@ -1852,7 +1952,7 @@ func (s *SQLiteStore) SyncAgentEntry(ctx context.Context, userID string, convers
 	}
 	if err := db.Create(&newEntry).Error; err != nil {
 		if _, ok := sqliteUniqueViolation(err); ok {
-			return nil, &registrystore.ConflictError{Message: "duplicate seq value in this conversation"}
+			return nil, registrystore.NewDuplicateSequenceConflict()
 		}
 		return nil, fmt.Errorf("failed to sync entry: %w", err)
 	}
@@ -4095,6 +4195,29 @@ func (s *SQLiteStore) UpdateAttachment(ctx context.Context, userID string, attac
 
 	if err := db.Where("id = ? AND archived_at IS NULL", attachmentID).First(&attachment).Error; err != nil {
 		return nil, &registrystore.NotFoundError{Resource: "attachment", ID: attachmentID.String()}
+	}
+	return &attachment, nil
+}
+
+func (s *SQLiteStore) LinkAttachmentToEntry(ctx context.Context, userID string, attachmentID uuid.UUID, entryID uuid.UUID) (*model.Attachment, error) {
+	db := s.writeDBFor(ctx, "sqlite link attachment to entry")
+	result := db.Model(&model.Attachment{}).Where("id = ? AND user_id = ? AND archived_at IS NULL AND entry_id IS NULL", attachmentID, userID).Update("entry_id", entryID)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	var attachment model.Attachment
+	lookup := db.Where("id = ? AND archived_at IS NULL", attachmentID).Limit(1).Find(&attachment)
+	if lookup.Error != nil {
+		return nil, lookup.Error
+	}
+	if lookup.RowsAffected == 0 {
+		return nil, &registrystore.NotFoundError{Resource: "attachment", ID: attachmentID.String()}
+	}
+	if attachment.UserID != userID {
+		return nil, &registrystore.ForbiddenError{}
+	}
+	if attachment.EntryID == nil || *attachment.EntryID != entryID {
+		return nil, &registrystore.ConflictError{Message: fmt.Sprintf("attachment %s is linked to a different entry", attachmentID)}
 	}
 	return &attachment, nil
 }
