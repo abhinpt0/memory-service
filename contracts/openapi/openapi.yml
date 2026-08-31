@@ -431,7 +431,7 @@ paths:
               $ref: '#/components/schemas/CreateEntryRequest'
       responses:
         '201':
-          description: The created entry.
+          description: The created entry. An exact sequenced retry returns the previously stored entry.
           content:
             application/json:
               schema:
@@ -439,7 +439,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
-          description: A duplicate `seq` value was supplied for this conversation.
+          description: A supplied `seq` exists, but the request does not exactly match the stored entry.
           $ref: '#/components/responses/Error'
         default:
           $ref: '#/components/responses/Error'
@@ -2761,9 +2761,10 @@ components:
           nullable: true
           description: |-
             Optional client-assigned sequence number. Must be unique within the
-            conversation. Must be >= 0. Returns 409 Conflict if a duplicate seq is
-            submitted. Returns 400 Bad Request if the value is negative or exceeds
-            4294967295.
+            conversation. An exact retry returns the stored entry, including after
+            later sequenced entries have been appended. A partial or conflicting
+            duplicate returns 409 Conflict. Returns 400 Bad Request if the value is
+            negative or exceeds 4294967295.
           maximum: 4294967295
         conversationPatch:
           allOf:

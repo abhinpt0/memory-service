@@ -64,9 +64,19 @@ func (m *metricsStore) ArchiveConversation(ctx context.Context, userID string, c
 	return m.inner.ArchiveConversation(ctx, userID, conversationID)
 }
 
+func (m *metricsStore) ArchiveConversationIfNeeded(ctx context.Context, userID string, conversationID string) (store.ArchiveConversationResult, error) {
+	defer observe("archive_conversation_if_needed", time.Now())
+	return m.inner.ArchiveConversationIfNeeded(ctx, userID, conversationID)
+}
+
 func (m *metricsStore) UnarchiveConversation(ctx context.Context, userID string, conversationID string) error {
 	defer observe("unarchive_conversation", time.Now())
 	return m.inner.UnarchiveConversation(ctx, userID, conversationID)
+}
+
+func (m *metricsStore) UnarchiveConversationIfNeeded(ctx context.Context, userID string, conversationID string) (store.UnarchiveConversationResult, error) {
+	defer observe("unarchive_conversation_if_needed", time.Now())
+	return m.inner.UnarchiveConversationIfNeeded(ctx, userID, conversationID)
 }
 
 func (m *metricsStore) ListMemberships(ctx context.Context, userID string, conversationID string, afterCursor *string, limit int) ([]model.ConversationMembership, *string, error) {
@@ -134,9 +144,19 @@ func (m *metricsStore) GetEntries(ctx context.Context, userID string, conversati
 	return m.inner.GetEntries(ctx, userID, conversationID, query)
 }
 
+func (m *metricsStore) GetEntriesBySequence(ctx context.Context, userID string, conversationID string, sequences []uint32) ([]model.Entry, error) {
+	defer observe("get_entries_by_sequence", time.Now())
+	return m.inner.GetEntriesBySequence(ctx, userID, conversationID, sequences)
+}
+
 func (m *metricsStore) AppendEntries(ctx context.Context, userID string, conversationID string, entries []store.CreateEntryRequest, clientID *string, agentID *string, epoch *int64) ([]model.Entry, error) {
 	defer observe("append_entries", time.Now())
 	return m.inner.AppendEntries(ctx, userID, conversationID, entries, clientID, agentID, epoch)
+}
+
+func (m *metricsStore) AppendEntriesBeforeUnarchive(ctx context.Context, userID string, conversationID string, entries []store.CreateEntryRequest, clientID *string, agentID *string, epoch *int64) ([]model.Entry, error) {
+	defer observe("append_entries_before_unarchive", time.Now())
+	return m.inner.AppendEntriesBeforeUnarchive(ctx, userID, conversationID, entries, clientID, agentID, epoch)
 }
 
 func (m *metricsStore) GetEntryGroupID(ctx context.Context, entryID uuid.UUID) (uuid.UUID, error) {
@@ -256,6 +276,11 @@ func (m *metricsStore) CreateAttachment(ctx context.Context, userID string, conv
 func (m *metricsStore) UpdateAttachment(ctx context.Context, userID string, attachmentID uuid.UUID, update store.AttachmentUpdate) (*model.Attachment, error) {
 	defer observe("update_attachment", time.Now())
 	return m.inner.UpdateAttachment(ctx, userID, attachmentID, update)
+}
+
+func (m *metricsStore) LinkAttachmentToEntry(ctx context.Context, userID string, attachmentID uuid.UUID, entryID uuid.UUID) (*model.Attachment, error) {
+	defer observe("link_attachment_to_entry", time.Now())
+	return m.inner.LinkAttachmentToEntry(ctx, userID, attachmentID, entryID)
 }
 
 func (m *metricsStore) GetAttachment(ctx context.Context, userID string, conversationID string, attachmentID uuid.UUID) (*model.Attachment, error) {
