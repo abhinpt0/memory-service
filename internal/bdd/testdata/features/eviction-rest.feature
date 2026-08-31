@@ -6,9 +6,11 @@ Feature: Data Eviction
   # Serial required: this scenario runs a datastore-wide eviction sweep that can hard-delete records and queue tasks for data created by other scenarios.
   Scenario: Evict conversation groups past retention period (default response)
     Given I have a conversation with title "Old Conversation"
+    And set "oldConversationId" to "${conversationId}"
     And set "oldGroupId" to "${conversationGroupId}"
     And the conversation was archived 100 days ago
     And I have a conversation with title "Recent Conversation"
+    And set "recentConversationId" to "${conversationId}"
     And set "recentGroupId" to "${conversationGroupId}"
     And the conversation was archived 10 days ago
     When I call POST "/v1/admin/evict" with body:
@@ -23,7 +25,7 @@ Feature: Data Eviction
     # Verify old conversation is gone
     When I execute SQL query:
       """
-      SELECT COUNT(*) as count FROM conversations WHERE id = '${oldGroupId}'
+      SELECT COUNT(*) as count FROM conversations WHERE id = '${oldConversationId}'
       """
     Then the SQL result should match:
       | count |
@@ -34,7 +36,7 @@ Feature: Data Eviction
         "collection": "conversations",
         "operation": "count",
         "filter": {
-          "_id": "${oldGroupId}"
+          "_id": "${oldConversationId}"
         }
       }
       """
@@ -44,7 +46,7 @@ Feature: Data Eviction
     # Verify recent conversation still exists
     When I execute SQL query:
       """
-      SELECT COUNT(*) as count FROM conversations WHERE id = '${recentGroupId}'
+      SELECT COUNT(*) as count FROM conversations WHERE id = '${recentConversationId}'
       """
     Then the SQL result should match:
       | count |
@@ -229,9 +231,11 @@ Feature: Data Eviction
   # Serial required: this scenario runs a datastore-wide eviction sweep that can hard-delete records created by other scenarios.
   Scenario: Evict multiple conversations in single request
     Given I have a conversation with title "Group To Evict"
+    And set "conversationAId" to "${conversationId}"
     And set "groupAId" to "${conversationGroupId}"
     And the conversation was archived 100 days ago
     And I have a conversation with title "Another Group"
+    And set "conversationBId" to "${conversationId}"
     And set "groupBId" to "${conversationGroupId}"
     When I call POST "/v1/admin/evict" with body:
       """
@@ -244,7 +248,7 @@ Feature: Data Eviction
     # Group A should be hard-deleted
     When I execute SQL query:
       """
-      SELECT COUNT(*) as count FROM conversations WHERE id = '${groupAId}'
+      SELECT COUNT(*) as count FROM conversations WHERE id = '${conversationAId}'
       """
     Then the SQL result should match:
       | count |
@@ -265,7 +269,7 @@ Feature: Data Eviction
     # Group B should still exist
     When I execute SQL query:
       """
-      SELECT COUNT(*) as count FROM conversations WHERE id = '${groupBId}'
+      SELECT COUNT(*) as count FROM conversations WHERE id = '${conversationBId}'
       """
     Then the SQL result should match:
       | count |

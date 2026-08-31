@@ -1908,7 +1908,7 @@ func (s *EntriesServer) appendEntries(ctx context.Context, conversationID string
 	if err != nil {
 		duplicateConflict := registrystore.IsDuplicateSequenceConflict(err)
 		var notFound *registrystore.NotFoundError
-		archivedRetry := retryEligible && validatedPatch != nil && validatedPatch.archived != nil && *validatedPatch.archived && errors.As(err, &notFound)
+		archivedRetry := retryEligible && validatedPatch != nil && validatedPatch.archived != nil && errors.As(err, &notFound)
 		if retryEligible && (duplicateConflict || archivedRetry) {
 			originalErr := err
 			eventsToPublish = nil
@@ -1929,6 +1929,30 @@ func (s *EntriesServer) appendEntries(ctx context.Context, conversationID string
 						return nil, registrystore.NewDuplicateSequenceConflict()
 					}
 					return nil, originalErr
+				}
+				// Exact retries skip stale title and metadata patches. An explicit
+				// archived=false still applies when the conversation was archived
+				// after the original append.
+				if validatedPatch.needsUnarchiveBeforeWrite() {
+					conv, convErr := s.Store.GetConversation(txCtx, userID, convID)
+					if convErr != nil {
+						return nil, convErr
+					}
+					if conv.ArchivedAt != nil {
+						unarchiveResult, unarchiveErr := s.Store.UnarchiveConversationIfNeeded(txCtx, userID, convID)
+						if unarchiveErr != nil {
+							return nil, unarchiveErr
+						}
+						if unarchiveResult.Changed && s.EventBus != nil {
+							eventsToPublish, convErr = s.conversationPatchEvents(txCtx, convID, conv.ConversationGroupID, grpcPatchResult{
+								changed:  true,
+								archived: validatedPatch.archived,
+							})
+							if convErr != nil {
+								return nil, convErr
+							}
+						}
+					}
 				}
 				for _, storedEntry := range match.Entries {
 					if repairErr := registrystore.RepairStoredEntryAttachmentLinks(txCtx, s.Store, userID, storedEntry); repairErr != nil {
