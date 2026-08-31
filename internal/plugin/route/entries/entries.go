@@ -567,48 +567,7 @@ func appendEntry(c *gin.Context, store registrystore.MemoryStore, eventBus regis
 						return err
 					}
 				}
-
-				unarchiveChanged := false
-				archiveChanged := false
-				patchToApply := validatedPatch
-				if validatedPatch.needsUnarchiveBeforeWrite() {
-					unarchiveResult, unarchiveErr := store.UnarchiveConversationIfNeeded(ctx, userID, convID)
-					if unarchiveErr != nil {
-						return unarchiveErr
-					}
-					unarchiveChanged = unarchiveResult.Changed
-					patchToApply = validatedPatch.withoutArchived()
-				} else if validatedPatch != nil && validatedPatch.archived != nil && *validatedPatch.archived {
-					archiveResult, archiveErr := store.ArchiveConversationIfNeeded(ctx, userID, convID)
-					if archiveErr != nil {
-						return archiveErr
-					}
-					archiveChanged = archiveResult.Changed
-					patchToApply = validatedPatch.withoutArchived()
-				}
-				current, err := store.GetConversation(ctx, userID, convID)
-				if err != nil {
-					return err
-				}
-				patchResult, err := applyValidatedConversationPatch(ctx, store, userID, convID, patchToApply.changesAgainst(current), false)
-				if err != nil {
-					return err
-				}
-				if unarchiveChanged {
-					patchResult.changed = true
-					patchResult.archived = validatedPatch.archived
-				}
-				if archiveChanged {
-					patchResult.changed = true
-					patchResult.archived = validatedPatch.archived
-				}
 				result = match.Entries
-				if eventBus != nil && patchResult.changed {
-					eventsToPublish, err = conversationPatchEvents(ctx, store, convID, result[0].ConversationGroupID, patchResult)
-					if err != nil {
-						return err
-					}
-				}
 				writeAppendResponse(c, result)
 				return nil
 			})

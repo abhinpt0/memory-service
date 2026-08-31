@@ -76,21 +76,27 @@ func TestAttachmentIdentityFallbackIgnoresArbitraryAttachmentIDKeys(t *testing.T
 	require.False(t, equal)
 }
 
-func TestSequencedAppendRequestMatchesPersistedConversationLineage(t *testing.T) {
+func TestSequencedAppendRequestIgnoresCreationOnlyLineageWhenMatchingExistingEntry(t *testing.T) {
+	userID := "alice"
 	seq := uint32(1)
 	parent := "parent"
-	otherParent := "other-parent"
 	anchor := uuid.New()
-	request := SequencedAppendRequest{Entries: []CreateEntryRequest{{
-		Seq: &seq, ForkedAtConversationID: &parent, ForkedAtEntryID: &anchor,
-	}}}
-	conversation := &ConversationDetail{ConversationSummary: ConversationSummary{
-		ForkedAtConversationID: &parent, ForkedAtEntryID: &anchor,
+	request := SequencedAppendRequest{
+		Entries: []CreateEntryRequest{{
+			Channel: "history", ContentType: "history", Seq: &seq,
+			ForkedAtConversationID: &parent, ForkedAtEntryID: &anchor,
+			Content: json.RawMessage(`[{"role":"USER","text":"same"}]`),
+		}},
+		UserID: userID,
+	}
+	stored := []model.Entry{{
+		UserID: &userID, Channel: model.ChannelHistory, Seq: &seq,
+		ContentType: "history", Content: json.RawMessage(`[{"role":"USER","text":"same"}]`),
 	}}
-	require.True(t, request.lineageMatches(conversation))
 
-	request.Entries[0].ForkedAtConversationID = &otherParent
-	require.False(t, request.lineageMatches(conversation))
+	matched, exact := request.MatchExistingEntries(stored)
+	require.True(t, exact)
+	require.Equal(t, stored, matched)
 }
 
 func int64Ptr(value int64) *int64 { return &value }

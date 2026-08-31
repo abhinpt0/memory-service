@@ -132,7 +132,7 @@ Feature: Client-assigned entry sequence (REST)
     Then the response status should be 200
     And the response body "data" should have 2 items
 
-  Scenario: Reject a sequenced auto-create retry with changed fork lineage
+  Scenario: Return the stored entry when an auto-create retry changes creation-only lineage
     Given I am authenticated as agent with API key "test-agent-key"
     And set "firstRetryParentId" to "${conversationId}"
     And I call POST "/v1/conversations/${conversationId}/entries" with body:
@@ -155,11 +155,13 @@ Feature: Client-assigned entry sequence (REST)
     {"channel":"HISTORY","contentType":"history","seq":140,"forkedAtConversationId":"${firstRetryParentId}","forkedAtEntryId":"${firstParentEntryId}","content":[{"role":"USER","text":"fork continuation"}]}
     """
     And the response status should be 201
+    And set "retryForkEntryId" to the json response field "id"
     When I call POST "/v1/conversations/${retryForkConversationId}/entries" with body:
     """
     {"channel":"HISTORY","contentType":"history","seq":140,"forkedAtConversationId":"${otherRetryParentId}","forkedAtEntryId":"${otherRetryParentEntryId}","content":[{"role":"USER","text":"fork continuation"}]}
     """
-    Then the response status should be 409
+    Then the response status should be 201
+    And the response body "id" should be "${retryForkEntryId}"
 
   Scenario: Arbitrary attachmentId keys do not use history attachment equivalence
     Given I call POST "/v1/conversations/${conversationId}/entries" with body:

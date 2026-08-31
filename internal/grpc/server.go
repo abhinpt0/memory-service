@@ -1935,47 +1935,6 @@ func (s *EntriesServer) appendEntries(ctx context.Context, conversationID string
 						return nil, repairErr
 					}
 				}
-
-				unarchiveChanged := false
-				archiveChanged := false
-				patchToApply := validatedPatch
-				if validatedPatch.needsUnarchiveBeforeWrite() {
-					unarchiveResult, unarchiveErr := s.Store.UnarchiveConversationIfNeeded(txCtx, userID, convID)
-					if unarchiveErr != nil {
-						return nil, unarchiveErr
-					}
-					unarchiveChanged = unarchiveResult.Changed
-					patchToApply = validatedPatch.withoutArchived()
-				} else if validatedPatch != nil && validatedPatch.archived != nil && *validatedPatch.archived {
-					archiveResult, archiveErr := s.Store.ArchiveConversationIfNeeded(txCtx, userID, convID)
-					if archiveErr != nil {
-						return nil, archiveErr
-					}
-					archiveChanged = archiveResult.Changed
-					patchToApply = validatedPatch.withoutArchived()
-				}
-				current, currentErr := s.Store.GetConversation(txCtx, userID, convID)
-				if currentErr != nil {
-					return nil, currentErr
-				}
-				patchResult, patchErr := applyValidatedGRPCConversationPatch(txCtx, s.Store, userID, convID, patchToApply.changesAgainst(current), false)
-				if patchErr != nil {
-					return nil, patchErr
-				}
-				if unarchiveChanged {
-					patchResult.changed = true
-					patchResult.archived = validatedPatch.archived
-				}
-				if archiveChanged {
-					patchResult.changed = true
-					patchResult.archived = validatedPatch.archived
-				}
-				if s.EventBus != nil && patchResult.changed {
-					eventsToPublish, patchErr = s.conversationPatchEvents(txCtx, convID, match.Entries[0].ConversationGroupID, patchResult)
-					if patchErr != nil {
-						return nil, patchErr
-					}
-				}
 				return match.Entries, nil
 			})
 		}

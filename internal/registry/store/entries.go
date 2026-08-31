@@ -37,24 +37,10 @@ func FindSequencedAppendMatch(ctx context.Context, store MemoryStore, conversati
 		return SequencedAppendMatch{}, err
 	}
 	matched, exact := request.MatchExistingEntries(stored)
-	if exact {
-		conversation, getErr := store.GetConversation(ctx, request.UserID, conversationID)
-		if getErr != nil {
-			return SequencedAppendMatch{}, getErr
-		}
-		exact = request.lineageMatches(conversation)
-	}
 	if !exact && len(stored) == len(request.Entries) {
 		matched, exact, err = request.matchExistingEntriesWithAttachmentIdentity(ctx, store, stored)
 		if err != nil {
 			return SequencedAppendMatch{}, err
-		}
-		if exact {
-			conversation, getErr := store.GetConversation(ctx, request.UserID, conversationID)
-			if getErr != nil {
-				return SequencedAppendMatch{}, getErr
-			}
-			exact = request.lineageMatches(conversation)
 		}
 	}
 	return SequencedAppendMatch{Entries: matched, Exact: exact, AnyExisting: len(stored) > 0}, nil
@@ -282,21 +268,6 @@ func normalizeJSONNumber(number json.Number) (normalizedJSONNumber, bool) {
 	return normalizedJSONNumber{negative: negative, digits: digits, exponent: exponent}, true
 }
 
-func (r SequencedAppendRequest) lineageMatches(conversation *ConversationDetail) bool {
-	if len(r.Entries) == 0 || conversation == nil {
-		return false
-	}
-	first := r.Entries[0]
-	if first.ForkedAtConversationID == nil && first.ForkedAtEntryID == nil &&
-		first.StartedByConversationID == nil && first.StartedByEntryID == nil {
-		return true
-	}
-	return stringPointersEqual(first.ForkedAtConversationID, conversation.ForkedAtConversationID) &&
-		uuidPointersEqual(first.ForkedAtEntryID, conversation.ForkedAtEntryID) &&
-		stringPointersEqual(first.StartedByConversationID, conversation.StartedByConversationID) &&
-		uuidPointersEqual(first.StartedByEntryID, conversation.StartedByEntryID)
-}
-
 func (r SequencedAppendRequest) matchExistingEntriesWithAttachmentIdentity(ctx context.Context, store MemoryStore, stored []model.Entry) ([]model.Entry, bool, error) {
 	matched, eligible := r.MatchExistingEntriesIgnoringContent(stored)
 	if !eligible {
@@ -409,10 +380,6 @@ func stringPointersEqual(left, right *string) bool {
 }
 
 func int64PointersEqual(left, right *int64) bool {
-	return left == nil && right == nil || left != nil && right != nil && *left == *right
-}
-
-func uuidPointersEqual(left, right *uuid.UUID) bool {
 	return left == nil && right == nil || left != nil && right != nil && *left == *right
 }
 
