@@ -26,9 +26,10 @@ func newPathParameterTestRouter() *gin.Engine {
 			c.Param("id"),
 			&id,
 			openapi_runtime.BindStyledParameterOptions{
-				ParamLocation: openapi_runtime.ParamLocationPath,
-				Required:      true,
-				Type:          "string",
+				ParamLocation:    openapi_runtime.ParamLocationPath,
+				Required:         true,
+				Type:             "string",
+				ValueIsUnescaped: true,
 			},
 		)
 		if err != nil {

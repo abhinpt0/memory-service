@@ -186,6 +186,34 @@ Feature: Sequenced entry retry gRPC API
     Then the gRPC response should not have an error
     And the gRPC response field "id" should be "${unarchiveRetryEntryId}"
 
+  Scenario: Retry unarchives an archived conversation without repeating append side effects
+    Given "alice" is connected to the SSE event stream
+    When I send gRPC request "EntriesService/AppendEntry" with body:
+    """
+    conversation_id: "${conversationId}"
+    entry { channel: HISTORY content_type: "history" seq: 170 content { struct_value { fields { key: "role" value { string_value: "USER" } } fields { key: "text" value { string_value: "stored before archive" } } } } }
+    """
+    Then the gRPC response should not have an error
+    And set "grpcArchivedRetryEntryId" to the gRPC response field "id"
+    And "alice" should receive an SSE event with kind "entry" and event "created"
+    Given I am authenticated as user "alice"
+    When I archive the conversation
+    Then the response status should be 200
+    And "alice" should receive an SSE event with kind "conversation" and event "updated"
+    Given I am authenticated as agent with API key "test-agent-key"
+    When I send gRPC request "EntriesService/AppendEntry" with body:
+    """
+    conversation_id: "${conversationId}"
+    entry { channel: HISTORY content_type: "history" seq: 170 content { struct_value { fields { key: "role" value { string_value: "USER" } } fields { key: "text" value { string_value: "stored before archive" } } } } }
+    conversation_patch { archived: false }
+    """
+    Then the gRPC response should not have an error
+    And the gRPC response field "id" should be "${grpcArchivedRetryEntryId}"
+    And "alice" should receive an SSE event with kind "conversation" and event "updated"
+    And the SSE event data "archived" should be "false"
+    And "alice" should not receive an SSE event with kind "conversation" and event "updated" within 2 seconds
+    And "alice" should not receive an SSE event with kind "entry" and event "created" within 2 seconds
+
   Scenario: archived false on an active conversation emits no conversation update
     Given "alice" is connected to the SSE event stream
     When I send gRPC request "EntriesService/AppendEntry" with body:

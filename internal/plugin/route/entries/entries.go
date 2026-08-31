@@ -540,7 +540,7 @@ func appendEntry(c *gin.Context, store registrystore.MemoryStore, eventBus regis
 	})
 	if writeErr != nil {
 		duplicateConflict := registrystore.IsDuplicateSequenceConflict(writeErr)
-		archivedRetry := retryEligible && validatedPatch != nil && validatedPatch.archived != nil && *validatedPatch.archived && isNotFoundError(writeErr)
+		archivedRetry := retryEligible && validatedPatch != nil && validatedPatch.archived != nil && isNotFoundError(writeErr)
 		if retryEligible && (duplicateConflict || archivedRetry) {
 			originalErr := writeErr
 			eventsToPublish = nil
@@ -561,6 +561,32 @@ func appendEntry(c *gin.Context, store registrystore.MemoryStore, eventBus regis
 						return registrystore.NewDuplicateSequenceConflict()
 					}
 					return originalErr
+				}
+				// Exact retries normally skip all append-time patches so stale title or
+				// metadata cannot overwrite newer conversation state. Explicit
+				// archived=false is the exception: it describes the caller's desired
+				// current state and must unarchive a conversation archived after the
+				// original append.
+				if validatedPatch.needsUnarchiveBeforeWrite() {
+					conv, err := store.GetConversation(ctx, userID, convID)
+					if err != nil {
+						return err
+					}
+					if conv.ArchivedAt != nil {
+						unarchiveResult, err := store.UnarchiveConversationIfNeeded(ctx, userID, convID)
+						if err != nil {
+							return err
+						}
+						if unarchiveResult.Changed && eventBus != nil {
+							eventsToPublish, err = conversationPatchEvents(ctx, store, convID, conv.ConversationGroupID, conversationPatchResult{
+								changed:  true,
+								archived: validatedPatch.archived,
+							})
+							if err != nil {
+								return err
+							}
+						}
+					}
 				}
 				for _, storedEntry := range match.Entries {
 					if err := registrystore.RepairStoredEntryAttachmentLinks(ctx, store, userID, storedEntry); err != nil {

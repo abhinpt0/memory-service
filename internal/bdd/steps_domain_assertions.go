@@ -3,6 +3,7 @@ package bdd
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/chirino/memory-service/internal/testutil/cucumber"
@@ -19,8 +20,8 @@ func init() {
 		// Response body assertions (JSON matching)
 		ctx.Step(`^the response body should be json:$`, d.theResponseBodyShouldBeJSON)
 		ctx.Step(`^the response body should contain json:$`, d.theResponseBodyShouldContainJSON)
-		ctx.Step(`^the response body should contain "([^"]*)"$`, d.theResponseBodyShouldContainText)
-		ctx.Step(`^the response body should not contain "([^"]*)"$`, d.theResponseBodyShouldNotContainText)
+		ctx.Step(`^the response body should contain "((?:\\.|[^"])*)"$`, d.theResponseBodyShouldContainText)
+		ctx.Step(`^the response body should not contain "((?:\\.|[^"])*)"$`, d.theResponseBodyShouldNotContainText)
 
 		// Response body field assertions
 		ctx.Step(`^the response body "([^"]*)" should be "([^"]*)"$`, d.theResponseBodyFieldShouldBe)
@@ -30,6 +31,7 @@ func init() {
 		ctx.Step(`^the response body field "([^"]*)" should contain "([^"]*)"$`, d.theResponseBodyFieldShouldContain)
 		ctx.Step(`^the response body "([^"]*)" should have at least (\d+) items?$`, d.theResponseBodyFieldShouldHaveAtLeastItems)
 		ctx.Step(`^the response body "([^"]*)" should have at most (\d+) items?$`, d.theResponseBodyFieldShouldHaveAtMostItems)
+		ctx.Step(`^the response body "([^"]*)" should have (\d+) items?$`, d.theResponseBodyFieldShouldHaveItems)
 
 		// Collection size assertions
 		ctx.Step(`^the response should contain at least (\d+) conversations?$`, d.theResponseShouldContainAtLeastItems)
@@ -125,12 +127,18 @@ func (d *domainAssertionSteps) theResponseBodyShouldContainJSON(expected *godog.
 }
 
 func (d *domainAssertionSteps) theResponseBodyShouldContainText(expected string) error {
+	expected = decodeStepQuotedContent(expected)
 	expanded, err := d.s.Expand(expected)
 	if err != nil {
 		return err
 	}
 	session := d.s.Session()
 	body := string(session.RespBytes)
+	if respJSON, jsonErr := session.RespJSON(); jsonErr == nil {
+		if _, found := jsonPathLookup(respJSON, expanded); found {
+			return nil
+		}
+	}
 	if !strings.Contains(body, expanded) {
 		return fmt.Errorf("expected response to contain '%s', but it does not. Response body: %s", expanded, body)
 	}
@@ -138,12 +146,21 @@ func (d *domainAssertionSteps) theResponseBodyShouldContainText(expected string)
 }
 
 func (d *domainAssertionSteps) theResponseBodyShouldNotContainText(expected string) error {
+	expected = decodeStepQuotedContent(expected)
 	session := d.s.Session()
 	body := string(session.RespBytes)
 	if strings.Contains(body, expected) {
 		return fmt.Errorf("expected response not to contain '%s', but it does. Response body: %s", expected, body)
 	}
 	return nil
+}
+
+func decodeStepQuotedContent(value string) string {
+	decoded, err := strconv.Unquote(`"` + value + `"`)
+	if err != nil {
+		return value
+	}
+	return decoded
 }
 
 func (d *domainAssertionSteps) theResponseBodyFieldShouldBe(path, expected string) error {
@@ -226,6 +243,23 @@ func (d *domainAssertionSteps) theResponseBodyFieldShouldHaveAtMostItems(path st
 	}
 	if len(arr) > maxCount {
 		return fmt.Errorf("field '%s' has %d items, expected at most %d. Response: %s", path, len(arr), maxCount, string(session.RespBytes))
+	}
+	return nil
+}
+
+func (d *domainAssertionSteps) theResponseBodyFieldShouldHaveItems(path string, count int) error {
+	session := d.s.Session()
+	respJSON, err := session.RespJSON()
+	if err != nil {
+		return err
+	}
+	value := jsonPathGet(respJSON, path)
+	arr, ok := value.([]interface{})
+	if !ok {
+		return fmt.Errorf("field '%s' is not an array. Response: %s", path, string(session.RespBytes))
+	}
+	if len(arr) != count {
+		return fmt.Errorf("field '%s' has %d items, expected %d. Response: %s", path, len(arr), count, string(session.RespBytes))
 	}
 	return nil
 }
@@ -678,6 +712,11 @@ func (d *domainAssertionSteps) setContextVariableToJSONResponseField(name, path 
 // jsonPathGet navigates a JSON structure using dot-separated path with array index support.
 // e.g. "data.0.content.0.text" or "data[0].content[0].text"
 func jsonPathGet(obj interface{}, path string) interface{} {
+	value, _ := jsonPathLookup(obj, path)
+	return value
+}
+
+func jsonPathLookup(obj interface{}, path string) (interface{}, bool) {
 	// Normalize bracket notation: data[0] → data.0
 	path = strings.ReplaceAll(path, "[", ".")
 	path = strings.ReplaceAll(path, "]", "")
@@ -690,13 +729,17 @@ func jsonPathGet(obj interface{}, path string) interface{} {
 		}
 		switch v := current.(type) {
 		case map[string]interface{}:
-			current = v[part]
+			var found bool
+			current, found = v[part]
+			if !found {
+				return nil, false
+			}
 		case []interface{}:
 			var idx int
 			if _, err := fmt.Sscanf(part, "%d", &idx); err == nil && idx >= 0 && idx < len(v) {
 				current = v[idx]
 			} else {
-				return nil
+				return nil, false
 			}
 		default:
 			// Try JSON unmarshal if it's a string containing JSON
@@ -707,17 +750,21 @@ func jsonPathGet(obj interface{}, path string) interface{} {
 					// Re-navigate this part
 					switch v2 := current.(type) {
 					case map[string]interface{}:
-						current = v2[part]
+						var found bool
+						current, found = v2[part]
+						if !found {
+							return nil, false
+						}
 					default:
-						return nil
+						return nil, false
 					}
 				} else {
-					return nil
+					return nil, false
 				}
 			} else {
-				return nil
+				return nil, false
 			}
 		}
 	}
-	return current
+	return current, true
 }
