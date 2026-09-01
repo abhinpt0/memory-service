@@ -355,9 +355,13 @@ func senderLoop(
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
-		appendEnd := time.Now()
 		io.Copy(io.Discard, resp.Body) //nolint:errcheck
 		resp.Body.Close()
+		// Capture appendEnd after the response body is fully consumed.
+		// The server has already committed the write and dispatched the SSE
+		// event before returning the response; taking the timestamp here gives
+		// the cleanest possible start point for the append→event latency window.
+		appendEnd := time.Now()
 
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			fmt.Fprintf(os.Stderr, "[ssedelay] append status=%d user=%s\n", resp.StatusCode, userID)
