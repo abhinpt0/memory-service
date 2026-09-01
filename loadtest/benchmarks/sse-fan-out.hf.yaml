@@ -35,19 +35,21 @@ phases:
         startTime: 5s
         scenario:
           - burstAppend:
-              # Pick a seeded conversation ID from CSV (same pattern as append-throughput).
-              # Do NOT use a runtime search — the SSE users (loadtest-sse-*) own no
-              # conversations, so the search would return empty data[].
+              # Pick a seeded conversation ID AND its ownerID from CSV so the
+              # append is always authorised.  With a pool-of-5 seed, ~80% of
+              # conversations are NOT owned by loadtest-user-1, so a hardcoded
+              # user header would return 403 for most rows and poison latency data.
               - randomCsvRow:
                   file: ../results/conversation-ids.csv
                   columns:
                     0: conversationId
+                    1: ownerID
               - httpRequest:
                   POST: /v1/conversations/${conversationId}/entries
                   headers:
                     Content-Type: application/json
                     X-API-Key: agent-api-key-1
-                    X-User-ID: loadtest-user-1
+                    X-User-ID: ${ownerID}
                   body: |
-                    {"contentType":"history","content":[{"role":"USER","text":"sse fan-out burst entry"}],"userId":"loadtest-user-1"}
+                    {"contentType":"history","content":[{"role":"USER","text":"sse fan-out burst entry"}],"userId":"${ownerID}"}
                   metric: burst-append

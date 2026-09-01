@@ -167,8 +167,9 @@ func TestConversationListPagination(t *testing.T) {
 	}
 
 	collected := make(map[string]int) // convID -> page-seen count (duplicate detection)
+	maxPagesForOwner := 0             // track pagination depth to assert it was exercised
 
-	for ownerID := range ownerConvs {
+	for ownerID, convIDs := range ownerConvs {
 		cursor := ""
 		pageNum := 0
 		for {
@@ -198,6 +199,20 @@ func TestConversationListPagination(t *testing.T) {
 			}
 			cursor = *page.AfterCursor
 		}
+		_ = convIDs
+		if pageNum > maxPagesForOwner {
+			maxPagesForOwner = pageNum
+		}
+	}
+
+	// Assert pagination was actually exercised — at least one owner must have
+	// required more than one page. With limit=20 this requires an owner with
+	// >20 conversations. If all owners have ≤20 conversations the dataset is
+	// too sparse to validate pagination meaningfully.
+	if maxPagesForOwner < 2 {
+		t.Logf("WARNING: TestConversationListPagination did not exercise pagination "+
+			"(max pages per owner = %d). Re-seed with a smaller user pool so owners "+
+			"have >20 conversations each (see Option B in loadtest README).", maxPagesForOwner)
 	}
 
 	// Assert no duplicates within a single owner's pages.
@@ -326,6 +341,11 @@ func TestSearchPagination(t *testing.T) {
 		t.Skip("seed manifest not found — run 'task loadtest:seed' first")
 	}
 
+	// Search is user-scoped: use loadtest-user-1 which always owns many
+	// conversations in the seeded dataset (pool-of-5 generator assigns
+	// ~1/5 of all conversations to each of loadtest-user-1..5).
+	searchUserID := "loadtest-user-1"
+
 	collected := make(map[string]int)
 	cursor := ""
 	pageNum := 0
@@ -334,7 +354,7 @@ func TestSearchPagination(t *testing.T) {
 		if cursor != "" {
 			reqBody["afterCursor"] = cursor
 		}
-		body := doPost(t, baseURL+"/v1/conversations/search", reqBody)
+		body := doPostAs(t, baseURL+"/v1/conversations/search", searchUserID, reqBody)
 
 		var page struct {
 			Data []struct {
@@ -362,6 +382,13 @@ func TestSearchPagination(t *testing.T) {
 		recordResult("TestSearchPagination", false, 0,
 			"search returned 0 results — were entries indexed? (re-run task loadtest:seed)")
 		t.Fatalf("search for 'load-test' returned 0 results — entries may not be indexed")
+	}
+
+	// Assert pagination was exercised — loadtest-user-1 owns ~1/5 of all
+	// seeded conversations so with limit=5 we expect many pages.
+	if pageNum < 2 {
+		t.Logf("WARNING: TestSearchPagination completed in 1 page for %s (limit=5). "+
+			"Pagination was not exercised — re-seed with 'task loadtest:seed'.", searchUserID)
 	}
 
 	// Assert no duplicates across pages.

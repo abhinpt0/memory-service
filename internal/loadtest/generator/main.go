@@ -78,9 +78,14 @@ func main() {
 				entryCount := EntryCount(wr)
 				participantType := ParticipantType(j.index)
 
-				ownerID := fmt.Sprintf("loadtest-user-%d", j.index)
+				// Assign owners from a small fixed pool so each user owns many
+				// conversations. This ensures list and search pagination is
+				// exercised in correctness tests and benchmarks.
+				// Pool: loadtest-user-1..5 for single/two-user, loadtest-agent-1..5 for two-agent.
+				poolIdx := j.index%5 + 1
+				ownerID := fmt.Sprintf("loadtest-user-%d", poolIdx)
 				if participantType == "two-agent" {
-					ownerID = fmt.Sprintf("loadtest-agent-%d", j.index)
+					ownerID = fmt.Sprintf("loadtest-agent-%d", poolIdx)
 				}
 
 				convID, err := createConversation(client, cfg, title, ownerID)
@@ -144,9 +149,14 @@ func main() {
 		len(conversations), len(forks), cfg.SeedManifestPath)
 }
 
-// seedEntries appends entryCount USER+AI entry pairs to convID according to
+// seedEntriesWithIndex appends entryCount USER+AI entry pairs to convID according to
 // the participant type. Returns index requests for all appended entries so the
 // caller can submit them to POST /v1/conversations/index.
+//
+// Participant types:
+//   - "single-user": both turns use ownerID
+//   - "two-user":    first turn uses ownerID, second uses ownerID+"2" (second human)
+//   - "two-agent":   both turns are AI role; first uses ownerID, second uses ownerID+"2"
 func seedEntriesWithIndex(
 	client *http.Client,
 	cfg GeneratorConfig,
@@ -156,22 +166,34 @@ func seedEntriesWithIndex(
 	participantType string,
 ) ([]indexEntryRequest, error) {
 	var idxReqs []indexEntryRequest
-	// entryCount is the number of USER turns; each is followed by an AI reply,
-	// so the actual total entries stored is entryCount*2.
+
+	// Derive a second participant ID for two-user / two-agent conversations.
+	// Convention: append "2" to the owner ID (e.g. "loadtest-user-12" or
+	// "loadtest-agent-12") so the second participant is distinct but stable.
+	secondParticipant := ownerID + "2"
+
+	// entryCount is the number of first-turn exchanges; each is followed by a
+	// second-turn reply, so the total entries stored is entryCount*2.
 	for range entryCount {
-		userRole := "USER"
-		aiRole := "AI"
-		if participantType == "two-agent" {
-			userRole = "AI"
-			aiRole = "AI"
+		var firstRole, secondRole, firstUserID, secondUserID string
+		switch participantType {
+		case "two-agent":
+			firstRole, secondRole = "AI", "AI"
+			firstUserID, secondUserID = ownerID, secondParticipant
+		case "two-user":
+			firstRole, secondRole = "USER", "USER"
+			firstUserID, secondUserID = ownerID, secondParticipant
+		default: // "single-user"
+			firstRole, secondRole = "USER", "AI"
+			firstUserID, secondUserID = ownerID, ownerID
 		}
 
 		userText := EntryText(r)
-		entryID, err := appendEntry(client, cfg, convID, ownerID, ownerID, userRole, userText, "", "")
+		entryID, err := appendEntry(client, cfg, convID, ownerID, firstUserID, firstRole, userText, "", "")
 		if err != nil {
 			return idxReqs, err
 		}
-		// Only index USER/first-agent turn entries so search finds conversations.
+		// Only index first-turn entries so search finds conversations.
 		idxReqs = append(idxReqs, indexEntryRequest{
 			ConversationID: convID,
 			EntryID:        entryID,
@@ -179,7 +201,7 @@ func seedEntriesWithIndex(
 		})
 
 		aiText := EntryText(r)
-		if _, err := appendEntry(client, cfg, convID, ownerID, ownerID, aiRole, aiText, "", ""); err != nil {
+		if _, err := appendEntry(client, cfg, convID, ownerID, secondUserID, secondRole, aiText, "", ""); err != nil {
 			return idxReqs, err
 		}
 	}

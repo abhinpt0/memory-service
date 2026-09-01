@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // createConversation posts a new conversation to the memory service and returns
@@ -205,16 +207,20 @@ type indexEntryRequest struct {
 
 // createFork creates a new conversation and seeds it as a fork of rootConvID
 // branching at atEntryID. Returns the new fork conversation ID.
+//
+// IMPORTANT: do NOT call createConversation first.  The fork ancestry closure
+// is only registered by AppendEntries when the conversation does not yet exist
+// (RowsAffected == 0 path in the store).  Creating the conversation shell first
+// makes RowsAffected == 1, which silently skips the forkedAtConversationId/
+// forkedAtEntryId fields, leaving the fork unregistered in the ancestry table.
+// Instead, generate the UUID here and let appendEntry trigger the implicit
+// conversation auto-create with fork fields in a single store call.
 func createFork(client *http.Client, cfg GeneratorConfig, rootConvID, atEntryID string) (string, error) {
-	// Create the new (fork) conversation shell.
-	forkID, err := createConversation(client, cfg, "load-test-fork-"+rootConvID, "loadtest-user-1")
-	if err != nil {
-		return "", fmt.Errorf("createFork: create conversation: %w", err)
-	}
+	forkID := uuid.New().String()
 
-	// The first entry append with forkedAt fields is what implicitly registers
-	// the fork in the ancestry closure table (per AGENTS.md).
-	_, err = appendEntry(client, cfg, forkID, "loadtest-user-1", "loadtest-user-1", "USER",
+	// The first entry append with forkedAt fields implicitly creates the
+	// conversation AND registers the fork in the ancestry closure table.
+	_, err := appendEntry(client, cfg, forkID, "loadtest-user-1", "loadtest-user-1", "USER",
 		"fork branch entry", rootConvID, atEntryID)
 	if err != nil {
 		return "", fmt.Errorf("createFork: append first entry: %w", err)
