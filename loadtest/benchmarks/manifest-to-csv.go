@@ -62,11 +62,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	// conversation-ids.csv — all seeded conversations
+	// conversation-ids.csv — all seeded conversations.
+	// Two columns: col 0 = conversationId, col 1 = ownerID.
+	// Benchmarks that write or read owner-scoped endpoints must send the
+	// correct X-User-ID; without it the server returns 403.
 	allPath := *resultsDir + "/conversation-ids.csv"
 	if err := writeCSV(allPath, func(w *csv.Writer) error {
 		for _, c := range manifest.Conversations {
-			if err := w.Write([]string{c.ID}); err != nil {
+			if err := w.Write([]string{c.ID, c.OwnerID}); err != nil {
 				return err
 			}
 		}

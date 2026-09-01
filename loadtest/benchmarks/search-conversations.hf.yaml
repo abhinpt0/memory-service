@@ -2,6 +2,12 @@ name: search-conversations
 
 # Sustained POST /v1/conversations/search load with pagination.
 # SLO: p99 < 1000ms (checked in run.sh from exported JSON)
+#
+# conversation-ids.csv has TWO columns:
+#   col 0 — conversationId
+#   col 1 — ownerID (the user who created the conversation)
+# Search is owner-scoped: we pick a random ownerID so each session searches
+# against a user who has real indexed data.
 
 http:
   - host: localhost
@@ -17,12 +23,17 @@ phases:
         maxSessions: 30
         scenario:
           - searchAndPage:
+              - randomCsvRow:
+                  file: ../results/conversation-ids.csv
+                  columns:
+                    0: conversationId
+                    1: ownerID
               - httpRequest:
                   POST: /v1/conversations/search
                   headers:
                     Content-Type: application/json
                     X-API-Key: agent-api-key-1
-                    X-User-ID: loadtest-user-1
+                    X-User-ID: ${ownerID}
                   body: |
                     {"query":"load-test","limit":5}
                   metric: search-conversations
@@ -40,7 +51,7 @@ phases:
                   headers:
                     Content-Type: application/json
                     X-API-Key: agent-api-key-1
-                    X-User-ID: loadtest-user-1
+                    X-User-ID: ${ownerID}
                   body: |
                     {"query":"load-test","limit":5,"afterCursor":"${afterCursor}"}
                   metric: search-conversations
