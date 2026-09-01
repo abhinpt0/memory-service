@@ -276,9 +276,11 @@ func loadHyperfoilResults(root string) []benchmarkRow {
 		}
 
 		// Skip stub files (stats-unavailable or parse-failed).
+		// hasData=false excludes this row from the summary pass/fail.
+		// SLOPass=false: a benchmark that produced no stats is not a pass.
 		if note := strVal(raw, "note"); note != "" {
 			fmt.Fprintf(os.Stderr, "info: %s has note=%q (benchmark ran but stats not available)\n", name, note)
-			rows = append(rows, benchmarkRow{Name: name, SLOPass: true, hasData: false})
+			rows = append(rows, benchmarkRow{Name: name, SLOPass: false, hasData: false})
 			continue
 		}
 
