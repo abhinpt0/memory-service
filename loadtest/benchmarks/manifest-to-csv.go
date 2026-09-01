@@ -104,6 +104,32 @@ func main() {
 	}
 	fmt.Printf("Wrote %d rows to %s\n", len(longTail), longPath)
 
+	// sse-conversation-ids.csv — conversations owned by loadtest-user-1 only.
+	// Used by sse-fan-out.hf.yaml so both the SSE subscriber (authenticated as
+	// loadtest-user-1) and the appendBurst phase write to the same user's
+	// conversations — ensuring events are actually routed to the subscriber.
+	// SSE routing is user-scoped: appending to another owner's conversation
+	// produces an event that the loadtest-user-1 subscriber never sees.
+	var sseConvs []conversationRecord
+	for _, c := range manifest.Conversations {
+		if c.OwnerID == "loadtest-user-1" {
+			sseConvs = append(sseConvs, c)
+		}
+	}
+	ssePath := *resultsDir + "/sse-conversation-ids.csv"
+	if err := writeCSV(ssePath, func(w *csv.Writer) error {
+		for _, c := range sseConvs {
+			if err := w.Write([]string{c.ID, c.OwnerID}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "manifest-to-csv: write %s: %v\n", ssePath, err)
+		os.Exit(1)
+	}
+	fmt.Printf("Wrote %d rows to %s\n", len(sseConvs), ssePath)
+
 	// fork-root-ids.csv — fork root conversation IDs
 	forkPath := *resultsDir + "/fork-root-ids.csv"
 	if err := writeCSV(forkPath, func(w *csv.Writer) error {

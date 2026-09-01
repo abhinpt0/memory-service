@@ -80,6 +80,12 @@ type levelResult struct {
 	endTime   time.Time
 }
 
+// maxTimeoutPct is the maximum acceptable fraction of timed-out samples for
+// any single ramp level before the benchmark is considered failed.  A value
+// above this threshold means either the SSE subscriber never connected, the
+// server is not routing events, or the service is completely overloaded.
+const maxTimeoutPct = 0.10 // 10 %
+
 func main() {
 	baseURL := flag.String("base-url", "http://localhost:8082", "Memory service base URL")
 	apiKey := flag.String("api-key", "agent-api-key-1", "Agent API key (X-API-Key)")
@@ -118,6 +124,7 @@ func main() {
 
 	// 3. Run each ramp level sequentially.
 	var results []levelResult
+	failed := false
 	for _, level := range rampLevels {
 		fmt.Printf("[ssedelay] === ramp level: %d user(s), %ds ===\n", level.users, *duration)
 		res := runLevel(
@@ -128,15 +135,41 @@ func main() {
 		)
 		results = append(results, res)
 		printLevelSummary(res)
+
+		// Fail if too many events timed out — indicates subscriber not connected,
+		// events not routed, or zero samples (no appends succeeded at all).
+		total := len(res.samples)
+		timeouts := 0
+		for _, s := range res.samples {
+			if s.timedOut {
+				timeouts++
+			}
+		}
+		if total == 0 {
+			fmt.Fprintf(os.Stderr, "[ssedelay] FAIL %s: no samples recorded (SSE subscriber likely never connected)\n", level.label)
+			failed = true
+		} else {
+			pct := float64(timeouts) / float64(total)
+			if pct > maxTimeoutPct {
+				fmt.Fprintf(os.Stderr, "[ssedelay] FAIL %s: timeout rate %.0f%% > %.0f%% threshold (%d/%d samples timed out)\n",
+					level.label, pct*100, maxTimeoutPct*100, timeouts, total)
+				failed = true
+			}
+		}
+
 		// Brief pause between levels so SSE connections can drain.
 		time.Sleep(500 * time.Millisecond)
 	}
 
-	// 4. Write output JSON.
+	// 4. Write output JSON regardless of failure so partial results are visible.
 	if err := writeOutput(*out, results); err != nil {
 		fatalf("write output: %v", err)
 	}
 	fmt.Printf("[ssedelay] results written to %s\n", *out)
+
+	if failed {
+		fatalf("one or more ramp levels exceeded the timeout threshold — SSE delivery is broken")
+	}
 }
 
 // runLevel opens one SSE subscriber per user, runs senders for the given

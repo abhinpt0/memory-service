@@ -52,7 +52,35 @@ type benchmarkRow struct {
 	P99ms   float64 `json:"p99ms"`
 	SLOPass bool    `json:"sloPass"`
 	// hasData indicates whether actual benchmark data was found.
+	// When false the row is shown as "-" and excluded from the overall pass/fail.
 	hasData bool
+}
+
+// sloThresholds defines p99 SLO limits in milliseconds per benchmark name.
+// A benchmark row passes SLO when its measured p99 is <= the threshold.
+// Rows not listed here use defaultSLOP99Ms.
+var sloThresholds = map[string]float64{
+	"append-throughput":        500,
+	"list-conversations":       300,
+	"list-entries":             300,
+	"search-conversations":     1000,
+	"list-forks":               300,
+	"sse-fan-out/sse-connection": 5000, // TTFB, 5 s cap
+	"sse-fan-out/burst-append":   500,
+	"sse-event-delay/users-1":    500,
+	"sse-event-delay/users-10":   1000,
+	"sse-event-delay/users-50":   2000,
+}
+
+const defaultSLOP99Ms = 1000
+
+// sloPass returns true when p99ms satisfies the SLO threshold for name.
+func sloPass(name string, p99ms float64) bool {
+	limit, ok := sloThresholds[name]
+	if !ok {
+		limit = defaultSLOP99Ms
+	}
+	return p99ms <= limit
 }
 
 type correctnessRow struct {
@@ -315,7 +343,6 @@ func loadHyperfoilResults(root string) []benchmarkRow {
 			}
 
 			multiMetric := len(byMetric) > 1 && !mergedMetricBenchmarks[name]
-			sloViolations := boolVal(raw, "sloViolations")
 
 			if !multiMetric {
 				// Emit a single merged row: pool requests/duration, average percentiles.
@@ -344,7 +371,7 @@ func loadHyperfoilResults(root string) []benchmarkRow {
 					P50ms:   p50,
 					P95ms:   p95,
 					P99ms:   p99,
-					SLOPass: !sloViolations,
+					SLOPass: sloPass(name, p99),
 					hasData: true,
 				})
 			} else {
@@ -369,7 +396,7 @@ func loadHyperfoilResults(root string) []benchmarkRow {
 						P50ms:   p50,
 						P95ms:   p95,
 						P99ms:   p99,
-						SLOPass: !sloViolations,
+						SLOPass: sloPass(rowName, p99),
 						hasData: true,
 					})
 				}
@@ -383,13 +410,12 @@ func loadHyperfoilResults(root string) []benchmarkRow {
 		p50, _ = floatVal(raw, "p50")
 		p99, _ = floatVal(raw, "p99")
 
-		sloViolations := boolVal(raw, "sloViolations")
 		rows = append(rows, benchmarkRow{
 			Name:    name,
 			RPS:     rps,
 			P50ms:   p50,
 			P99ms:   p99,
-			SLOPass: !sloViolations,
+			SLOPass: sloPass(name, p99),
 			hasData: true,
 		})
 	}
@@ -444,7 +470,10 @@ func buildBenchmarkRows(loaded []benchmarkRow) []benchmarkRow {
 		if r, ok := byName[ep]; ok {
 			rows = append(rows, r)
 		} else {
-			rows = append(rows, benchmarkRow{Name: ep, SLOPass: true})
+			// Benchmark not yet run — hasData=false so it is excluded from the
+			// overall pass/fail summary and shown as "-" in the report table.
+			// SLOPass is explicitly false: absent data is not a pass.
+			rows = append(rows, benchmarkRow{Name: ep, SLOPass: false, hasData: false})
 		}
 	}
 	return rows

@@ -386,9 +386,13 @@ func TestSearchPagination(t *testing.T) {
 
 	// Assert pagination was exercised — loadtest-user-1 owns ~1/5 of all
 	// seeded conversations so with limit=5 we expect many pages.
+	// Fail hard: returning one page could mean the cursor is broken and the
+	// test would silently pass with only the first page of results.
 	if pageNum < 2 {
-		t.Logf("WARNING: TestSearchPagination completed in 1 page for %s (limit=5). "+
-			"Pagination was not exercised — re-seed with 'task loadtest:seed'.", searchUserID)
+		recordResult("TestSearchPagination", false, len(collected),
+			fmt.Sprintf("pagination not exercised: completed in 1 page (got %d results, limit=5)", len(collected)))
+		t.Fatalf("TestSearchPagination: pagination not exercised for %s — got %d results in 1 page (limit=5). "+
+			"Re-seed with 'task loadtest:seed' to get >5 indexed conversations for this user.", searchUserID, len(collected))
 	}
 
 	// Assert no duplicates across pages.
