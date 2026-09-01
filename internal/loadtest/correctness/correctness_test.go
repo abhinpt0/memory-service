@@ -207,12 +207,14 @@ func TestConversationListPagination(t *testing.T) {
 
 	// Assert pagination was actually exercised — at least one owner must have
 	// required more than one page. With limit=20 this requires an owner with
-	// >20 conversations. If all owners have ≤20 conversations the dataset is
-	// too sparse to validate pagination meaningfully.
+	// >20 conversations.  Fail hard: a broken cursor that returns everything
+	// on the first page would otherwise pass silently.
 	if maxPagesForOwner < 2 {
-		t.Logf("WARNING: TestConversationListPagination did not exercise pagination "+
-			"(max pages per owner = %d). Re-seed with a smaller user pool so owners "+
-			"have >20 conversations each (see Option B in loadtest README).", maxPagesForOwner)
+		recordResult("TestConversationListPagination", false, len(collected),
+			fmt.Sprintf("pagination not exercised: max pages per owner = %d (limit=20, need >20 convs per owner)", maxPagesForOwner))
+		t.Fatalf("TestConversationListPagination: pagination not exercised — "+
+			"max pages per owner = %d. Re-seed so each owner has >20 conversations "+
+			"(pool-of-5 with 2000 total gives ~400 per owner).", maxPagesForOwner)
 	}
 
 	// Assert no duplicates within a single owner's pages.

@@ -130,11 +130,23 @@ func main() {
 	}
 	fmt.Printf("Wrote %d rows to %s\n", len(sseConvs), ssePath)
 
-	// fork-root-ids.csv — fork root conversation IDs
+	// fork-root-ids.csv — fork root conversation IDs with ownerID.
+	// Two columns: col 0 = conversationId, col 1 = ownerID.
+	// Fork roots are always seeded as loadtest-user-1 (see seedForkChains),
+	// but we store the ownerID explicitly so list-forks.hf.yaml can send the
+	// correct X-User-ID without hardcoding a username.
+	forkOwnerIndex := make(map[string]string) // rootID -> ownerID
+	for _, conv := range manifest.Conversations {
+		forkOwnerIndex[conv.ID] = conv.OwnerID
+	}
 	forkPath := *resultsDir + "/fork-root-ids.csv"
 	if err := writeCSV(forkPath, func(w *csv.Writer) error {
 		for _, f := range manifest.Forks {
-			if err := w.Write([]string{f.RootID}); err != nil {
+			ownerID := forkOwnerIndex[f.RootID]
+			if ownerID == "" {
+				ownerID = "loadtest-user-1" // fork roots always owned by this user
+			}
+			if err := w.Write([]string{f.RootID, ownerID}); err != nil {
 				return err
 			}
 		}
