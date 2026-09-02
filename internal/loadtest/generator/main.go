@@ -149,14 +149,18 @@ func main() {
 		len(conversations), len(forks), cfg.SeedManifestPath)
 }
 
-// seedEntriesWithIndex appends entryCount USER+AI entry pairs to convID according to
+// seedEntriesWithIndex appends entryCount entry pairs to convID according to
 // the participant type. Returns index requests for all appended entries so the
 // caller can submit them to POST /v1/conversations/index.
 //
 // Participant types:
-//   - "single-user": both turns use ownerID
-//   - "two-user":    first turn uses ownerID, second uses ownerID+"2" (second human)
-//   - "two-agent":   both turns are AI role; first uses ownerID, second uses ownerID+"2"
+//   - "single-user": USER+AI turns; both authenticated as ownerID
+//   - "two-user":    USER+USER turns; first as ownerID, second as ownerID+"2"
+//   - "two-agent":   AI+AI turns;   first as ownerID, second as ownerID+"2"
+//
+// For two-user and two-agent, the second participant is granted writer access
+// on the conversation before any entries are appended, so their X-User-ID is
+// authorised to write.
 func seedEntriesWithIndex(
 	client *http.Client,
 	cfg GeneratorConfig,
@@ -171,6 +175,14 @@ func seedEntriesWithIndex(
 	// Convention: append "2" to the owner ID (e.g. "loadtest-user-12" or
 	// "loadtest-agent-12") so the second participant is distinct but stable.
 	secondParticipant := ownerID + "2"
+
+	// Grant the second participant writer access before appending entries on
+	// their behalf. This is only needed for multi-identity participant types.
+	if participantType == "two-user" || participantType == "two-agent" {
+		if err := shareConversation(client, cfg, ownerID, convID, secondParticipant, "writer"); err != nil {
+			return idxReqs, fmt.Errorf("shareConversation: %w", err)
+		}
+	}
 
 	// entryCount is the number of first-turn exchanges; each is followed by a
 	// second-turn reply, so the total entries stored is entryCount*2.
@@ -189,7 +201,8 @@ func seedEntriesWithIndex(
 		}
 
 		userText := EntryText(r)
-		entryID, err := appendEntry(client, cfg, convID, ownerID, firstUserID, firstRole, userText, "", "")
+		// Authenticate as firstUserID — X-User-ID must match userId in payload.
+		entryID, err := appendEntry(client, cfg, convID, firstUserID, firstUserID, firstRole, userText, "", "")
 		if err != nil {
 			return idxReqs, err
 		}
@@ -201,7 +214,8 @@ func seedEntriesWithIndex(
 		})
 
 		aiText := EntryText(r)
-		if _, err := appendEntry(client, cfg, convID, ownerID, secondUserID, secondRole, aiText, "", ""); err != nil {
+		// Authenticate as secondUserID — X-User-ID must match userId in payload.
+		if _, err := appendEntry(client, cfg, convID, secondUserID, secondUserID, secondRole, aiText, "", ""); err != nil {
 			return idxReqs, err
 		}
 	}

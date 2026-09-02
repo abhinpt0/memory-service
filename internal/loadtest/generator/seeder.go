@@ -205,6 +205,51 @@ type indexEntryRequest struct {
 	IndexedContent string `json:"indexedContent"`
 }
 
+// shareConversation grants accessLevel to granteeUserID on convID.
+// The request is authenticated as ownerUserID (who must have manager/owner access).
+func shareConversation(client *http.Client, cfg GeneratorConfig, ownerUserID, convID, granteeUserID, accessLevel string) error {
+	body, err := json.Marshal(map[string]string{
+		"userId":      granteeUserID,
+		"accessLevel": accessLevel,
+	})
+	if err != nil {
+		return err
+	}
+
+	url := fmt.Sprintf("%s/v1/conversations/%s/memberships", cfg.BaseURL, convID)
+
+	for attempt := 0; attempt < 20; attempt++ {
+		req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-API-Key", cfg.APIKey)
+		req.Header.Set("X-User-ID", ownerUserID)
+
+		resp, err := client.Do(req)
+		if err != nil {
+			return err
+		}
+		respBody, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode == http.StatusTooManyRequests {
+			backoff := time.Duration(100*(1<<attempt)) * time.Millisecond
+			if backoff > time.Second {
+				backoff = time.Second
+			}
+			time.Sleep(backoff)
+			continue
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return fmt.Errorf("shareConversation: status %d: %s", resp.StatusCode, respBody)
+		}
+		return nil
+	}
+	return fmt.Errorf("shareConversation: rate limited after retries")
+}
+
 // createFork creates a new conversation and seeds it as a fork of rootConvID
 // branching at atEntryID. Returns the new fork conversation ID.
 //
