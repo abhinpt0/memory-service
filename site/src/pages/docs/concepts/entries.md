@@ -107,6 +107,12 @@ Entries are returned ordered by creation time (`createdAt`). When multiple entri
 
 Clients that need deterministic replay across channels can set `seq` when appending entries. `seq` values are unsigned 32-bit integers and must be unique within a conversation. When listing entries with `fromSeq`, Memory Service returns entries with `seq >= fromSeq`, excludes entries without `seq`, and orders the response by `seq` ascending.
 
+### Retry a sequenced append
+
+If a client loses the response after an append commits, it can retry the same sequenced request. Memory Service returns the stored entry with its original `id` and `createdAt`. An exact retry remains valid after later sequenced entries have been appended.
+
+A changed field returns `409 Conflict`. The retry does not create entries, attachment links, entry-created events, or outbox records. Unsequenced appends keep their existing conflict behavior.
+
 ## Retrieving Entries
 
 ```bash

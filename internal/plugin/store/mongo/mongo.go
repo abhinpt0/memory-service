@@ -1515,6 +1515,33 @@ func (s *MongoStore) ArchiveConversation(ctx context.Context, userID string, con
 	return nil
 }
 
+func (s *MongoStore) ArchiveConversationIfNeeded(ctx context.Context, userID string, conversationID string) (registrystore.ArchiveConversationResult, error) {
+	var doc convDoc
+	if err := s.conversations().FindOne(ctx, bson.M{"_id": string(conversationID)}).Decode(&doc); err != nil {
+		return registrystore.ArchiveConversationResult{}, &registrystore.NotFoundError{Resource: "conversation", ID: string(conversationID)}
+	}
+	if _, err := s.requireAccess(ctx, userID, doc.ConversationGroupID, model.AccessLevelOwner); err != nil {
+		return registrystore.ArchiveConversationResult{}, err
+	}
+	now := time.Now()
+	result, err := s.groups().UpdateOne(ctx, bson.M{"_id": doc.ConversationGroupID, "archived_at": bson.M{"$exists": false}}, bson.M{"$set": bson.M{"archived_at": now}})
+	if err != nil {
+		return registrystore.ArchiveConversationResult{}, err
+	}
+	var group groupDoc
+	if err := s.groups().FindOne(ctx, bson.M{"_id": doc.ConversationGroupID}).Decode(&group); err != nil {
+		return registrystore.ArchiveConversationResult{}, fmt.Errorf("failed to load archived conversation group: %w", err)
+	}
+	// The group timestamp is authoritative. Always converge conversation documents,
+	// including when a prior caller changed the group but failed before UpdateMany.
+	if group.ArchivedAt != nil {
+		if _, err := s.conversations().UpdateMany(ctx, bson.M{"conversation_group_id": doc.ConversationGroupID}, bson.M{"$set": bson.M{"archived_at": *group.ArchivedAt}}); err != nil {
+			return registrystore.ArchiveConversationResult{}, err
+		}
+	}
+	return registrystore.ArchiveConversationResult{ConversationGroupID: strToUUID(doc.ConversationGroupID), Changed: result.ModifiedCount > 0}, nil
+}
+
 func (s *MongoStore) UnarchiveConversation(ctx context.Context, userID string, conversationID string) error {
 	var doc convDoc
 	err := s.conversations().FindOne(ctx, bson.M{
@@ -1535,6 +1562,24 @@ func (s *MongoStore) UnarchiveConversation(ctx context.Context, userID string, c
 	)
 
 	return nil
+}
+
+func (s *MongoStore) UnarchiveConversationIfNeeded(ctx context.Context, userID string, conversationID string) (registrystore.UnarchiveConversationResult, error) {
+	var doc convDoc
+	if err := s.conversations().FindOne(ctx, bson.M{"_id": string(conversationID)}).Decode(&doc); err != nil {
+		return registrystore.UnarchiveConversationResult{}, &registrystore.NotFoundError{Resource: "conversation", ID: string(conversationID)}
+	}
+	if _, err := s.requireAccess(ctx, userID, doc.ConversationGroupID, model.AccessLevelOwner); err != nil {
+		return registrystore.UnarchiveConversationResult{}, err
+	}
+	result, err := s.groups().UpdateOne(ctx, bson.M{"_id": doc.ConversationGroupID, "archived_at": bson.M{"$exists": true}}, bson.M{"$unset": bson.M{"archived_at": ""}})
+	if err != nil {
+		return registrystore.UnarchiveConversationResult{}, err
+	}
+	if _, err := s.conversations().UpdateMany(ctx, bson.M{"conversation_group_id": doc.ConversationGroupID, "archived_at": bson.M{"$exists": true}}, bson.M{"$unset": bson.M{"archived_at": ""}}); err != nil {
+		return registrystore.UnarchiveConversationResult{}, err
+	}
+	return registrystore.UnarchiveConversationResult{ConversationGroupID: strToUUID(doc.ConversationGroupID), Changed: result.ModifiedCount > 0}, nil
 }
 
 // --- Memberships ---
@@ -2245,6 +2290,34 @@ func (s *MongoStore) GetEntries(ctx context.Context, userID string, conversation
 	return &registrystore.PagedEntries{Data: entries, AfterCursor: afterCursor, BeforeCursor: beforeCursor}, nil
 }
 
+func (s *MongoStore) GetEntriesBySequence(ctx context.Context, userID string, conversationID string, sequences []uint32) ([]model.Entry, error) {
+	if len(sequences) == 0 {
+		return []model.Entry{}, nil
+	}
+	var conv convDoc
+	if err := s.conversations().FindOne(ctx, bson.M{"_id": conversationID}).Decode(&conv); err != nil {
+		return nil, &registrystore.NotFoundError{Resource: "conversation", ID: conversationID}
+	}
+	if _, err := s.requireAccess(ctx, userID, conv.ConversationGroupID, model.AccessLevelWriter); err != nil {
+		return nil, err
+	}
+
+	cursor, err := s.entries().Find(ctx, bson.M{
+		"conversation_group_id": conv.ConversationGroupID,
+		"conversation_id":       conversationID,
+		"seq":                   bson.M{"$in": sequences},
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+	var docs []entryDoc
+	if err := cursor.All(ctx, &docs); err != nil {
+		return nil, err
+	}
+	return s.entryDocsToModelsWithContent(docs)
+}
+
 func (s *MongoStore) GetEntryGroupID(ctx context.Context, entryID uuid.UUID) (uuid.UUID, error) {
 	var entry entryDoc
 	err := s.entries().FindOne(ctx, bson.M{"_id": uuidToStr(entryID)}).Decode(&entry)
@@ -2273,6 +2346,14 @@ func (s *MongoStore) AdminGetEntryByID(ctx context.Context, entryID uuid.UUID) (
 }
 
 func (s *MongoStore) AppendEntries(ctx context.Context, userID string, conversationID string, entries []registrystore.CreateEntryRequest, clientID *string, agentID *string, epoch *int64) ([]model.Entry, error) {
+	return s.appendEntries(ctx, userID, conversationID, entries, clientID, agentID, epoch, false)
+}
+
+func (s *MongoStore) AppendEntriesBeforeUnarchive(ctx context.Context, userID string, conversationID string, entries []registrystore.CreateEntryRequest, clientID *string, agentID *string, epoch *int64) ([]model.Entry, error) {
+	return s.appendEntries(ctx, userID, conversationID, entries, clientID, agentID, epoch, true)
+}
+
+func (s *MongoStore) appendEntries(ctx context.Context, userID string, conversationID string, entries []registrystore.CreateEntryRequest, clientID *string, agentID *string, epoch *int64, allowArchived bool) ([]model.Entry, error) {
 	if err := registrystore.ValidateEntryEpochChannels(entries, epoch); err != nil {
 		return nil, &registrystore.ValidationError{Field: "epoch", Message: err.Error()}
 	}
@@ -2310,7 +2391,7 @@ func (s *MongoStore) AppendEntries(ctx context.Context, userID string, conversat
 		}
 	}
 	// Block appending to archived conversations. Use explicit unarchive via conversationPatch.archived=false first.
-	if conv.ArchivedAt != nil {
+	if conv.ArchivedAt != nil && !allowArchived {
 		return nil, &registrystore.NotFoundError{Resource: "conversation", ID: conversationID}
 	}
 	if _, err := s.requireAccess(ctx, userID, conv.ConversationGroupID, model.AccessLevelWriter); err != nil {
@@ -2358,7 +2439,10 @@ func (s *MongoStore) AppendEntries(ctx context.Context, userID string, conversat
 		}
 		if _, err := s.entries().InsertOne(ctx, doc); err != nil {
 			if mongo.IsDuplicateKeyError(err) {
-				return nil, &registrystore.ConflictError{Message: "duplicate seq value in this conversation"}
+				if cleanupErr := s.removePartiallyAppendedEntries(ctx, result[:i]); cleanupErr != nil {
+					return nil, cleanupErr
+				}
+				return nil, registrystore.NewDuplicateSequenceConflict()
 			}
 			return nil, fmt.Errorf("failed to append entry: %w", err)
 		}
@@ -2556,7 +2640,7 @@ func (s *MongoStore) SyncAgentEntry(ctx context.Context, userID string, conversa
 	}
 	if _, err := s.entries().InsertOne(ctx, doc); err != nil {
 		if mongo.IsDuplicateKeyError(err) {
-			return nil, &registrystore.ConflictError{Message: "duplicate seq value in this conversation"}
+			return nil, registrystore.NewDuplicateSequenceConflict()
 		}
 		return nil, fmt.Errorf("failed to sync entry: %w", err)
 	}
@@ -3676,6 +3760,30 @@ func (s *MongoStore) UpdateAttachment(ctx context.Context, userID string, attach
 		return nil, &registrystore.NotFoundError{Resource: "attachment", ID: attachmentID.String()}
 	}
 	attachment := s.attachmentDocToModel(updated)
+	return &attachment, nil
+}
+
+func (s *MongoStore) LinkAttachmentToEntry(ctx context.Context, userID string, attachmentID uuid.UUID, entryID uuid.UUID) (*model.Attachment, error) {
+	id := uuidToStr(attachmentID)
+	entry := uuidToStr(entryID)
+	_, err := s.attachments().UpdateOne(ctx, bson.M{
+		"_id": id, "user_id": userID, "archived_at": bson.M{"$exists": false},
+		"$or": bson.A{bson.M{"entry_id": bson.M{"$exists": false}}, bson.M{"entry_id": nil}},
+	}, bson.M{"$set": bson.M{"entry_id": entry}})
+	if err != nil {
+		return nil, fmt.Errorf("link attachment failed: %w", err)
+	}
+	var current attachmentDoc
+	if err := s.attachments().FindOne(ctx, bson.M{"_id": id, "archived_at": bson.M{"$exists": false}}).Decode(&current); err != nil {
+		return nil, &registrystore.NotFoundError{Resource: "attachment", ID: attachmentID.String()}
+	}
+	if current.UserID != userID {
+		return nil, &registrystore.ForbiddenError{}
+	}
+	if current.EntryID == nil || *current.EntryID != entry {
+		return nil, &registrystore.ConflictError{Message: fmt.Sprintf("attachment %s is linked to a different entry", attachmentID)}
+	}
+	attachment := s.attachmentDocToModel(current)
 	return &attachment, nil
 }
 
@@ -5767,6 +5875,7 @@ func (s *MongoStore) entryDocToModel(d entryDoc) model.Entry {
 		ConversationGroupID: strToUUID(d.ConversationGroupID),
 		UserID:              d.UserID,
 		ClientID:            d.ClientID,
+		AgentID:             d.AgentID,
 		Channel:             model.Channel(d.Channel),
 		Epoch:               d.Epoch,
 		Seq:                 d.Seq,
@@ -5776,6 +5885,25 @@ func (s *MongoStore) entryDocToModel(d entryDoc) model.Entry {
 		IndexedAt:           d.IndexedAt,
 		CreatedAt:           d.CreatedAt,
 	}
+}
+
+func (s *MongoStore) removePartiallyAppendedEntries(ctx context.Context, entries []model.Entry) error {
+	if len(entries) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.ID != uuid.Nil {
+			ids = append(ids, uuidToStr(entry.ID))
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	if _, err := s.entries().DeleteMany(ctx, bson.M{"_id": bson.M{"$in": ids}}); err != nil {
+		return fmt.Errorf("failed to roll back partially appended entries after duplicate sequence conflict: %w", err)
+	}
+	return nil
 }
 
 func (s *MongoStore) entryDocToModelWithContent(d entryDoc) (model.Entry, error) {

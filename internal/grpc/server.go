@@ -1776,9 +1776,23 @@ func (s *EntriesServer) appendEntries(ctx context.Context, conversationID string
 			},
 		})
 	}
+	retryStoreEntries := make([]registrystore.CreateEntryRequest, 0, len(appendEntries))
+	for _, entry := range appendEntries {
+		retryStoreEntries = append(retryStoreEntries, entry.store)
+	}
+	retryRequest := registrystore.SequencedAppendRequest{
+		Entries:  retryStoreEntries,
+		UserID:   userID,
+		ClientID: clientIDPtr,
+		AgentID:  agentIDPtr,
+		Epoch:    epoch,
+	}
+	retryEligible := len(appendEntries) == 1 && appendEntries[0].store.Seq != nil
 
 	var eventsToPublish []registryeventbus.Event
-	entries, err := withMemoryWrite(ctx, s.Store, func(txCtx context.Context) ([]model.Entry, error) {
+	var retryCreatedAttachmentIDs []uuid.UUID
+	var entries []model.Entry
+	entries, err = withMemoryWrite(ctx, s.Store, func(txCtx context.Context) ([]model.Entry, error) {
 		existing, _ := s.Store.GetConversation(txCtx, userID, convID)
 		convExistedBefore := existing != nil
 
@@ -1792,14 +1806,21 @@ func (s *EntriesServer) appendEntries(ctx context.Context, conversationID string
 		}
 
 		// If conversationPatch requests unarchive (archived=false), set preHandledArchived=true.
-		// If conversation exists, call UnarchiveConversation; if auto-created, skip (already unarchived).
+		// Only archived conversations need the pre-write mutation; active and auto-created
+		// conversations already satisfy the requested state.
 		preHandledArchived := false
+		patchAfterAppend := validatedPatch
+		appendWhileArchived := false
+		unarchiveChanged := false
+		archiveChanged := false
 		if validatedPatch != nil && validatedPatch.needsUnarchiveBeforeWrite() {
-			preHandledArchived = true
-			if convExistedBefore {
-				if err := s.Store.UnarchiveConversation(txCtx, userID, convID); err != nil {
-					return nil, err
-				}
+			if convExistedBefore && existing.ArchivedAt != nil {
+				appendWhileArchived = true
+				patchAfterAppend = validatedPatch.withoutArchived()
+			} else {
+				// archived=false is already satisfied. Keep applying title/metadata, but
+				// do not report an archive mutation or emit an archive update event.
+				patchAfterAppend = validatedPatch.withoutArchived()
 			}
 		}
 
@@ -1807,10 +1828,11 @@ func (s *EntriesServer) appendEntries(ctx context.Context, conversationID string
 		var pendingLinks []grpcPendingAttachmentLink
 		for i, appendEntry := range appendEntries {
 			if appendEntry.store.Channel == string(model.ChannelHistory) {
-				modified, links, err := resolveGRPCAttachmentRefs(txCtx, s.Store, userID, convID, appendEntry.store.Content)
+				modified, links, createdIDs, err := resolveGRPCAttachmentRefs(txCtx, s.Store, userID, convID, appendEntry.store.Content)
 				if err != nil {
 					return nil, err
 				}
+				retryCreatedAttachmentIDs = append(retryCreatedAttachmentIDs, createdIDs...)
 				if modified != nil {
 					appendEntry.store.Content = modified
 				}
@@ -1821,20 +1843,59 @@ func (s *EntriesServer) appendEntries(ctx context.Context, conversationID string
 			storeEntries = append(storeEntries, appendEntry.store)
 		}
 
-		entries, err := s.Store.AppendEntries(txCtx, userID, convID, storeEntries, clientIDPtr, agentIDPtr, epoch)
-		if err != nil {
-			return nil, err
+		if appendWhileArchived {
+			writtenEntries, err := s.Store.AppendEntriesBeforeUnarchive(txCtx, userID, convID, storeEntries, clientIDPtr, agentIDPtr, epoch)
+			if err != nil {
+				return nil, err
+			}
+			entries = writtenEntries
+		} else {
+			writtenEntries, err := s.Store.AppendEntries(txCtx, userID, convID, storeEntries, clientIDPtr, agentIDPtr, epoch)
+			if err != nil {
+				return nil, err
+			}
+			entries = writtenEntries
+		}
+		if appendWhileArchived {
+			unarchiveResult, err := s.Store.UnarchiveConversationIfNeeded(txCtx, userID, convID)
+			if err != nil {
+				return nil, err
+			}
+			unarchiveChanged = unarchiveResult.Changed
+		}
+		if validatedPatch != nil && validatedPatch.archived != nil && *validatedPatch.archived {
+			archiveResult, err := s.Store.ArchiveConversationIfNeeded(txCtx, userID, convID)
+			if err != nil {
+				return nil, err
+			}
+			archiveChanged = archiveResult.Changed
+			patchAfterAppend = validatedPatch.withoutArchived()
+		}
+		if patchAfterAppend != nil {
+			current, err := s.Store.GetConversation(txCtx, userID, convID)
+			if err != nil {
+				return nil, err
+			}
+			patchAfterAppend = patchAfterAppend.changesAgainst(current)
 		}
 		if err := linkGRPCAttachmentLinks(txCtx, s.Store, userID, entries, pendingLinks); err != nil {
 			return nil, err
 		}
 		var patchRes grpcPatchResult
-		if validatedPatch != nil {
+		if patchAfterAppend != nil {
 			var patchErr error
-			patchRes, patchErr = applyValidatedGRPCConversationPatch(txCtx, s.Store, userID, convID, validatedPatch, preHandledArchived)
+			patchRes, patchErr = applyValidatedGRPCConversationPatch(txCtx, s.Store, userID, convID, patchAfterAppend, preHandledArchived)
 			if patchErr != nil {
 				return nil, patchErr
 			}
+		}
+		if unarchiveChanged {
+			patchRes.changed = true
+			patchRes.archived = validatedPatch.archived
+		}
+		if archiveChanged {
+			patchRes.changed = true
+			patchRes.archived = validatedPatch.archived
 		}
 		if s.EventBus != nil && len(entries) > 0 {
 			eventsToPublish, err = s.entryEventsForCreatedEntries(txCtx, convID, entries, !convExistedBefore, patchRes, convExistedBefore)
@@ -1845,7 +1906,73 @@ func (s *EntriesServer) appendEntries(ctx context.Context, conversationID string
 		return entries, nil
 	})
 	if err != nil {
-		return nil, mapError(err)
+		duplicateConflict := registrystore.IsDuplicateSequenceConflict(err)
+		var notFound *registrystore.NotFoundError
+		archivedRetry := retryEligible && validatedPatch != nil && validatedPatch.archived != nil && errors.As(err, &notFound)
+		if retryEligible && (duplicateConflict || archivedRetry) {
+			originalErr := err
+			eventsToPublish = nil
+			entries, err = withMemoryWrite(ctx, s.Store, func(txCtx context.Context) ([]model.Entry, error) {
+				if cleanupErr := cleanupGRPCRetryAttachments(txCtx, s.Store, userID, retryCreatedAttachmentIDs); cleanupErr != nil {
+					return nil, cleanupErr
+				}
+				normalizedRequest, normalizeErr := normalizeGRPCAppendRetry(txCtx, s.Store, userID, convID, retryRequest)
+				if normalizeErr != nil {
+					return nil, normalizeErr
+				}
+				match, matchErr := registrystore.FindSequencedAppendMatch(txCtx, s.Store, convID, normalizedRequest)
+				if matchErr != nil {
+					return nil, matchErr
+				}
+				if !match.Exact {
+					if match.AnyExisting {
+						return nil, registrystore.NewDuplicateSequenceConflict()
+					}
+					return nil, originalErr
+				}
+				// Exact retries skip stale title and metadata patches. An explicit
+				// archived=false still applies when the conversation was archived
+				// after the original append.
+				if validatedPatch.needsUnarchiveBeforeWrite() {
+					conv, convErr := s.Store.GetConversation(txCtx, userID, convID)
+					if convErr != nil {
+						return nil, convErr
+					}
+					if conv.ArchivedAt != nil {
+						unarchiveResult, unarchiveErr := s.Store.UnarchiveConversationIfNeeded(txCtx, userID, convID)
+						if unarchiveErr != nil {
+							return nil, unarchiveErr
+						}
+						if unarchiveResult.Changed && s.EventBus != nil {
+							eventsToPublish, convErr = s.conversationPatchEvents(txCtx, convID, conv.ConversationGroupID, grpcPatchResult{
+								changed:  true,
+								archived: validatedPatch.archived,
+							})
+							if convErr != nil {
+								return nil, convErr
+							}
+						}
+					}
+				}
+				for _, storedEntry := range match.Entries {
+					if repairErr := registrystore.RepairStoredEntryAttachmentLinks(txCtx, s.Store, userID, storedEntry); repairErr != nil {
+						return nil, repairErr
+					}
+				}
+				return match.Entries, nil
+			})
+		}
+		if err != nil && retryEligible && duplicateConflict && len(retryCreatedAttachmentIDs) > 0 {
+			cleanupErr := s.Store.InWriteTx(ctx, func(txCtx context.Context) error {
+				return cleanupGRPCRetryAttachments(txCtx, s.Store, userID, retryCreatedAttachmentIDs)
+			})
+			if cleanupErr != nil {
+				err = cleanupErr
+			}
+		}
+		if err != nil {
+			return nil, mapError(err)
+		}
 	}
 	s.publishEntryEvents(ctx, eventsToPublish)
 	return entries, nil
@@ -2150,14 +2277,19 @@ func protoValuesToRawJSON(values []*structpb.Value) (json.RawMessage, error) {
 	return list.MarshalJSON()
 }
 
-func resolveGRPCAttachmentRefs(ctx context.Context, store registrystore.MemoryStore, userID string, convID string, content json.RawMessage) (json.RawMessage, []uuid.UUID, error) {
+func resolveGRPCAttachmentRefs(ctx context.Context, store registrystore.MemoryStore, userID string, convID string, content json.RawMessage) (json.RawMessage, []uuid.UUID, []uuid.UUID, error) {
+	return resolveGRPCAttachmentRefsWithMode(ctx, store, userID, convID, content, true)
+}
+
+func resolveGRPCAttachmentRefsWithMode(ctx context.Context, store registrystore.MemoryStore, userID string, convID string, content json.RawMessage, createCrossReference bool) (json.RawMessage, []uuid.UUID, []uuid.UUID, error) {
 	var contentArr []map[string]any
 	if err := json.Unmarshal(content, &contentArr); err != nil {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 
 	modified := false
 	var linkedIDs []uuid.UUID
+	var createdIDs []uuid.UUID
 	for ci, contentObj := range contentArr {
 		attachmentsRaw, ok := contentObj["attachments"]
 		if !ok {
@@ -2182,19 +2314,30 @@ func resolveGRPCAttachmentRefs(ctx context.Context, store registrystore.MemorySt
 			}
 			attachment, err := store.GetAttachment(ctx, userID, "", attachmentID)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 			if attachment.EntryID != nil {
 				conv, err := store.GetConversation(ctx, userID, convID)
 				if err != nil {
-					return nil, nil, err
+					return nil, nil, nil, err
 				}
 				sourceGroupID, err := store.GetEntryGroupID(ctx, *attachment.EntryID)
 				if err != nil {
-					return nil, nil, err
+					return nil, nil, nil, err
 				}
 				if sourceGroupID != conv.ConversationGroupID {
-					return nil, nil, &registrystore.ForbiddenError{}
+					return nil, nil, nil, &registrystore.ForbiddenError{}
+				}
+				if !createCrossReference {
+					if _, hasCT := att["contentType"]; !hasCT {
+						att["contentType"] = attachment.ContentType
+					}
+					if _, hasName := att["name"]; !hasName && attachment.Filename != nil {
+						att["name"] = *attachment.Filename
+					}
+					attachments[ai] = att
+					modified = true
+					continue
 				}
 				newAttachment, err := store.CreateAttachment(ctx, userID, "", model.Attachment{
 					StorageKey:  attachment.StorageKey,
@@ -2206,9 +2349,10 @@ func resolveGRPCAttachmentRefs(ctx context.Context, store registrystore.MemorySt
 					ExpiresAt:   attachment.ExpiresAt,
 				})
 				if err != nil {
-					return nil, nil, err
+					return nil, nil, nil, err
 				}
 				linkedIDs = append(linkedIDs, newAttachment.ID)
+				createdIDs = append(createdIDs, newAttachment.ID)
 				att["attachmentId"] = newAttachment.ID.String()
 			} else {
 				linkedIDs = append(linkedIDs, attachmentID)
@@ -2226,13 +2370,44 @@ func resolveGRPCAttachmentRefs(ctx context.Context, store registrystore.MemorySt
 		contentArr[ci] = contentObj
 	}
 	if !modified {
-		return nil, linkedIDs, nil
+		return nil, linkedIDs, createdIDs, nil
 	}
 	modifiedJSON, err := json.Marshal(contentArr)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return modifiedJSON, linkedIDs, nil
+	return modifiedJSON, linkedIDs, createdIDs, nil
+}
+
+func normalizeGRPCAppendRetry(ctx context.Context, store registrystore.MemoryStore, userID, convID string, request registrystore.SequencedAppendRequest) (registrystore.SequencedAppendRequest, error) {
+	request.Entries = append([]registrystore.CreateEntryRequest(nil), request.Entries...)
+	for i := range request.Entries {
+		request.Entries[i].Content = append(json.RawMessage(nil), request.Entries[i].Content...)
+		if model.Channel(strings.ToLower(request.Entries[i].Channel)) != model.ChannelHistory {
+			continue
+		}
+		modified, _, _, err := resolveGRPCAttachmentRefsWithMode(ctx, store, userID, convID, request.Entries[i].Content, false)
+		if err != nil {
+			return registrystore.SequencedAppendRequest{}, err
+		}
+		if modified != nil {
+			request.Entries[i].Content = modified
+		}
+	}
+	return request, nil
+}
+
+func cleanupGRPCRetryAttachments(ctx context.Context, store registrystore.MemoryStore, userID string, attachmentIDs []uuid.UUID) error {
+	for _, attachmentID := range attachmentIDs {
+		if err := store.DeleteAttachment(ctx, userID, "", attachmentID); err != nil {
+			var notFound *registrystore.NotFoundError
+			if errors.As(err, &notFound) {
+				continue
+			}
+			return err
+		}
+	}
+	return nil
 }
 
 func linkGRPCAttachmentRefs(ctx context.Context, store registrystore.MemoryStore, userID string, entries []model.Entry, attachmentIDs []uuid.UUID) error {
@@ -2255,7 +2430,7 @@ func linkGRPCAttachmentLinks(ctx context.Context, store registrystore.MemoryStor
 			continue
 		}
 		entryID := entries[link.entryIndex].ID
-		if _, err := store.UpdateAttachment(ctx, userID, link.attachmentID, registrystore.AttachmentUpdate{EntryID: &entryID}); err != nil {
+		if _, err := store.LinkAttachmentToEntry(ctx, userID, link.attachmentID, entryID); err != nil {
 			return err
 		}
 	}

@@ -72,6 +72,9 @@ func (t *taskQueueSteps) theTaskProcessorRuns() error {
 
 func (t *taskQueueSteps) theMemoryKindMigrationProcessorRuns() error {
 	cfg, ok := t.s.Extra["config"].(*config.Config)
+	if (!ok || cfg == nil) && t.s.Suite != nil {
+		cfg, ok = t.s.Suite.Context.(*config.Config)
+	}
 	if !ok || cfg == nil {
 		return fmt.Errorf("scenario server config is unavailable")
 	}

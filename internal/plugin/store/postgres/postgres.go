@@ -802,6 +802,37 @@ func (s *PostgresStore) ArchiveConversation(ctx context.Context, userID string, 
 	})
 }
 
+func (s *PostgresStore) ArchiveConversationIfNeeded(ctx context.Context, userID string, conversationID string) (registrystore.ArchiveConversationResult, error) {
+	conv, found, err := s.lookupConversation(ctx, "id = ?", conversationID)
+	if err != nil || !found {
+		if err != nil {
+			return registrystore.ArchiveConversationResult{}, err
+		}
+		return registrystore.ArchiveConversationResult{}, &registrystore.NotFoundError{Resource: "conversation", ID: conversationID}
+	}
+	if _, err := s.requireAccess(ctx, userID, conv.ConversationGroupID, model.AccessLevelOwner); err != nil {
+		return registrystore.ArchiveConversationResult{}, err
+	}
+	result := registrystore.ArchiveConversationResult{ConversationGroupID: conv.ConversationGroupID}
+	now := time.Now()
+	err = s.InWriteTx(ctx, func(txCtx context.Context) error {
+		db, err := s.writeDBFor(txCtx, "archive conversation if needed")
+		if err != nil {
+			return err
+		}
+		r := db.Model(&model.ConversationGroup{}).Where("id = ? AND archived_at IS NULL", conv.ConversationGroupID).Update("archived_at", now)
+		if r.Error != nil {
+			return r.Error
+		}
+		result.Changed = r.RowsAffected > 0
+		if !result.Changed {
+			return nil
+		}
+		return db.Model(&model.Conversation{}).Where("conversation_group_id = ? AND archived_at IS NULL", conv.ConversationGroupID).Update("archived_at", now).Error
+	})
+	return result, err
+}
+
 func (s *PostgresStore) UnarchiveConversation(ctx context.Context, userID string, conversationID string) error {
 	conv, found, err := s.lookupConversation(ctx, "id = ? AND archived_at IS NOT NULL", conversationID)
 	if err != nil {
@@ -832,6 +863,33 @@ func (s *PostgresStore) UnarchiveConversation(ctx context.Context, userID string
 		}
 		return nil
 	})
+}
+
+func (s *PostgresStore) UnarchiveConversationIfNeeded(ctx context.Context, userID string, conversationID string) (registrystore.UnarchiveConversationResult, error) {
+	conv, found, err := s.lookupConversation(ctx, "id = ?", conversationID)
+	if err != nil || !found {
+		if err != nil {
+			return registrystore.UnarchiveConversationResult{}, err
+		}
+		return registrystore.UnarchiveConversationResult{}, &registrystore.NotFoundError{Resource: "conversation", ID: conversationID}
+	}
+	if _, err := s.requireAccess(ctx, userID, conv.ConversationGroupID, model.AccessLevelOwner); err != nil {
+		return registrystore.UnarchiveConversationResult{}, err
+	}
+	result := registrystore.UnarchiveConversationResult{ConversationGroupID: conv.ConversationGroupID}
+	err = s.InWriteTx(ctx, func(txCtx context.Context) error {
+		db, err := s.writeDBFor(txCtx, "unarchive conversation if needed")
+		if err != nil {
+			return err
+		}
+		r := db.Model(&model.ConversationGroup{}).Where("id = ? AND archived_at IS NOT NULL", conv.ConversationGroupID).Update("archived_at", nil)
+		if r.Error != nil {
+			return r.Error
+		}
+		result.Changed = r.RowsAffected > 0
+		return db.Model(&model.Conversation{}).Where("conversation_group_id = ? AND archived_at IS NOT NULL", conv.ConversationGroupID).Update("archived_at", nil).Error
+	})
+	return result, err
 }
 
 // --- Memberships ---
@@ -1589,6 +1647,34 @@ func (s *PostgresStore) GetEntries(ctx context.Context, userID string, conversat
 	return &registrystore.PagedEntries{Data: page, AfterCursor: afterCursor, BeforeCursor: beforeCursor}, nil
 }
 
+func (s *PostgresStore) GetEntriesBySequence(ctx context.Context, userID string, conversationID string, sequences []uint32) ([]model.Entry, error) {
+	if len(sequences) == 0 {
+		return []model.Entry{}, nil
+	}
+	db := s.dbFor(ctx)
+	var conv model.Conversation
+	result := db.Where("id = ?", conversationID).Limit(1).Find(&conv)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	if result.RowsAffected == 0 {
+		return nil, &registrystore.NotFoundError{Resource: "conversation", ID: conversationID}
+	}
+	if _, err := s.requireAccess(ctx, userID, conv.ConversationGroupID, model.AccessLevelWriter); err != nil {
+		return nil, err
+	}
+
+	var entries []model.Entry
+	if err := db.Where("conversation_group_id = ? AND conversation_id = ? AND seq IN ?", conv.ConversationGroupID, conversationID, sequences).
+		Find(&entries).Error; err != nil {
+		return nil, err
+	}
+	if err := decryptEntries(s, entries); err != nil {
+		return nil, err
+	}
+	return entries, nil
+}
+
 func (s *PostgresStore) GetEntryGroupID(ctx context.Context, entryID uuid.UUID) (uuid.UUID, error) {
 	var entry model.Entry
 	result := s.dbFor(ctx).Select("conversation_group_id").Where("id = ?", entryID).Limit(1).Find(&entry)
@@ -1621,6 +1707,14 @@ func (s *PostgresStore) AdminGetEntryByID(ctx context.Context, entryID uuid.UUID
 }
 
 func (s *PostgresStore) AppendEntries(ctx context.Context, userID string, conversationID string, entries []registrystore.CreateEntryRequest, clientID *string, agentID *string, epoch *int64) ([]model.Entry, error) {
+	return s.appendEntries(ctx, userID, conversationID, entries, clientID, agentID, epoch, false)
+}
+
+func (s *PostgresStore) AppendEntriesBeforeUnarchive(ctx context.Context, userID string, conversationID string, entries []registrystore.CreateEntryRequest, clientID *string, agentID *string, epoch *int64) ([]model.Entry, error) {
+	return s.appendEntries(ctx, userID, conversationID, entries, clientID, agentID, epoch, true)
+}
+
+func (s *PostgresStore) appendEntries(ctx context.Context, userID string, conversationID string, entries []registrystore.CreateEntryRequest, clientID *string, agentID *string, epoch *int64, allowArchived bool) ([]model.Entry, error) {
 	if err := registrystore.ValidateEntryEpochChannels(entries, epoch); err != nil {
 		return nil, &registrystore.ValidationError{Field: "epoch", Message: err.Error()}
 	}
@@ -1703,7 +1797,7 @@ func (s *PostgresStore) AppendEntries(ctx context.Context, userID string, conver
 		}
 	}
 	// Block appending to archived conversations. Use explicit unarchive via conversationPatch.archived=false first.
-	if conv.ArchivedAt != nil {
+	if conv.ArchivedAt != nil && !allowArchived {
 		return nil, &registrystore.NotFoundError{Resource: "conversation", ID: conversationID}
 	}
 	if _, err := s.requireAccess(ctx, userID, conv.ConversationGroupID, model.AccessLevelWriter); err != nil {
@@ -1750,7 +1844,7 @@ func (s *PostgresStore) AppendEntries(ctx context.Context, userID string, conver
 		}
 		if err := db.Create(&entry).Error; err != nil {
 			if _, ok := pgUniqueViolation(err); ok {
-				return nil, &registrystore.ConflictError{Message: "duplicate seq value in this conversation"}
+				return nil, registrystore.NewDuplicateSequenceConflict()
 			}
 			return nil, fmt.Errorf("failed to append entry: %w", err)
 		}
@@ -1955,7 +2049,7 @@ func (s *PostgresStore) SyncAgentEntry(ctx context.Context, userID string, conve
 	}
 	if err := db.Create(&newEntry).Error; err != nil {
 		if _, ok := pgUniqueViolation(err); ok {
-			return nil, &registrystore.ConflictError{Message: "duplicate seq value in this conversation"}
+			return nil, registrystore.NewDuplicateSequenceConflict()
 		}
 		return nil, fmt.Errorf("failed to sync entry: %w", err)
 	}
@@ -4008,6 +4102,28 @@ func (s *PostgresStore) UpdateAttachment(ctx context.Context, userID string, att
 
 	if err := s.db.WithContext(ctx).Where("id = ? AND archived_at IS NULL", attachmentID).First(&attachment).Error; err != nil {
 		return nil, &registrystore.NotFoundError{Resource: "attachment", ID: attachmentID.String()}
+	}
+	return &attachment, nil
+}
+
+func (s *PostgresStore) LinkAttachmentToEntry(ctx context.Context, userID string, attachmentID uuid.UUID, entryID uuid.UUID) (*model.Attachment, error) {
+	db := s.dbFor(ctx)
+	result := db.Model(&model.Attachment{}).Where("id = ? AND user_id = ? AND archived_at IS NULL AND entry_id IS NULL", attachmentID, userID).Update("entry_id", entryID)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	var attachment model.Attachment
+	if err := db.Where("id = ? AND archived_at IS NULL", attachmentID).Limit(1).Find(&attachment).Error; err != nil {
+		return nil, err
+	}
+	if attachment.ID == uuid.Nil {
+		return nil, &registrystore.NotFoundError{Resource: "attachment", ID: attachmentID.String()}
+	}
+	if attachment.UserID != userID {
+		return nil, &registrystore.ForbiddenError{}
+	}
+	if attachment.EntryID == nil || *attachment.EntryID != entryID {
+		return nil, &registrystore.ConflictError{Message: fmt.Sprintf("attachment %s is linked to a different entry", attachmentID)}
 	}
 	return &attachment, nil
 }
