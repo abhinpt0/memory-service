@@ -45,8 +45,7 @@ This executes **seed → bench → correctness → report** in sequence and writ
 Seeds the running memory service with a configurable dataset. Writes
 `loadtest/results/seed-manifest.json` which the benchmark and correctness tasks consume.
 
-**Default seed:** 200 conversations, 10 fork chains.
-For a more realistic scale test use `--total-conversations=2000 --fork-chains=40`.
+**Default seed:** 2000 conversations, 10 fork chains.
 
 **You do not need to delete the manifest between runs.** Re-running `task loadtest:all`
 is safe — the seed step skips automatically if the manifest already exists. Only delete it
@@ -59,7 +58,7 @@ in these specific situations:
 | Want different conversation count | `rm loadtest/results/seed-manifest.json && task loadtest:seed -- --total-conversations=2000 --fork-chains=40` |
 
 ```sh
-# Default (200 conversations, 10 fork chains)
+# Default (2000 conversations, 10 fork chains)
 task loadtest:seed
 
 # Larger scale run (2000 conversations, 40 fork chains — ~2% fork rate)
@@ -73,7 +72,7 @@ go run ./internal/loadtest/generator/ --help
 
 | Flag | Default | Description |
 |---|---|---|
-| `--total-conversations` | `200` | Number of main conversations to seed |
+| `--total-conversations` | `2000` | Number of main conversations to seed |
 | `--fork-chains` | `10` | Number of fork chains (each = 1 root + 1 fork conversation) |
 | `--worker-count` | `5` | Concurrent seeding workers |
 | `--base-url` | `http://localhost:8082` | Memory service base URL |
