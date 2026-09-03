@@ -93,6 +93,37 @@ func (v *validatedConversationPatch) needsUnarchiveBeforeWrite() bool {
 	return v != nil && v.archived != nil && !*v.archived
 }
 
+func (v *validatedConversationPatch) withoutArchived() *validatedConversationPatch {
+	if v == nil {
+		return nil
+	}
+	result := *v
+	result.archived = nil
+	if result.title == nil && !result.metadataPresent {
+		return nil
+	}
+	return &result
+}
+
+func (v *validatedConversationPatch) changesAgainst(conversation *registrystore.ConversationDetail) *validatedConversationPatch {
+	if v == nil || conversation == nil {
+		return v
+	}
+	changes := &validatedConversationPatch{}
+	if v.title != nil && conversation.Title != *v.title {
+		changes.title = v.title
+	}
+	if v.archived != nil && (conversation.ArchivedAt != nil) != *v.archived {
+		changes.archived = v.archived
+	}
+	changes.metadataPatch = v.metadataPatch.ChangesAgainst(conversation.Metadata)
+	changes.metadataPresent = len(changes.metadataPatch) > 0
+	if changes.title == nil && changes.archived == nil && !changes.metadataPresent {
+		return nil
+	}
+	return changes
+}
+
 // validateConversationPatchForOwnerOnly checks if the patch requires owner-level
 // authorization (i.e., it includes the archived field).
 func validateConversationPatchForOwnerOnly(patch *validatedConversationPatch, hasOwnerAccess bool) error {

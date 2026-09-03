@@ -1,6 +1,11 @@
 package store
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
+
+const DuplicateSequenceConflictCode = "duplicate_sequence"
 
 // NotFoundError indicates the resource was not found (or user lacks access).
 type NotFoundError struct {
@@ -31,6 +36,18 @@ type ConflictError struct {
 
 func (e *ConflictError) Error() string {
 	return e.Message
+}
+
+func NewDuplicateSequenceConflict() error {
+	return &ConflictError{
+		Message: "duplicate seq value in this conversation",
+		Code:    DuplicateSequenceConflictCode,
+	}
+}
+
+func IsDuplicateSequenceConflict(err error) bool {
+	var conflict *ConflictError
+	return errors.As(err, &conflict) && conflict.Code == DuplicateSequenceConflictCode
 }
 
 // ForbiddenError indicates insufficient access.

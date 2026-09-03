@@ -32,6 +32,39 @@ Feature: Inline conversation patch on entry append and sync (REST)
     }
     """
 
+  Scenario: an exact sequenced retry does not reapply an unchanged conversationPatch
+    Given I call POST "/v1/conversations/${conversationId}/entries" with body:
+    """
+    {
+      "channel": "journal",
+      "contentType": "onering-journal-v1",
+      "seq": 528,
+      "content": [{"stepType": "llm_call"}],
+      "conversationPatch": {
+        "metadata": {"status": "done"}
+      }
+    }
+    """
+    And the response status should be 201
+    And I get the conversation
+    And set "patchedUpdatedAt" to the json response field "updatedAt"
+    When I call POST "/v1/conversations/${conversationId}/entries" with body:
+    """
+    {
+      "channel": "journal",
+      "contentType": "onering-journal-v1",
+      "seq": 528,
+      "content": [{"stepType": "llm_call"}],
+      "conversationPatch": {
+        "metadata": {"status": "done"}
+      }
+    }
+    """
+    Then the response status should be 201
+    When I get the conversation
+    Then the response status should be 200
+    And the response body "updatedAt" should be "${patchedUpdatedAt}"
+
   Scenario: conversationPatch updates title atomically with an append
     When I call POST "/v1/conversations/${conversationId}/entries" with body:
     """
@@ -198,6 +231,32 @@ Feature: Inline conversation patch on entry append and sync (REST)
     When I call GET "/v1/conversations?archived=only&mode=all"
     Then the response status should be 200
     And the response body should contain "${conversationId}"
+
+  Scenario: retrying an exact sequenced append with archived:true returns the stored entry
+    Given I call POST "/v1/conversations/${conversationId}/entries" with body:
+    """
+    {
+      "channel": "HISTORY",
+      "contentType": "history",
+      "seq": 529,
+      "content": [{"role": "USER", "text": "Archive once"}],
+      "conversationPatch": {"archived": true}
+    }
+    """
+    And the response status should be 201
+    And set "archivedEntryId" to the json response field "id"
+    When I call POST "/v1/conversations/${conversationId}/entries" with body:
+    """
+    {
+      "channel": "HISTORY",
+      "contentType": "history",
+      "seq": 529,
+      "content": [{"role": "USER", "text": "Archive once"}],
+      "conversationPatch": {"archived": true}
+    }
+    """
+    Then the response status should be 201
+    And the response body "id" should be "${archivedEntryId}"
 
   Scenario: conversationPatch with archived and metadata combined applies both
     When I call POST "/v1/conversations/${conversationId}/entries" with body:

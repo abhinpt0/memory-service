@@ -145,6 +145,18 @@ tasks:
         CGO_ENABLED=1 go run gotest.tools/gotestsum --format {{.GOTESTSUM_FMT | default .DEFAULT_GOTESTSUM_FMT}} -- -race -tags='sqlite_fts5' -run 'TestFeaturesPg(APIKeys|Keycloak|KeycloakAuthClients)$' ./internal/bdd/ {{.CLI_ARGS}}
       - |
         CGO_ENABLED=1 go run gotest.tools/gotestsum --format {{.GOTESTSUM_FMT | default .DEFAULT_GOTESTSUM_FMT}} -- -race -tags='sqlite_fts5 auth_testfixtures' -run 'TestFeaturesSQLiteMemoryKindRegressions$' ./internal/bdd/ {{.CLI_ARGS}}
+      - |
+        CGO_ENABLED=1 go run gotest.tools/gotestsum --format {{.GOTESTSUM_FMT | default .DEFAULT_GOTESTSUM_FMT}} -- -race -tags='sqlite_fts5 auth_testfixtures' -run 'TestFeaturesSQLite/conversations-rest$' ./internal/bdd/ {{.CLI_ARGS}}
+      - |
+        CGO_ENABLED=1 go run gotest.tools/gotestsum --format {{.GOTESTSUM_FMT | default .DEFAULT_GOTESTSUM_FMT}} -- -race -tags='sqlite_fts5 auth_testfixtures' -run 'TestFeaturesSQLiteOutbox$' ./internal/bdd/ {{.CLI_ARGS}}
+      - |
+        CGO_ENABLED=1 go run gotest.tools/gotestsum --format {{.GOTESTSUM_FMT | default .DEFAULT_GOTESTSUM_FMT}} -- -race -tags='sqlite_fts5 auth_testfixtures' -run 'TestFeaturesSQLiteSerial$' ./internal/bdd/ {{.CLI_ARGS}}
+      - |
+        CGO_ENABLED=1 go run gotest.tools/gotestsum --format {{.GOTESTSUM_FMT | default .DEFAULT_GOTESTSUM_FMT}} -- -race -tags='sqlite_fts5 auth_testfixtures' -run 'TestFeaturesSQLite/ownership-transfers-rest$' ./internal/bdd/ {{.CLI_ARGS}}
+      - |
+        CGO_ENABLED=1 go run gotest.tools/gotestsum --format {{.GOTESTSUM_FMT | default .DEFAULT_GOTESTSUM_FMT}} -- -race -tags='sqlite_fts5 auth_testfixtures' -run 'TestFeaturesSQLite/entries-seq-retry-grpc$' ./internal/bdd/ {{.CLI_ARGS}}
+      - |
+        CGO_ENABLED=1 go run gotest.tools/gotestsum --format {{.GOTESTSUM_FMT | default .DEFAULT_GOTESTSUM_FMT}} -- -race -tags='sqlite_fts5 auth_testfixtures' -run 'TestFeaturesSQLiteGRPCContractRegressions$' ./internal/bdd/ {{.CLI_ARGS}}
       - task: test:go:fixtures
         vars:
           CLI_ARGS: '{{.CLI_ARGS}}'

@@ -1,6 +1,8 @@
 package store
 
 import (
+	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/chirino/memory-service/internal/model"
@@ -18,6 +20,86 @@ func TestEpochForChannelOnlySetsContextEpoch(t *testing.T) {
 	assert.Equal(t, epoch, *EpochForChannel(model.ChannelContext, &epoch))
 	assert.Equal(t, int64(1), *EpochForChannel(model.ChannelContext, nil))
 }
+
+func TestSequencedAppendRequestRejectsMismatchAndUnsequencedRequest(t *testing.T) {
+	userID := "alice"
+	seq1 := uint32(1)
+	request := SequencedAppendRequest{
+		Entries: []CreateEntryRequest{{Channel: "history", ContentType: "history", Content: json.RawMessage(`[{"text":"one"}]`), Seq: &seq1}},
+		UserID:  userID,
+	}
+	stored := []model.Entry{{UserID: &userID, Channel: model.ChannelHistory, Seq: &seq1, ContentType: "history", Content: []byte(`[{"text":"different"}]`)}}
+	_, ok := request.MatchExistingEntries(stored)
+	require.False(t, ok)
+
+	request.Entries[0].Seq = nil
+	_, eligible := request.Sequences()
+	require.False(t, eligible)
+}
+
+func TestSequencedAppendRequestDoesNotRoundLargeJSONNumbers(t *testing.T) {
+	userID := "alice"
+	seq := uint32(1)
+	request := SequencedAppendRequest{
+		Entries: []CreateEntryRequest{{
+			Channel: "context", ContentType: "test.v1", Seq: &seq,
+			Content: json.RawMessage(`[{"value":9007199254740993}]`),
+		}},
+		UserID: userID,
+	}
+	stored := []model.Entry{{
+		UserID: &userID, Channel: model.ChannelContext, Seq: &seq,
+		Epoch: int64Ptr(1), ContentType: "test.v1",
+		Content: []byte(`[{"value":9007199254740992}]`),
+	}}
+
+	_, ok := request.MatchExistingEntries(stored)
+	require.False(t, ok)
+}
+
+func TestJSONValuesEqualFailsClosedOnHugeExponents(t *testing.T) {
+	require.False(t, jsonValuesEqual([]byte(`[1e1000000]`), []byte(`[10e999999]`)))
+	allocations := testing.AllocsPerRun(1000, func() {
+		_, ok := normalizeJSONNumber(json.Number("1e1000000"))
+		require.False(t, ok)
+	})
+	require.Zero(t, allocations)
+	require.True(t, jsonValuesEqual([]byte(`[1]`), []byte(`[1.0]`)))
+	require.True(t, jsonValuesEqual([]byte(`[1]`), []byte(`[1e0]`)))
+}
+
+func TestAttachmentIdentityFallbackIgnoresArbitraryAttachmentIDKeys(t *testing.T) {
+	left := []byte(`[{"tool":{"attachmentId":"00000000-0000-4000-8000-000000000001"}}]`)
+	right := []byte(`[{"tool":{"attachmentId":"00000000-0000-4000-8000-000000000002"}}]`)
+	equal, err := jsonValuesEqualByAttachmentIdentity(context.Background(), nil, "alice", left, right)
+	require.NoError(t, err)
+	require.False(t, equal)
+}
+
+func TestSequencedAppendRequestIgnoresCreationOnlyLineageWhenMatchingExistingEntry(t *testing.T) {
+	userID := "alice"
+	seq := uint32(1)
+	parent := "parent"
+	anchor := uuid.New()
+	request := SequencedAppendRequest{
+		Entries: []CreateEntryRequest{{
+			Channel: "history", ContentType: "history", Seq: &seq,
+			ForkedAtConversationID: &parent, ForkedAtEntryID: &anchor,
+			Content: json.RawMessage(`[{"role":"USER","text":"same"}]`),
+		}},
+		UserID: userID,
+	}
+	stored := []model.Entry{{
+		UserID: &userID, Channel: model.ChannelHistory, Seq: &seq,
+		ContentType: "history", Content: json.RawMessage(`[{"role":"USER","text":"same"}]`),
+	}}
+
+	matched, exact := request.MatchExistingEntries(stored)
+	require.True(t, exact)
+	require.Equal(t, stored, matched)
+}
+
+func int64Ptr(value int64) *int64 { return &value }
 
 func TestPaginateEntriesRejectsUnknownAfterCursor(t *testing.T) {
 	entries := []model.Entry{{ID: uuid.New()}, {ID: uuid.New()}}

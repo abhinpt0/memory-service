@@ -61,6 +61,116 @@ Feature: SSE Event Stream
     And the SSE event data "entry_content_type" should be "history"
     And the SSE event data "entry_role" should be "USER"
 
+  Scenario: Retry unarchives an archived conversation with one update event and no entry event
+    Given I have a conversation with title "Sequenced Unarchive Retry Events"
+    And "alice" is connected to the SSE event stream
+    And I am authenticated as agent with API key "test-agent-key"
+    When I call POST "/v1/conversations/${conversationId}/entries" with body:
+    """
+    {"channel":"HISTORY","contentType":"history","seq":170,"content":[{"role":"USER","text":"stored before archive"}]}
+    """
+    Then the response status should be 201
+    And set "archivedRetryEntryId" to the json response field "id"
+    And "alice" should receive an SSE event with kind "entry" and event "created"
+    Given I am authenticated as user "alice"
+    When I archive the conversation
+    Then the response status should be 200
+    And "alice" should receive an SSE event with kind "conversation" and event "updated"
+    Given I am authenticated as agent with API key "test-agent-key"
+    When I call POST "/v1/conversations/${conversationId}/entries" with body:
+    """
+    {"channel":"HISTORY","contentType":"history","seq":170,"conversationPatch":{"archived":false},"content":[{"role":"USER","text":"stored before archive"}]}
+    """
+    Then the response status should be 201
+    And the response body "id" should be "${archivedRetryEntryId}"
+    And "alice" should receive an SSE event with kind "conversation" and event "updated"
+    And the SSE event data "archived" should be "false"
+    And "alice" should not receive an SSE event with kind "conversation" and event "updated" within 2 seconds
+    And "alice" should not receive an SSE event with kind "entry" and event "created" within 2 seconds
+
+  Scenario: archived false on an active conversation emits updates only for other patch changes
+    Given I have a conversation with title "Active Conversation Patch Events"
+    And "alice" is connected to the SSE event stream
+    And I am authenticated as agent with API key "test-agent-key"
+    When I call POST "/v1/conversations/${conversationId}/entries" with body:
+    """
+    {"channel":"HISTORY","contentType":"history","seq":180,"conversationPatch":{"archived":false},"content":[{"role":"USER","text":"already active"}]}
+    """
+    Then the response status should be 201
+    And "alice" should receive an SSE event with kind "entry" and event "created"
+    And "alice" should not receive an SSE event with kind "conversation" and event "updated" within 2 seconds
+    When I call POST "/v1/conversations/${conversationId}/entries" with body:
+    """
+    {"channel":"HISTORY","contentType":"history","seq":181,"conversationPatch":{"archived":false,"title":"Active Conversation Renamed","metadata":{"retryState":"active"}},"content":[{"role":"USER","text":"patch active"}]}
+    """
+    Then the response status should be 201
+    And "alice" should receive an SSE event with kind "entry" and event "created"
+    And "alice" should receive an SSE event with kind "conversation" and event "updated"
+    Given I am authenticated as user "alice"
+    When I get the conversation
+    Then the response status should be 200
+    And the response body should be json:
+    """
+    {"title":"Active Conversation Renamed","metadata":{"retryState":"active"}}
+    """
+
+  Scenario: Exact retry with unchanged nested metadata emits no duplicate updates
+    Given I have a conversation with title "Nested Metadata Retry Events"
+    And "alice" is connected to the SSE event stream
+    And I am authenticated as agent with API key "test-agent-key"
+    When I call POST "/v1/conversations/${conversationId}/entries" with body:
+    """
+    {"channel":"HISTORY","contentType":"history","seq":190,"conversationPatch":{"metadata":{"state":{"status":"done","steps":[1,2]},"reviewers":[{"name":"alice","roles":["owner","editor"]}]}},"content":[{"role":"USER","text":"complete"}]}
+    """
+    Then the response status should be 201
+    And set "nestedMetadataRetryEntryId" to the json response field "id"
+    And "alice" should receive an SSE event with kind "entry" and event "created"
+    And "alice" should receive an SSE event with kind "conversation" and event "updated"
+    Given I am authenticated as user "alice"
+    When I get the conversation
+    Then the response status should be 200
+    And set "nestedMetadataUpdatedAt" to the json response field "updatedAt"
+    Given I am authenticated as agent with API key "test-agent-key"
+    When I call POST "/v1/conversations/${conversationId}/entries" with body:
+    """
+    {"channel":"HISTORY","contentType":"history","seq":190,"conversationPatch":{"metadata":{"state":{"steps":[1.0,2e0],"status":"done"},"reviewers":[{"roles":["owner","editor"],"name":"alice"}]}},"content":[{"role":"USER","text":"complete"}]}
+    """
+    Then the response status should be 201
+    And the response body "id" should be "${nestedMetadataRetryEntryId}"
+    And "alice" should not receive an SSE event with kind "conversation" and event "updated" within 2 seconds
+    And "alice" should not receive an SSE event with kind "entry" and event "created" within 2 seconds
+    Given I am authenticated as user "alice"
+    When I get the conversation
+    Then the response status should be 200
+    And the response body "updatedAt" should be "${nestedMetadataUpdatedAt}"
+
+  Scenario: An exact sequenced retry does not emit another entry event
+    Given I have a conversation with title "Sequenced Retry Events"
+    And "alice" is connected to the SSE event stream with query "kinds=entry&entry_channels=history"
+    And I am authenticated as agent with API key "test-agent-key"
+    When I call POST "/v1/conversations/${conversationId}/entries" with body:
+    """
+    {
+      "channel": "HISTORY",
+      "contentType": "history",
+      "seq": 528,
+      "content": [{"role": "USER", "text": "Commit once"}]
+    }
+    """
+    Then the response status should be 201
+    And "alice" should receive an SSE event with kind "entry" and event "created"
+    When I call POST "/v1/conversations/${conversationId}/entries" with body:
+    """
+    {
+      "channel": "HISTORY",
+      "contentType": "history",
+      "seq": 528,
+      "content": [{"role": "USER", "text": "Commit once"}]
+    }
+    """
+    Then the response status should be 201
+    And "alice" should not receive an SSE event with kind "entry" and event "created" within 2 seconds
+
   Scenario: Entry event stream defaults to history entries
     Given I have a conversation with title "Entry Filter Defaults"
     And "alice" is connected to the SSE event stream filtered to kinds "entry"

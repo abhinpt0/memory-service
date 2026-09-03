@@ -2137,9 +2137,12 @@ func (x *SyncEntriesResponse) GetEntry() *Entry {
 type AppendEntryRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Conversation identifier
-	ConversationId string              `protobuf:"bytes,1,opt,name=conversation_id,json=conversationId,proto3" json:"conversation_id,omitempty"`
-	Entry          *CreateEntryRequest `protobuf:"bytes,2,opt,name=entry,proto3" json:"entry,omitempty"`
-	Epoch          *int64              `protobuf:"varint,3,opt,name=epoch,proto3,oneof" json:"epoch,omitempty"`
+	ConversationId string `protobuf:"bytes,1,opt,name=conversation_id,json=conversationId,proto3" json:"conversation_id,omitempty"`
+	// An exact retry of a sequenced entry returns the stored entry, including
+	// after later sequenced entries have been appended. Conflicting duplicates
+	// return ABORTED.
+	Entry *CreateEntryRequest `protobuf:"bytes,2,opt,name=entry,proto3" json:"entry,omitempty"`
+	Epoch *int64              `protobuf:"varint,3,opt,name=epoch,proto3,oneof" json:"epoch,omitempty"`
 	// Optional conversation patch applied with the append. PostgreSQL and SQLite commit
 	// both changes atomically; MongoDB currently applies them as separate operations.
 	// Supports title, metadata merge-patch, and archived. Setting archived=false
