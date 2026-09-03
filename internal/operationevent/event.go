@@ -53,6 +53,7 @@ type Snapshot struct {
 	Reason                string              `json:"reason,omitempty"`
 	ErrorCode             string              `json:"errorCode,omitempty"`
 	ErrorType             string              `json:"errorType,omitempty"`
+	RateLimiter           string              `json:"rateLimiter,omitempty"`
 	UserID                string              `json:"userID,omitempty"`
 	ClientID              string              `json:"clientID,omitempty"`
 	AgentID               string              `json:"agentID,omitempty"`
@@ -167,9 +168,12 @@ func (e *Event) SetRequestID(value string) { e.setString(&e.fields.RequestID, va
 func (e *Event) SetReason(value string)    { e.setString(&e.fields.Reason, value, maxFieldLength) }
 func (e *Event) SetErrorCode(value string) { e.setString(&e.fields.ErrorCode, value, maxFieldLength) }
 func (e *Event) SetErrorType(value string) { e.setString(&e.fields.ErrorType, value, maxFieldLength) }
-func (e *Event) SetUserID(value string)    { e.setString(&e.fields.UserID, value, maxFieldLength) }
-func (e *Event) SetClientID(value string)  { e.setString(&e.fields.ClientID, value, maxFieldLength) }
-func (e *Event) SetAgentID(value string)   { e.setString(&e.fields.AgentID, value, maxFieldLength) }
+func (e *Event) SetRateLimiter(value string) {
+	e.setString(&e.fields.RateLimiter, value, maxFieldLength)
+}
+func (e *Event) SetUserID(value string)   { e.setString(&e.fields.UserID, value, maxFieldLength) }
+func (e *Event) SetClientID(value string) { e.setString(&e.fields.ClientID, value, maxFieldLength) }
+func (e *Event) SetAgentID(value string)  { e.setString(&e.fields.AgentID, value, maxFieldLength) }
 func (e *Event) SetConversationID(value string) {
 	e.setString(&e.fields.ConversationID, value, maxFieldLength)
 }
@@ -329,7 +333,7 @@ func emitLog(message string, level Level, snapshot Snapshot) {
 }
 
 func snapshotLogArgs(s Snapshot) []any {
-	args := make([]any, 0, 48)
+	args := make([]any, 0, 50)
 	add := func(name string, value any, present bool) {
 		if present {
 			args = append(args, name, value)
@@ -343,6 +347,7 @@ func snapshotLogArgs(s Snapshot) []any {
 	add("reason", s.Reason, s.Reason != "")
 	add("errorCode", s.ErrorCode, s.ErrorCode != "")
 	add("errorType", s.ErrorType, s.ErrorType != "")
+	add("rateLimiter", s.RateLimiter, s.RateLimiter != "")
 	add("userID", s.UserID, s.UserID != "")
 	add("clientID", s.ClientID, s.ClientID != "")
 	add("agentID", s.AgentID, s.AgentID != "")
