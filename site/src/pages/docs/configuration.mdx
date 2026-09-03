@@ -32,14 +32,14 @@ Memory Service is configured through CLI flags or environment variables. Use the
 
 ### Rate limits
 
-| Flag                                                                                 | Values         | Default              | Description                                                       |
-| ------------------------------------------------------------------------------------ | -------------- | -------------------- | ----------------------------------------------------------------- |
-| <Cfg p="--rate-limit-mode" e="MEMORY_SERVICE_RATE_LIMIT_MODE" />                   | `local`, `off` | `local`              | Enable process-local rate limits or disable them                  |
-| <Cfg p="--rate-limit-source" e="MEMORY_SERVICE_RATE_LIMIT_SOURCE" />               | rate limit     | `600/1m,burst=100`   | Limit requests from each resolved source IP                       |
-| <Cfg p="--rate-limit-identity" e="MEMORY_SERVICE_RATE_LIMIT_IDENTITY" />           | rate limit     | `1200/1m,burst=200`  | Limit requests from each authenticated identity                   |
-| <Cfg p="--rate-limit-auth-failure" e="MEMORY_SERVICE_RATE_LIMIT_AUTH_FAILURE" />   | rate limit     | `30/1m,burst=10`     | Limit authentication failures from each resolved source IP        |
-| <Cfg p="--rate-limit-expensive" e="MEMORY_SERVICE_RATE_LIMIT_EXPENSIVE" />         | rate limit     | `60/1m,burst=10`     | Limit expensive operations from each authenticated identity       |
-| <Cfg p="--rate-limit-stream-open" e="MEMORY_SERVICE_RATE_LIMIT_STREAM_OPEN" />     | rate limit     | `30/1m,burst=5`      | Limit stream openings from each authenticated identity            |
+| Flag                                                                             | Values         | Default             | Description                                                 |
+| -------------------------------------------------------------------------------- | -------------- | ------------------- | ----------------------------------------------------------- |
+| <Cfg p="--rate-limit-mode" e="MEMORY_SERVICE_RATE_LIMIT_MODE" />                 | `local`, `off` | `local`             | Enable process-local rate limits or disable them            |
+| <Cfg p="--rate-limit-source" e="MEMORY_SERVICE_RATE_LIMIT_SOURCE" />             | rate limit     | `600/1m,burst=100`  | Limit requests from each resolved source IP                 |
+| <Cfg p="--rate-limit-identity" e="MEMORY_SERVICE_RATE_LIMIT_IDENTITY" />         | rate limit     | `1200/1m,burst=200` | Limit requests from each authenticated identity             |
+| <Cfg p="--rate-limit-auth-failure" e="MEMORY_SERVICE_RATE_LIMIT_AUTH_FAILURE" /> | rate limit     | `30/1m,burst=10`    | Limit authentication failures from each resolved source IP  |
+| <Cfg p="--rate-limit-expensive" e="MEMORY_SERVICE_RATE_LIMIT_EXPENSIVE" />       | rate limit     | `60/1m,burst=10`    | Limit expensive operations from each authenticated identity |
+| <Cfg p="--rate-limit-stream-open" e="MEMORY_SERVICE_RATE_LIMIT_STREAM_OPEN" />   | rate limit     | `30/1m,burst=5`     | Limit stream openings from each authenticated identity      |
 
 Rate limits use the format `<tokens>/<duration>,burst=<tokens>`. Tokens and burst must be positive integers. Duration must be between `1s` and `1h`. The `off` mode disables all five limits and reports the `rate_limits_off` unsafe configuration metric.
 
