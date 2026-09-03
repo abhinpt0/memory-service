@@ -30,11 +30,30 @@ Memory Service is configured through CLI flags or environment variables. Use the
 | <Cfg p="--management-access-log" e="MEMORY_SERVICE_MANAGEMENT_ACCESS_LOG" />               | `true`, `false`                           | `false`         | Enable operational logging for `/health`, `/ready`, `/metrics`                 |
 | `MEMORY_SERVICE_LOG_LEVEL`                                                                 | `debug`, `info`, `warn`, `error`, `fatal` | `info`          | Server log level                                                               |
 
+### Rate limits
+
+| Flag                                                                                 | Values         | Default              | Description                                                       |
+| ------------------------------------------------------------------------------------ | -------------- | -------------------- | ----------------------------------------------------------------- |
+| <Cfg p="--rate-limit-mode" e="MEMORY_SERVICE_RATE_LIMIT_MODE" />                   | `local`, `off` | `local`              | Enable process-local rate limits or disable them                  |
+| <Cfg p="--rate-limit-source" e="MEMORY_SERVICE_RATE_LIMIT_SOURCE" />               | rate limit     | `600/1m,burst=100`   | Limit requests from each resolved source IP                       |
+| <Cfg p="--rate-limit-identity" e="MEMORY_SERVICE_RATE_LIMIT_IDENTITY" />           | rate limit     | `1200/1m,burst=200`  | Limit requests from each authenticated identity                   |
+| <Cfg p="--rate-limit-auth-failure" e="MEMORY_SERVICE_RATE_LIMIT_AUTH_FAILURE" />   | rate limit     | `30/1m,burst=10`     | Limit authentication failures from each resolved source IP        |
+| <Cfg p="--rate-limit-expensive" e="MEMORY_SERVICE_RATE_LIMIT_EXPENSIVE" />         | rate limit     | `60/1m,burst=10`     | Limit expensive operations from each authenticated identity       |
+| <Cfg p="--rate-limit-stream-open" e="MEMORY_SERVICE_RATE_LIMIT_STREAM_OPEN" />     | rate limit     | `30/1m,burst=5`      | Limit stream openings from each authenticated identity            |
+
+Rate limits use the format `<tokens>/<duration>,burst=<tokens>`. Tokens and burst must be positive integers. Duration must be between `1s` and `1h`. The `off` mode disables all five limits and reports the `rate_limits_off` unsafe configuration metric.
+
 ### Operational event logging
 
 Memory Service emits one canonical completion event for every REST and gRPC operation and every claimed background task attempt. Long-running streams and substantial background runs also emit a `phase=start` event. REST operation names use route templates, such as `http GET /v1/conversations/{conversationId}`, and never use the concrete request URL. gRPC operation names use the full service method, and background operation names use stable `job.*` identifiers.
 
 Completion events include `phase`, `status`, `duration`, and one semantic `result`: `success`, `invalid`, `unauthenticated`, `forbidden`, `not_found`, `conflict`, `rate_limited`, `timed_out`, `canceled`, `rejected`, `failed`, or `retrying`. Depending on the operation they may also include `requestID`, authenticated identity IDs, resource IDs, `connectionID`, `cursor`, retry attempt, work/failure counts, and bounded provider diagnostics.
+
+A local rate-limit rejection includes `rateLimiter`. Its value is `source`, `identity`, `auth_failure`, `expensive`, or `stream_open`. For example:
+
+```text
+WARN http GET /v1/conversations phase=complete requestID=req-123 status=429 duration=4ms result=rate_limited errorCode=rate_limited rateLimiter=identity userID=user-123 clientID=chat-app
+```
 
 Canonical events never include concrete unmatched paths, query values, headers, cookies, request or response bodies, credentials, message or memory content, raw provider responses, raw errors, or stack traces. Internal failure point logs retain stack traces where required. Provider diagnostics are allowlisted, bounded metadata under `errorDetails`.
 
