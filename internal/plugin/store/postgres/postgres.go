@@ -1374,6 +1374,7 @@ func (s *PostgresStore) GetEntries(ctx context.Context, userID string, conversat
 	fromSeq := query.FromSeq
 	channel := query.Channel
 	epochFilter := query.EpochFilter
+	createdAtFilter := query.CreatedAtFilter
 
 	// channel==nil means "all channels" (agent without filter).
 	// Determine effective channel for filtering.
@@ -1390,7 +1391,7 @@ func (s *PostgresStore) GetEntries(ctx context.Context, userID string, conversat
 	}
 
 	if allForks && effectiveChannel == model.ChannelHistory {
-		page, afterCursor, beforeCursor, err := s.boundedGroupHistory(ctx, conv.ConversationGroupID, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit)
+		page, afterCursor, beforeCursor, err := s.boundedGroupHistory(ctx, conv.ConversationGroupID, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit, createdAtFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -1401,7 +1402,7 @@ func (s *PostgresStore) GetEntries(ctx context.Context, userID string, conversat
 	}
 
 	if allForks && effectiveChannel == model.ChannelContext {
-		page, afterCursor, beforeCursor, err := s.boundedGroupContext(ctx, conv.ConversationGroupID, clientID, epochFilter, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit)
+		page, afterCursor, beforeCursor, err := s.boundedGroupContext(ctx, conv.ConversationGroupID, clientID, epochFilter, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit, createdAtFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -1412,7 +1413,7 @@ func (s *PostgresStore) GetEntries(ctx context.Context, userID string, conversat
 	}
 
 	if allForks && effectiveChannel == model.ChannelJournal {
-		page, afterCursor, beforeCursor, err := s.boundedGroupChannel(ctx, conv.ConversationGroupID, model.ChannelJournal, clientID, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit)
+		page, afterCursor, beforeCursor, err := s.boundedGroupChannel(ctx, conv.ConversationGroupID, model.ChannelJournal, clientID, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit, createdAtFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -1423,7 +1424,7 @@ func (s *PostgresStore) GetEntries(ctx context.Context, userID string, conversat
 	}
 
 	if allForks && effectiveChannel == "" {
-		page, afterCursor, beforeCursor, err := s.boundedGroupAllChannels(ctx, conv.ConversationGroupID, clientID, true, epochFilter, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit)
+		page, afterCursor, beforeCursor, err := s.boundedGroupAllChannels(ctx, conv.ConversationGroupID, clientID, true, epochFilter, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit, createdAtFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -1447,6 +1448,9 @@ func (s *PostgresStore) GetEntries(ctx context.Context, userID string, conversat
 		if fromSeq != nil {
 			entries = filterEntriesByFromSeq(entries, *fromSeq)
 		}
+		if createdAtFilter != nil {
+			entries = sqlentry.FilterEntriesByCreatedAt(entries, createdAtFilter)
+		}
 		page, afterCursor, beforeCursor, err := registrystore.PaginateEntries(entries, afterEntryID, beforeEntryID, tail, limit)
 		if err != nil {
 			return nil, &registrystore.BadRequestError{Message: err.Error()}
@@ -1463,7 +1467,7 @@ func (s *PostgresStore) GetEntries(ctx context.Context, userID string, conversat
 	}
 
 	if effectiveChannel == model.ChannelHistory && !allForks {
-		page, afterCursor, beforeCursor, err := s.boundedVisibleHistory(ctx, conv, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit)
+		page, afterCursor, beforeCursor, err := s.boundedVisibleHistory(ctx, conv, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit, createdAtFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -1474,7 +1478,7 @@ func (s *PostgresStore) GetEntries(ctx context.Context, userID string, conversat
 	}
 
 	if effectiveChannel == model.ChannelContext && !allForks {
-		page, afterCursor, beforeCursor, err := s.boundedVisibleContext(ctx, conv, clientID, epochFilter, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit)
+		page, afterCursor, beforeCursor, err := s.boundedVisibleContext(ctx, conv, clientID, epochFilter, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit, createdAtFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -1485,7 +1489,7 @@ func (s *PostgresStore) GetEntries(ctx context.Context, userID string, conversat
 	}
 
 	if effectiveChannel == model.ChannelJournal && !allForks {
-		page, afterCursor, beforeCursor, err := s.boundedVisibleChannel(ctx, conv, model.ChannelJournal, clientID, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit)
+		page, afterCursor, beforeCursor, err := s.boundedVisibleChannel(ctx, conv, model.ChannelJournal, clientID, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit, createdAtFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -1496,7 +1500,7 @@ func (s *PostgresStore) GetEntries(ctx context.Context, userID string, conversat
 	}
 
 	if effectiveChannel == "" && !allForks {
-		page, afterCursor, beforeCursor, err := s.boundedVisibleAllChannels(ctx, conv, clientID, true, epochFilter, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit)
+		page, afterCursor, beforeCursor, err := s.boundedVisibleAllChannels(ctx, conv, clientID, true, epochFilter, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit, createdAtFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -1577,6 +1581,9 @@ func (s *PostgresStore) GetEntries(ctx context.Context, userID string, conversat
 	// fromSeq: filter to seq >= fromSeq, exclude null-seq entries, sort by seq ASC.
 	if fromSeq != nil {
 		filtered = filterEntriesByFromSeq(filtered, *fromSeq)
+	}
+	if createdAtFilter != nil {
+		filtered = sqlentry.FilterEntriesByCreatedAt(filtered, createdAtFilter)
 	}
 
 	page, afterCursor, beforeCursor, err := registrystore.PaginateEntries(filtered, afterEntryID, beforeEntryID, tail, limit)
@@ -2578,7 +2585,7 @@ func (s *PostgresStore) AdminGetEntries(ctx context.Context, conversationID stri
 	}
 
 	if query.AllForks && query.Channel != nil && *query.Channel == model.ChannelHistory {
-		page, afterCursor, beforeCursor, err := s.boundedGroupHistory(ctx, conv.ConversationGroupID, query.FromSeq, query.UpToEntryID, query.AfterCursor, query.BeforeCursor, query.Tail, limit)
+		page, afterCursor, beforeCursor, err := s.boundedGroupHistory(ctx, conv.ConversationGroupID, query.FromSeq, query.UpToEntryID, query.AfterCursor, query.BeforeCursor, query.Tail, limit, query.CreatedAtFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -2593,7 +2600,7 @@ func (s *PostgresStore) AdminGetEntries(ctx context.Context, conversationID stri
 		if epochFilter == nil {
 			epochFilter = &registrystore.MemoryEpochFilter{Mode: registrystore.MemoryEpochModeAll}
 		}
-		page, afterCursor, beforeCursor, err := s.boundedGroupContext(ctx, conv.ConversationGroupID, nil, epochFilter, query.FromSeq, query.UpToEntryID, query.AfterCursor, query.BeforeCursor, query.Tail, limit)
+		page, afterCursor, beforeCursor, err := s.boundedGroupContext(ctx, conv.ConversationGroupID, nil, epochFilter, query.FromSeq, query.UpToEntryID, query.AfterCursor, query.BeforeCursor, query.Tail, limit, query.CreatedAtFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -2604,7 +2611,7 @@ func (s *PostgresStore) AdminGetEntries(ctx context.Context, conversationID stri
 	}
 
 	if query.AllForks && query.Channel != nil && *query.Channel == model.ChannelJournal {
-		page, afterCursor, beforeCursor, err := s.boundedGroupChannel(ctx, conv.ConversationGroupID, model.ChannelJournal, nil, query.FromSeq, query.UpToEntryID, query.AfterCursor, query.BeforeCursor, query.Tail, limit)
+		page, afterCursor, beforeCursor, err := s.boundedGroupChannel(ctx, conv.ConversationGroupID, model.ChannelJournal, nil, query.FromSeq, query.UpToEntryID, query.AfterCursor, query.BeforeCursor, query.Tail, limit, query.CreatedAtFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -2615,7 +2622,7 @@ func (s *PostgresStore) AdminGetEntries(ctx context.Context, conversationID stri
 	}
 
 	if query.AllForks && query.Channel == nil {
-		page, afterCursor, beforeCursor, err := s.boundedGroupAllChannels(ctx, conv.ConversationGroupID, nil, false, query.EpochFilter, query.FromSeq, query.UpToEntryID, query.AfterCursor, query.BeforeCursor, query.Tail, limit)
+		page, afterCursor, beforeCursor, err := s.boundedGroupAllChannels(ctx, conv.ConversationGroupID, nil, false, query.EpochFilter, query.FromSeq, query.UpToEntryID, query.AfterCursor, query.BeforeCursor, query.Tail, limit, query.CreatedAtFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -2626,7 +2633,7 @@ func (s *PostgresStore) AdminGetEntries(ctx context.Context, conversationID stri
 	}
 
 	if !query.AllForks && query.Channel != nil && *query.Channel == model.ChannelHistory {
-		page, afterCursor, beforeCursor, err := s.boundedVisibleHistory(ctx, conv, query.FromSeq, query.UpToEntryID, query.AfterCursor, query.BeforeCursor, query.Tail, limit)
+		page, afterCursor, beforeCursor, err := s.boundedVisibleHistory(ctx, conv, query.FromSeq, query.UpToEntryID, query.AfterCursor, query.BeforeCursor, query.Tail, limit, query.CreatedAtFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -2641,7 +2648,7 @@ func (s *PostgresStore) AdminGetEntries(ctx context.Context, conversationID stri
 		if epochFilter == nil {
 			epochFilter = &registrystore.MemoryEpochFilter{Mode: registrystore.MemoryEpochModeAll}
 		}
-		page, afterCursor, beforeCursor, err := s.boundedVisibleContext(ctx, conv, nil, epochFilter, query.FromSeq, query.UpToEntryID, query.AfterCursor, query.BeforeCursor, query.Tail, limit)
+		page, afterCursor, beforeCursor, err := s.boundedVisibleContext(ctx, conv, nil, epochFilter, query.FromSeq, query.UpToEntryID, query.AfterCursor, query.BeforeCursor, query.Tail, limit, query.CreatedAtFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -2652,7 +2659,7 @@ func (s *PostgresStore) AdminGetEntries(ctx context.Context, conversationID stri
 	}
 
 	if !query.AllForks && query.Channel != nil && *query.Channel == model.ChannelJournal {
-		page, afterCursor, beforeCursor, err := s.boundedVisibleChannel(ctx, conv, model.ChannelJournal, nil, query.FromSeq, query.UpToEntryID, query.AfterCursor, query.BeforeCursor, query.Tail, limit)
+		page, afterCursor, beforeCursor, err := s.boundedVisibleChannel(ctx, conv, model.ChannelJournal, nil, query.FromSeq, query.UpToEntryID, query.AfterCursor, query.BeforeCursor, query.Tail, limit, query.CreatedAtFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -2663,7 +2670,7 @@ func (s *PostgresStore) AdminGetEntries(ctx context.Context, conversationID stri
 	}
 
 	if !query.AllForks && query.Channel == nil {
-		page, afterCursor, beforeCursor, err := s.boundedVisibleAllChannels(ctx, conv, nil, false, query.EpochFilter, query.FromSeq, query.UpToEntryID, query.AfterCursor, query.BeforeCursor, query.Tail, limit)
+		page, afterCursor, beforeCursor, err := s.boundedVisibleAllChannels(ctx, conv, nil, false, query.EpochFilter, query.FromSeq, query.UpToEntryID, query.AfterCursor, query.BeforeCursor, query.Tail, limit, query.CreatedAtFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -2708,6 +2715,9 @@ func (s *PostgresStore) AdminGetEntries(ctx context.Context, conversationID stri
 	}
 	if query.FromSeq != nil {
 		filtered = filterEntriesByFromSeq(filtered, *query.FromSeq)
+	}
+	if query.CreatedAtFilter != nil {
+		filtered = sqlentry.FilterEntriesByCreatedAt(filtered, query.CreatedAtFilter)
 	}
 
 	page, afterCursor, beforeCursor, err := registrystore.PaginateEntries(filtered, query.AfterCursor, query.BeforeCursor, query.Tail, limit)
@@ -3510,7 +3520,7 @@ func (s *PostgresStore) groupAllChannelsQuery(ctx context.Context, groupID uuid.
 	return tx.Where("(e.channel NOT IN ? OR e.client_id = ?)", scopedChannels, *clientID)
 }
 
-func (s *PostgresStore) runBoundedSQLQuery(ctx context.Context, base *gorm.DB, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int, upToLookup sqlentry.LookupFunc, transform func(*gorm.DB) (*gorm.DB, error), scanErr string) ([]model.Entry, *string, *string, error) {
+func (s *PostgresStore) runBoundedSQLQuery(ctx context.Context, base *gorm.DB, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int, upToLookup sqlentry.LookupFunc, transform func(*gorm.DB) (*gorm.DB, error), createdAtFilter *registrystore.CreatedAtFilter, scanErr string) ([]model.Entry, *string, *string, error) {
 	return sqlentry.RunBoundedQuery(ctx, sqlentry.BoundedQuery{
 		Base:             base,
 		FromSeq:          fromSeq,
@@ -3529,73 +3539,74 @@ func (s *PostgresStore) runBoundedSQLQuery(ctx context.Context, base *gorm.DB, f
 		EntryNotFound: func(entryID string) error {
 			return &registrystore.NotFoundError{Resource: "entry", ID: entryID}
 		},
-		EntryIDValue: sqlentry.UUIDValue,
-		ScanErr:      scanErr,
+		EntryIDValue:    sqlentry.UUIDValue,
+		ScanErr:         scanErr,
+		CreatedAtFilter: createdAtFilter,
 	})
 }
 
-func (s *PostgresStore) boundedVisibleHistory(ctx context.Context, conv model.Conversation, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int) ([]model.Entry, *string, *string, error) {
+func (s *PostgresStore) boundedVisibleHistory(ctx context.Context, conv model.Conversation, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int, createdAtFilter *registrystore.CreatedAtFilter) ([]model.Entry, *string, *string, error) {
 	base := s.visibleHistoryEntriesQuery(ctx, conv)
 	return s.runBoundedSQLQuery(ctx, base, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit, func(entryID string) (model.Entry, bool, error) {
 		return s.visibleEntryByID(ctx, conv, entryID)
-	}, nil, "bounded history scan failed")
+	}, nil, createdAtFilter, "bounded history scan failed")
 }
 
-func (s *PostgresStore) boundedVisibleContext(ctx context.Context, conv model.Conversation, clientID *string, epochFilter *registrystore.MemoryEpochFilter, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int) ([]model.Entry, *string, *string, error) {
+func (s *PostgresStore) boundedVisibleContext(ctx context.Context, conv model.Conversation, clientID *string, epochFilter *registrystore.MemoryEpochFilter, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int, createdAtFilter *registrystore.CreatedAtFilter) ([]model.Entry, *string, *string, error) {
 	base := s.visibleChannelEntriesQuery(ctx, conv, model.ChannelContext, clientID)
 	return s.runBoundedSQLQuery(ctx, base, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit, func(entryID string) (model.Entry, bool, error) {
 		return s.visibleEntryByID(ctx, conv, entryID)
 	}, func(base *gorm.DB) (*gorm.DB, error) {
 		return sqlentry.ApplyEpochFilter(base, epochFilter, true, "failed to get latest context epoch")
-	}, "bounded context scan failed")
+	}, createdAtFilter, "bounded context scan failed")
 }
 
-func (s *PostgresStore) boundedVisibleChannel(ctx context.Context, conv model.Conversation, channel model.Channel, clientID *string, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int) ([]model.Entry, *string, *string, error) {
+func (s *PostgresStore) boundedVisibleChannel(ctx context.Context, conv model.Conversation, channel model.Channel, clientID *string, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int, createdAtFilter *registrystore.CreatedAtFilter) ([]model.Entry, *string, *string, error) {
 	base := s.visibleChannelEntriesQuery(ctx, conv, channel, clientID)
 	return s.runBoundedSQLQuery(ctx, base, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit, func(entryID string) (model.Entry, bool, error) {
 		return s.visibleEntryByID(ctx, conv, entryID)
-	}, nil, "bounded channel scan failed")
+	}, nil, createdAtFilter, "bounded channel scan failed")
 }
 
-func (s *PostgresStore) boundedVisibleAllChannels(ctx context.Context, conv model.Conversation, clientID *string, suppressScopedWithoutClient bool, epochFilter *registrystore.MemoryEpochFilter, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int) ([]model.Entry, *string, *string, error) {
+func (s *PostgresStore) boundedVisibleAllChannels(ctx context.Context, conv model.Conversation, clientID *string, suppressScopedWithoutClient bool, epochFilter *registrystore.MemoryEpochFilter, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int, createdAtFilter *registrystore.CreatedAtFilter) ([]model.Entry, *string, *string, error) {
 	base := s.visibleAllChannelsQuery(ctx, conv, clientID, suppressScopedWithoutClient)
 	return s.runBoundedSQLQuery(ctx, base, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit, func(entryID string) (model.Entry, bool, error) {
 		return s.visibleEntryByID(ctx, conv, entryID)
 	}, func(base *gorm.DB) (*gorm.DB, error) {
 		return applySQLEpochFilterToBase(base, epochFilter)
-	}, "bounded all-channel scan failed")
+	}, createdAtFilter, "bounded all-channel scan failed")
 }
 
-func (s *PostgresStore) boundedGroupHistory(ctx context.Context, groupID uuid.UUID, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int) ([]model.Entry, *string, *string, error) {
+func (s *PostgresStore) boundedGroupHistory(ctx context.Context, groupID uuid.UUID, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int, createdAtFilter *registrystore.CreatedAtFilter) ([]model.Entry, *string, *string, error) {
 	base := s.groupHistoryEntriesQuery(ctx, groupID, nil)
 	return s.runBoundedSQLQuery(ctx, base, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit, func(entryID string) (model.Entry, bool, error) {
 		return s.groupEntryByID(ctx, groupID, entryID)
-	}, nil, "bounded group history scan failed")
+	}, nil, createdAtFilter, "bounded group history scan failed")
 }
 
-func (s *PostgresStore) boundedGroupContext(ctx context.Context, groupID uuid.UUID, clientID *string, epochFilter *registrystore.MemoryEpochFilter, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int) ([]model.Entry, *string, *string, error) {
+func (s *PostgresStore) boundedGroupContext(ctx context.Context, groupID uuid.UUID, clientID *string, epochFilter *registrystore.MemoryEpochFilter, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int, createdAtFilter *registrystore.CreatedAtFilter) ([]model.Entry, *string, *string, error) {
 	base := s.groupChannelEntriesQuery(ctx, groupID, model.ChannelContext, clientID)
 	return s.runBoundedSQLQuery(ctx, base, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit, func(entryID string) (model.Entry, bool, error) {
 		return s.groupEntryByID(ctx, groupID, entryID)
 	}, func(base *gorm.DB) (*gorm.DB, error) {
 		return sqlentry.ApplyEpochFilter(base, epochFilter, true, "failed to get latest context epoch")
-	}, "bounded group context scan failed")
+	}, createdAtFilter, "bounded group context scan failed")
 }
 
-func (s *PostgresStore) boundedGroupChannel(ctx context.Context, groupID uuid.UUID, channel model.Channel, clientID *string, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int) ([]model.Entry, *string, *string, error) {
+func (s *PostgresStore) boundedGroupChannel(ctx context.Context, groupID uuid.UUID, channel model.Channel, clientID *string, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int, createdAtFilter *registrystore.CreatedAtFilter) ([]model.Entry, *string, *string, error) {
 	base := s.groupChannelEntriesQuery(ctx, groupID, channel, clientID)
 	return s.runBoundedSQLQuery(ctx, base, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit, func(entryID string) (model.Entry, bool, error) {
 		return s.groupEntryByID(ctx, groupID, entryID)
-	}, nil, "bounded group channel scan failed")
+	}, nil, createdAtFilter, "bounded group channel scan failed")
 }
 
-func (s *PostgresStore) boundedGroupAllChannels(ctx context.Context, groupID uuid.UUID, clientID *string, suppressScopedWithoutClient bool, epochFilter *registrystore.MemoryEpochFilter, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int) ([]model.Entry, *string, *string, error) {
+func (s *PostgresStore) boundedGroupAllChannels(ctx context.Context, groupID uuid.UUID, clientID *string, suppressScopedWithoutClient bool, epochFilter *registrystore.MemoryEpochFilter, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int, createdAtFilter *registrystore.CreatedAtFilter) ([]model.Entry, *string, *string, error) {
 	base := s.groupAllChannelsQuery(ctx, groupID, clientID, suppressScopedWithoutClient)
 	return s.runBoundedSQLQuery(ctx, base, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit, func(entryID string) (model.Entry, bool, error) {
 		return s.groupEntryByID(ctx, groupID, entryID)
 	}, func(base *gorm.DB) (*gorm.DB, error) {
 		return applySQLEpochFilterToBase(base, epochFilter)
-	}, "bounded group all-channel scan failed")
+	}, createdAtFilter, "bounded group all-channel scan failed")
 }
 
 func (s *PostgresStore) buildAncestryStack(ctx context.Context, target model.Conversation) ([]forkAncestor, error) {

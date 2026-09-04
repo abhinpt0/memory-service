@@ -2073,7 +2073,7 @@ func (s *MongoStore) GetEntries(ctx context.Context, userID string, conversation
 	}
 
 	if allForks && effectiveChannel == model.ChannelHistory {
-		docs, afterCursor, beforeCursor, err := s.boundedGroupHistoryDocs(ctx, conv.ConversationGroupID, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit)
+		docs, afterCursor, beforeCursor, err := s.boundedGroupHistoryDocs(ctx, conv.ConversationGroupID, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit, query.CreatedAtFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -2085,7 +2085,7 @@ func (s *MongoStore) GetEntries(ctx context.Context, userID string, conversation
 	}
 
 	if allForks && effectiveChannel == model.ChannelContext {
-		docs, afterCursor, beforeCursor, err := s.boundedGroupContextDocs(ctx, conv.ConversationGroupID, clientID, epochFilter, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit)
+		docs, afterCursor, beforeCursor, err := s.boundedGroupContextDocs(ctx, conv.ConversationGroupID, clientID, epochFilter, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit, query.CreatedAtFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -2097,7 +2097,7 @@ func (s *MongoStore) GetEntries(ctx context.Context, userID string, conversation
 	}
 
 	if allForks && effectiveChannel == model.ChannelJournal {
-		docs, afterCursor, beforeCursor, err := s.boundedGroupChannelDocs(ctx, conv.ConversationGroupID, model.ChannelJournal, clientID, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit)
+		docs, afterCursor, beforeCursor, err := s.boundedGroupChannelDocs(ctx, conv.ConversationGroupID, model.ChannelJournal, clientID, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit, query.CreatedAtFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -2109,7 +2109,7 @@ func (s *MongoStore) GetEntries(ctx context.Context, userID string, conversation
 	}
 
 	if allForks && effectiveChannel == "" {
-		docs, afterCursor, beforeCursor, err := s.boundedGroupAllChannelDocs(ctx, conv.ConversationGroupID, clientID, true, epochFilter, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit)
+		docs, afterCursor, beforeCursor, err := s.boundedGroupAllChannelDocs(ctx, conv.ConversationGroupID, clientID, true, epochFilter, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit, query.CreatedAtFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -2133,6 +2133,9 @@ func (s *MongoStore) GetEntries(ctx context.Context, userID string, conversation
 		if fromSeq != nil {
 			filtered = filterEntryDocsByFromSeq(filtered, *fromSeq)
 		}
+		if query.CreatedAtFilter != nil {
+			filtered = filterEntryDocsByCreatedAt(filtered, query.CreatedAtFilter)
+		}
 		page, afterCursor, beforeCursor, pErr := paginateEntryDocsBi(filtered, afterEntryID, beforeEntryID, tail, limit)
 		if pErr != nil {
 			return nil, &registrystore.BadRequestError{Message: pErr.Error()}
@@ -2150,7 +2153,7 @@ func (s *MongoStore) GetEntries(ctx context.Context, userID string, conversation
 	}
 
 	if effectiveChannel == model.ChannelHistory && !allForks {
-		docs, afterCursor, beforeCursor, err := s.boundedVisibleHistoryDocs(ctx, conv, ancestry, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit)
+		docs, afterCursor, beforeCursor, err := s.boundedVisibleHistoryDocs(ctx, conv, ancestry, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit, query.CreatedAtFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -2162,7 +2165,7 @@ func (s *MongoStore) GetEntries(ctx context.Context, userID string, conversation
 	}
 
 	if effectiveChannel == model.ChannelContext && !allForks {
-		docs, afterCursor, beforeCursor, err := s.boundedVisibleContextDocs(ctx, conv, ancestry, clientID, epochFilter, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit)
+		docs, afterCursor, beforeCursor, err := s.boundedVisibleContextDocs(ctx, conv, ancestry, clientID, epochFilter, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit, query.CreatedAtFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -2174,7 +2177,7 @@ func (s *MongoStore) GetEntries(ctx context.Context, userID string, conversation
 	}
 
 	if effectiveChannel == model.ChannelJournal && !allForks {
-		docs, afterCursor, beforeCursor, err := s.boundedVisibleChannelDocs(ctx, conv, ancestry, model.ChannelJournal, clientID, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit)
+		docs, afterCursor, beforeCursor, err := s.boundedVisibleChannelDocs(ctx, conv, ancestry, model.ChannelJournal, clientID, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit, query.CreatedAtFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -2186,7 +2189,7 @@ func (s *MongoStore) GetEntries(ctx context.Context, userID string, conversation
 	}
 
 	if effectiveChannel == "" && !allForks {
-		docs, afterCursor, beforeCursor, err := s.boundedVisibleAllChannelDocs(ctx, conv, ancestry, clientID, true, epochFilter, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit)
+		docs, afterCursor, beforeCursor, err := s.boundedVisibleAllChannelDocs(ctx, conv, ancestry, clientID, true, epochFilter, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit, query.CreatedAtFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -3180,7 +3183,7 @@ func (s *MongoStore) AdminGetEntries(ctx context.Context, conversationID string,
 	}
 
 	if query.AllForks && query.Channel != nil && *query.Channel == model.ChannelHistory {
-		docs, afterCursor, beforeCursor, err := s.boundedGroupHistoryDocs(ctx, conv.ConversationGroupID, query.FromSeq, query.UpToEntryID, query.AfterCursor, query.BeforeCursor, query.Tail, limit)
+		docs, afterCursor, beforeCursor, err := s.boundedGroupHistoryDocs(ctx, conv.ConversationGroupID, query.FromSeq, query.UpToEntryID, query.AfterCursor, query.BeforeCursor, query.Tail, limit, query.CreatedAtFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -3196,7 +3199,7 @@ func (s *MongoStore) AdminGetEntries(ctx context.Context, conversationID string,
 		if epochFilter == nil {
 			epochFilter = &registrystore.MemoryEpochFilter{Mode: registrystore.MemoryEpochModeAll}
 		}
-		docs, afterCursor, beforeCursor, err := s.boundedGroupContextDocs(ctx, conv.ConversationGroupID, nil, epochFilter, query.FromSeq, query.UpToEntryID, query.AfterCursor, query.BeforeCursor, query.Tail, limit)
+		docs, afterCursor, beforeCursor, err := s.boundedGroupContextDocs(ctx, conv.ConversationGroupID, nil, epochFilter, query.FromSeq, query.UpToEntryID, query.AfterCursor, query.BeforeCursor, query.Tail, limit, query.CreatedAtFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -3208,7 +3211,7 @@ func (s *MongoStore) AdminGetEntries(ctx context.Context, conversationID string,
 	}
 
 	if query.AllForks && query.Channel != nil && *query.Channel == model.ChannelJournal {
-		docs, afterCursor, beforeCursor, err := s.boundedGroupChannelDocs(ctx, conv.ConversationGroupID, model.ChannelJournal, nil, query.FromSeq, query.UpToEntryID, query.AfterCursor, query.BeforeCursor, query.Tail, limit)
+		docs, afterCursor, beforeCursor, err := s.boundedGroupChannelDocs(ctx, conv.ConversationGroupID, model.ChannelJournal, nil, query.FromSeq, query.UpToEntryID, query.AfterCursor, query.BeforeCursor, query.Tail, limit, query.CreatedAtFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -3220,7 +3223,7 @@ func (s *MongoStore) AdminGetEntries(ctx context.Context, conversationID string,
 	}
 
 	if query.AllForks && query.Channel == nil {
-		docs, afterCursor, beforeCursor, err := s.boundedGroupAllChannelDocs(ctx, conv.ConversationGroupID, nil, false, query.EpochFilter, query.FromSeq, query.UpToEntryID, query.AfterCursor, query.BeforeCursor, query.Tail, limit)
+		docs, afterCursor, beforeCursor, err := s.boundedGroupAllChannelDocs(ctx, conv.ConversationGroupID, nil, false, query.EpochFilter, query.FromSeq, query.UpToEntryID, query.AfterCursor, query.BeforeCursor, query.Tail, limit, query.CreatedAtFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -3236,7 +3239,7 @@ func (s *MongoStore) AdminGetEntries(ctx context.Context, conversationID string,
 		if err != nil {
 			return nil, err
 		}
-		docs, afterCursor, beforeCursor, err := s.boundedVisibleHistoryDocs(ctx, conv, ancestry, query.FromSeq, query.UpToEntryID, query.AfterCursor, query.BeforeCursor, query.Tail, limit)
+		docs, afterCursor, beforeCursor, err := s.boundedVisibleHistoryDocs(ctx, conv, ancestry, query.FromSeq, query.UpToEntryID, query.AfterCursor, query.BeforeCursor, query.Tail, limit, query.CreatedAtFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -3256,7 +3259,7 @@ func (s *MongoStore) AdminGetEntries(ctx context.Context, conversationID string,
 		if epochFilter == nil {
 			epochFilter = &registrystore.MemoryEpochFilter{Mode: registrystore.MemoryEpochModeAll}
 		}
-		docs, afterCursor, beforeCursor, err := s.boundedVisibleContextDocs(ctx, conv, ancestry, nil, epochFilter, query.FromSeq, query.UpToEntryID, query.AfterCursor, query.BeforeCursor, query.Tail, limit)
+		docs, afterCursor, beforeCursor, err := s.boundedVisibleContextDocs(ctx, conv, ancestry, nil, epochFilter, query.FromSeq, query.UpToEntryID, query.AfterCursor, query.BeforeCursor, query.Tail, limit, query.CreatedAtFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -3272,7 +3275,7 @@ func (s *MongoStore) AdminGetEntries(ctx context.Context, conversationID string,
 		if err != nil {
 			return nil, err
 		}
-		docs, afterCursor, beforeCursor, err := s.boundedVisibleChannelDocs(ctx, conv, ancestry, model.ChannelJournal, nil, query.FromSeq, query.UpToEntryID, query.AfterCursor, query.BeforeCursor, query.Tail, limit)
+		docs, afterCursor, beforeCursor, err := s.boundedVisibleChannelDocs(ctx, conv, ancestry, model.ChannelJournal, nil, query.FromSeq, query.UpToEntryID, query.AfterCursor, query.BeforeCursor, query.Tail, limit, query.CreatedAtFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -3288,7 +3291,7 @@ func (s *MongoStore) AdminGetEntries(ctx context.Context, conversationID string,
 		if err != nil {
 			return nil, err
 		}
-		docs, afterCursor, beforeCursor, err := s.boundedVisibleAllChannelDocs(ctx, conv, ancestry, nil, false, query.EpochFilter, query.FromSeq, query.UpToEntryID, query.AfterCursor, query.BeforeCursor, query.Tail, limit)
+		docs, afterCursor, beforeCursor, err := s.boundedVisibleAllChannelDocs(ctx, conv, ancestry, nil, false, query.EpochFilter, query.FromSeq, query.UpToEntryID, query.AfterCursor, query.BeforeCursor, query.Tail, limit, query.CreatedAtFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -3334,6 +3337,9 @@ func (s *MongoStore) AdminGetEntries(ctx context.Context, conversationID string,
 	}
 	if query.FromSeq != nil {
 		filtered = filterEntryDocsByFromSeq(filtered, *query.FromSeq)
+	}
+	if query.CreatedAtFilter != nil {
+		filtered = filterEntryDocsByCreatedAt(filtered, query.CreatedAtFilter)
 	}
 
 	page, afterCursor, beforeCursor, pErr := paginateEntryDocsBi(filtered, query.AfterCursor, query.BeforeCursor, query.Tail, limit)
@@ -4488,6 +4494,49 @@ func addMongoAllChannelScope(filter bson.M, clientID *string, suppressScopedWith
 	}})
 }
 
+func addMongoCreatedAtFilter(filter bson.M, f *registrystore.CreatedAtFilter) {
+	if f == nil {
+		return
+	}
+	if f.Eq != nil {
+		filter["created_at"] = *f.Eq
+		return
+	}
+	rangeCond := bson.M{}
+	if f.After != nil {
+		rangeCond["$gte"] = *f.After
+	}
+	if f.Before != nil {
+		rangeCond["$lte"] = *f.Before
+	}
+	if len(rangeCond) > 0 {
+		filter["created_at"] = rangeCond
+	}
+}
+
+func filterEntryDocsByCreatedAt(entries []entryDoc, f *registrystore.CreatedAtFilter) []entryDoc {
+	if f == nil {
+		return entries
+	}
+	filtered := make([]entryDoc, 0, len(entries))
+	for _, e := range entries {
+		if f.Eq != nil {
+			if e.CreatedAt.Equal(*f.Eq) {
+				filtered = append(filtered, e)
+			}
+			continue
+		}
+		if f.After != nil && e.CreatedAt.Before(*f.After) {
+			continue
+		}
+		if f.Before != nil && e.CreatedAt.After(*f.Before) {
+			continue
+		}
+		filtered = append(filtered, e)
+	}
+	return filtered
+}
+
 func addMongoSeqFromBound(filter bson.M, fromSeq uint32) {
 	filter["seq"] = bson.M{"$gte": fromSeq}
 }
@@ -4566,7 +4615,7 @@ func addMongoEntryAfterBound(filter bson.M, bound bson.A) {
 	filter["$or"] = bound
 }
 
-func (s *MongoStore) boundedVisibleHistoryDocs(ctx context.Context, conv convDoc, ancestry []forkAncestorDoc, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int) ([]entryDoc, *string, *string, error) {
+func (s *MongoStore) boundedVisibleHistoryDocs(ctx context.Context, conv convDoc, ancestry []forkAncestorDoc, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int, createdAtFilter *registrystore.CreatedAtFilter) ([]entryDoc, *string, *string, error) {
 	if limit <= 0 || limit > config.MaxPageSizeFromContext(ctx) {
 		return nil, nil, nil, &registrystore.BadRequestError{Message: fmt.Sprintf("limit must be between 1 and %d", config.MaxPageSizeFromContext(ctx))}
 	}
@@ -4590,6 +4639,9 @@ func (s *MongoStore) boundedVisibleHistoryDocs(ctx context.Context, conv convDoc
 	}
 	if fromSeq != nil {
 		addMongoSeqFromBound(base, *fromSeq)
+	}
+	if createdAtFilter != nil {
+		addMongoCreatedAtFilter(base, createdAtFilter)
 	}
 
 	if tail || beforeEntryID != nil {
@@ -4689,7 +4741,7 @@ func (s *MongoStore) boundedVisibleHistoryDocs(ctx context.Context, conv convDoc
 	return docs, nil, beforeCursor, nil
 }
 
-func (s *MongoStore) boundedVisibleContextDocs(ctx context.Context, conv convDoc, ancestry []forkAncestorDoc, clientID *string, epochFilter *registrystore.MemoryEpochFilter, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int) ([]entryDoc, *string, *string, error) {
+func (s *MongoStore) boundedVisibleContextDocs(ctx context.Context, conv convDoc, ancestry []forkAncestorDoc, clientID *string, epochFilter *registrystore.MemoryEpochFilter, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int, createdAtFilter *registrystore.CreatedAtFilter) ([]entryDoc, *string, *string, error) {
 	if limit <= 0 || limit > config.MaxPageSizeFromContext(ctx) {
 		return nil, nil, nil, &registrystore.BadRequestError{Message: fmt.Sprintf("limit must be between 1 and %d", config.MaxPageSizeFromContext(ctx))}
 	}
@@ -4748,6 +4800,9 @@ func (s *MongoStore) boundedVisibleContextDocs(ctx context.Context, conv convDoc
 
 	if fromSeq != nil {
 		addMongoSeqFromBound(base, *fromSeq)
+	}
+	if createdAtFilter != nil {
+		addMongoCreatedAtFilter(base, createdAtFilter)
 	}
 
 	if tail || beforeEntryID != nil {
@@ -4847,7 +4902,7 @@ func (s *MongoStore) boundedVisibleContextDocs(ctx context.Context, conv convDoc
 	return docs, nil, beforeCursor, nil
 }
 
-func (s *MongoStore) boundedVisibleChannelDocs(ctx context.Context, conv convDoc, ancestry []forkAncestorDoc, channel model.Channel, clientID *string, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int) ([]entryDoc, *string, *string, error) {
+func (s *MongoStore) boundedVisibleChannelDocs(ctx context.Context, conv convDoc, ancestry []forkAncestorDoc, channel model.Channel, clientID *string, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int, createdAtFilter *registrystore.CreatedAtFilter) ([]entryDoc, *string, *string, error) {
 	if limit <= 0 || limit > config.MaxPageSizeFromContext(ctx) {
 		return nil, nil, nil, &registrystore.BadRequestError{Message: fmt.Sprintf("limit must be between 1 and %d", config.MaxPageSizeFromContext(ctx))}
 	}
@@ -4871,6 +4926,9 @@ func (s *MongoStore) boundedVisibleChannelDocs(ctx context.Context, conv convDoc
 	}
 	if fromSeq != nil {
 		addMongoSeqFromBound(base, *fromSeq)
+	}
+	if createdAtFilter != nil {
+		addMongoCreatedAtFilter(base, createdAtFilter)
 	}
 
 	if tail || beforeEntryID != nil {
@@ -4970,7 +5028,7 @@ func (s *MongoStore) boundedVisibleChannelDocs(ctx context.Context, conv convDoc
 	return docs, nil, beforeCursor, nil
 }
 
-func (s *MongoStore) boundedVisibleAllChannelDocs(ctx context.Context, conv convDoc, ancestry []forkAncestorDoc, clientID *string, suppressScopedWithoutClient bool, epochFilter *registrystore.MemoryEpochFilter, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int) ([]entryDoc, *string, *string, error) {
+func (s *MongoStore) boundedVisibleAllChannelDocs(ctx context.Context, conv convDoc, ancestry []forkAncestorDoc, clientID *string, suppressScopedWithoutClient bool, epochFilter *registrystore.MemoryEpochFilter, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int, createdAtFilter *registrystore.CreatedAtFilter) ([]entryDoc, *string, *string, error) {
 	if limit <= 0 || limit > config.MaxPageSizeFromContext(ctx) {
 		return nil, nil, nil, &registrystore.BadRequestError{Message: fmt.Sprintf("limit must be between 1 and %d", config.MaxPageSizeFromContext(ctx))}
 	}
@@ -4999,6 +5057,9 @@ func (s *MongoStore) boundedVisibleAllChannelDocs(ctx context.Context, conv conv
 	}
 	if fromSeq != nil {
 		addMongoSeqFromBound(base, *fromSeq)
+	}
+	if createdAtFilter != nil {
+		addMongoCreatedAtFilter(base, createdAtFilter)
 	}
 
 	if tail || beforeEntryID != nil {
@@ -5196,7 +5257,7 @@ func (s *MongoStore) boundedDocsFromBase(ctx context.Context, base bson.M, fromS
 	return docs, nil, beforeCursor, nil
 }
 
-func (s *MongoStore) boundedGroupContextDocs(ctx context.Context, groupID string, clientID *string, epochFilter *registrystore.MemoryEpochFilter, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int) ([]entryDoc, *string, *string, error) {
+func (s *MongoStore) boundedGroupContextDocs(ctx context.Context, groupID string, clientID *string, epochFilter *registrystore.MemoryEpochFilter, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int, createdAtFilter *registrystore.CreatedAtFilter) ([]entryDoc, *string, *string, error) {
 	if limit <= 0 || limit > config.MaxPageSizeFromContext(ctx) {
 		return nil, nil, nil, &registrystore.BadRequestError{Message: fmt.Sprintf("limit must be between 1 and %d", config.MaxPageSizeFromContext(ctx))}
 	}
@@ -5253,10 +5314,13 @@ func (s *MongoStore) boundedGroupContextDocs(ctx context.Context, groupID string
 	if fromSeq != nil {
 		addMongoSeqFromBound(base, *fromSeq)
 	}
+	if createdAtFilter != nil {
+		addMongoCreatedAtFilter(base, createdAtFilter)
+	}
 	return s.boundedDocsFromBase(ctx, base, fromSeq, afterEntryID, beforeEntryID, tail, limit, "bounded group context scan failed")
 }
 
-func (s *MongoStore) boundedGroupChannelDocs(ctx context.Context, groupID string, channel model.Channel, clientID *string, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int) ([]entryDoc, *string, *string, error) {
+func (s *MongoStore) boundedGroupChannelDocs(ctx context.Context, groupID string, channel model.Channel, clientID *string, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int, createdAtFilter *registrystore.CreatedAtFilter) ([]entryDoc, *string, *string, error) {
 	if limit <= 0 || limit > config.MaxPageSizeFromContext(ctx) {
 		return nil, nil, nil, &registrystore.BadRequestError{Message: fmt.Sprintf("limit must be between 1 and %d", config.MaxPageSizeFromContext(ctx))}
 	}
@@ -5280,10 +5344,13 @@ func (s *MongoStore) boundedGroupChannelDocs(ctx context.Context, groupID string
 	if fromSeq != nil {
 		addMongoSeqFromBound(base, *fromSeq)
 	}
+	if createdAtFilter != nil {
+		addMongoCreatedAtFilter(base, createdAtFilter)
+	}
 	return s.boundedDocsFromBase(ctx, base, fromSeq, afterEntryID, beforeEntryID, tail, limit, "bounded group channel scan failed")
 }
 
-func (s *MongoStore) boundedGroupAllChannelDocs(ctx context.Context, groupID string, clientID *string, suppressScopedWithoutClient bool, epochFilter *registrystore.MemoryEpochFilter, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int) ([]entryDoc, *string, *string, error) {
+func (s *MongoStore) boundedGroupAllChannelDocs(ctx context.Context, groupID string, clientID *string, suppressScopedWithoutClient bool, epochFilter *registrystore.MemoryEpochFilter, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int, createdAtFilter *registrystore.CreatedAtFilter) ([]entryDoc, *string, *string, error) {
 	if limit <= 0 || limit > config.MaxPageSizeFromContext(ctx) {
 		return nil, nil, nil, &registrystore.BadRequestError{Message: fmt.Sprintf("limit must be between 1 and %d", config.MaxPageSizeFromContext(ctx))}
 	}
@@ -5306,10 +5373,13 @@ func (s *MongoStore) boundedGroupAllChannelDocs(ctx context.Context, groupID str
 	if fromSeq != nil {
 		addMongoSeqFromBound(base, *fromSeq)
 	}
+	if createdAtFilter != nil {
+		addMongoCreatedAtFilter(base, createdAtFilter)
+	}
 	return s.boundedDocsFromBase(ctx, base, fromSeq, afterEntryID, beforeEntryID, tail, limit, "bounded group all-channel scan failed")
 }
 
-func (s *MongoStore) boundedGroupHistoryDocs(ctx context.Context, groupID string, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int) ([]entryDoc, *string, *string, error) {
+func (s *MongoStore) boundedGroupHistoryDocs(ctx context.Context, groupID string, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int, createdAtFilter *registrystore.CreatedAtFilter) ([]entryDoc, *string, *string, error) {
 	if limit <= 0 || limit > config.MaxPageSizeFromContext(ctx) {
 		return nil, nil, nil, &registrystore.BadRequestError{Message: fmt.Sprintf("limit must be between 1 and %d", config.MaxPageSizeFromContext(ctx))}
 	}
@@ -5329,6 +5399,9 @@ func (s *MongoStore) boundedGroupHistoryDocs(ctx context.Context, groupID string
 	}
 	if fromSeq != nil {
 		addMongoSeqFromBound(base, *fromSeq)
+	}
+	if createdAtFilter != nil {
+		addMongoCreatedAtFilter(base, createdAtFilter)
 	}
 
 	if tail || beforeEntryID != nil {
