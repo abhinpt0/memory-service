@@ -162,7 +162,7 @@ func listEntries(c *gin.Context, store registrystore.MemoryStore) {
 	}
 
 	if createdAtStr != "" {
-		t, err := time.Parse(time.RFC3339, createdAtStr)
+		t, err := parseTimestamp(createdAtStr)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid createdAt: must be a valid RFC 3339 datetime string"})
 			return
@@ -171,7 +171,7 @@ func listEntries(c *gin.Context, store registrystore.MemoryStore) {
 	} else if createdAtAfterStr != "" || createdAtBeforeStr != "" {
 		f := &registrystore.CreatedAtFilter{}
 		if createdAtAfterStr != "" {
-			t, err := time.Parse(time.RFC3339, createdAtAfterStr)
+			t, err := parseTimestamp(createdAtAfterStr)
 			if err != nil {
 				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid createdAtAfter: must be a valid RFC 3339 datetime string"})
 				return
@@ -179,7 +179,7 @@ func listEntries(c *gin.Context, store registrystore.MemoryStore) {
 			f.After = &t
 		}
 		if createdAtBeforeStr != "" {
-			t, err := time.Parse(time.RFC3339, createdAtBeforeStr)
+			t, err := parseTimestamp(createdAtBeforeStr)
 			if err != nil {
 				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid createdAtBefore: must be a valid RFC 3339 datetime string"})
 				return
@@ -675,6 +675,16 @@ func appendEntry(c *gin.Context, store registrystore.MemoryStore, eventBus regis
 func isNotFoundError(err error) bool {
 	var notFound *registrystore.NotFoundError
 	return errors.As(err, &notFound)
+}
+
+// parseTimestamp parses an RFC 3339 timestamp string, accepting both
+// sub-second (RFC3339Nano) and whole-second (RFC3339) formats.
+func parseTimestamp(s string) (time.Time, error) {
+	t, err := time.Parse(time.RFC3339Nano, s)
+	if err != nil {
+		t, err = time.Parse(time.RFC3339, s)
+	}
+	return t, err
 }
 
 func cloneCreateEntryRequests(entries []registrystore.CreateEntryRequest) []registrystore.CreateEntryRequest {
