@@ -112,6 +112,16 @@ type ConversationDetail struct {
 	HasResponseInProgress bool `json:"hasResponseInProgress,omitempty"`
 }
 
+type UnarchiveConversationResult struct {
+	ConversationGroupID uuid.UUID
+	Changed             bool
+}
+
+type ArchiveConversationResult struct {
+	ConversationGroupID uuid.UUID
+	Changed             bool
+}
+
 // MemoryEpochFilter filters context entries by epoch.
 type MemoryEpochFilter struct {
 	Mode  string // "latest", "all", "epoch"
@@ -347,8 +357,9 @@ type MemoryStore interface {
 	GetConversation(ctx context.Context, userID string, conversationID string) (*ConversationDetail, error)
 	UpdateConversation(ctx context.Context, userID string, conversationID string, title *string, metadataPatch MetadataPatch) (*ConversationDetail, error)
 	ArchiveConversation(ctx context.Context, userID string, conversationID string) error
+	ArchiveConversationIfNeeded(ctx context.Context, userID string, conversationID string) (ArchiveConversationResult, error)
 	UnarchiveConversation(ctx context.Context, userID string, conversationID string) error
-
+	UnarchiveConversationIfNeeded(ctx context.Context, userID string, conversationID string) (UnarchiveConversationResult, error)
 	// Memberships
 	ListMemberships(ctx context.Context, userID string, conversationID string, afterCursor *string, limit int) ([]model.ConversationMembership, *string, error)
 	ShareConversation(ctx context.Context, userID string, conversationID string, targetUserID string, accessLevel model.AccessLevel) (*model.ConversationMembership, error)
@@ -370,7 +381,12 @@ type MemoryStore interface {
 
 	// Entries
 	GetEntries(ctx context.Context, userID string, conversationID string, query EntryListQuery) (*PagedEntries, error)
+	GetEntriesBySequence(ctx context.Context, userID string, conversationID string, sequences []uint32) ([]model.Entry, error)
 	AppendEntries(ctx context.Context, userID string, conversationID string, entries []CreateEntryRequest, clientID *string, agentID *string, epoch *int64) ([]model.Entry, error)
+	// AppendEntriesBeforeUnarchive permits insertion while the conversation is archived.
+	// Callers must derive this authority from a validated archived=false patch and must
+	// unarchive only after insertion or exact duplicate recovery succeeds.
+	AppendEntriesBeforeUnarchive(ctx context.Context, userID string, conversationID string, entries []CreateEntryRequest, clientID *string, agentID *string, epoch *int64) ([]model.Entry, error)
 	GetEntryGroupID(ctx context.Context, entryID uuid.UUID) (uuid.UUID, error)
 	SyncAgentEntry(ctx context.Context, userID string, conversationID string, entry CreateEntryRequest, clientID string, agentID *string) (*SyncResult, error)
 
@@ -404,6 +420,7 @@ type MemoryStore interface {
 	// Attachments
 	CreateAttachment(ctx context.Context, userID string, conversationID string, attachment model.Attachment) (*model.Attachment, error)
 	UpdateAttachment(ctx context.Context, userID string, attachmentID uuid.UUID, update AttachmentUpdate) (*model.Attachment, error)
+	LinkAttachmentToEntry(ctx context.Context, userID string, attachmentID uuid.UUID, entryID uuid.UUID) (*model.Attachment, error)
 	GetAttachment(ctx context.Context, userID string, conversationID string, attachmentID uuid.UUID) (*model.Attachment, error)
 	DeleteAttachment(ctx context.Context, userID string, conversationID string, attachmentID uuid.UUID) error
 

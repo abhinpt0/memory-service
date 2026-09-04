@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 func TestDecodeMetadataPatch_ExplicitNull(t *testing.T) {
@@ -15,6 +16,45 @@ func TestDecodeMetadataPatch_ExplicitNull(t *testing.T) {
 	assert.Len(t, result, 2)
 	assert.Nil(t, result["key1"])
 	assert.Equal(t, "value", result["key2"])
+}
+
+func TestMetadataPatchChangesAgainstDropsNoOps(t *testing.T) {
+	patch := MetadataPatch{
+		"same":   "value",
+		"change": "new",
+		"delete": nil,
+		"absent": nil,
+	}
+	changes := patch.ChangesAgainst(map[string]interface{}{
+		"same":   "value",
+		"change": "old",
+		"delete": "present",
+	})
+
+	require.Equal(t, MetadataPatch{"change": "new", "delete": nil}, changes)
+}
+
+func TestMetadataPatchChangesAgainstDropsNestedBSONNoOps(t *testing.T) {
+	patch, err := DecodeMetadataPatch([]byte(`{
+		"state":{"status":"done","steps":[1.0,2e0]},
+		"reviewers":[{"name":"alice","roles":["owner","editor"]}]
+	}`))
+	require.NoError(t, err)
+
+	current := map[string]interface{}{
+		"state": bson.D{
+			{Key: "status", Value: "done"},
+			{Key: "steps", Value: bson.A{int32(1), int64(2)}},
+		},
+		"reviewers": bson.A{
+			bson.D{
+				{Key: "name", Value: "alice"},
+				{Key: "roles", Value: bson.A{"owner", "editor"}},
+			},
+		},
+	}
+
+	require.Nil(t, patch.ChangesAgainst(current))
 }
 
 func TestDecodeMetadataPatch_NestedReplacement(t *testing.T) {

@@ -768,9 +768,10 @@ type CreateEntryRequest struct {
 	IndexedContent *string `json:"indexedContent,omitempty"`
 
 	// Seq Optional client-assigned sequence number. Must be unique within the
-	// conversation. Must be >= 0. Returns 409 Conflict if a duplicate seq is
-	// submitted. Returns 400 Bad Request if the value is negative or exceeds
-	// 4294967295.
+	// conversation. An exact retry returns the stored entry, including after
+	// later sequenced entries have been appended. A partial or conflicting
+	// duplicate returns 409 Conflict. Returns 400 Bad Request if the value is
+	// negative or exceeds 4294967295.
 	Seq *int `json:"seq,omitempty"`
 
 	// StartedByConversationId If the target conversation does not exist yet, auto-create it as a child conversation started from this parent conversation.

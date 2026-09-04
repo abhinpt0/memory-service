@@ -82,6 +82,11 @@ func TestFeaturesMongo(t *testing.T) {
 		subFiles, _ := filepath.Glob(filepath.Join(resourcesDir, subdir, "*.feature"))
 		featureFiles = append(featureFiles, subFiles...)
 	}
+	featureFiles = append(featureFiles, filepath.Join(resourcesDir, "features-grpc", "entries-seq-retry-grpc.feature"))
+	featureFiles = append(featureFiles,
+		filepath.Join(resourcesDir, "features-mongo", "entries-seq-retry-archive-rest.feature"),
+		filepath.Join(resourcesDir, "features-mongo", "entries-seq-retry-archive-grpc.feature"),
+	)
 	featureFiles = filterSerialFeatures(featureFiles, false)
 	require.NotEmpty(t, featureFiles, "No feature files found")
 
