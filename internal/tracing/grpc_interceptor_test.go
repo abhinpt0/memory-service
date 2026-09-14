@@ -13,6 +13,7 @@ import (
 	"github.com/chirino/memory-service/internal/tracing/testutil"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	b3 "go.opentelemetry.io/contrib/propagators/b3"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
@@ -29,7 +30,7 @@ func TestGRPCProductionInterceptorOrderSharesOperationEventWithTracing(t *testin
 	t.Cleanup(downstream.Close)
 	grpcHarness := testutil.NewGRPCBufConnHarness(
 		grpc.ChainUnaryInterceptor(
-			tracing.GRPCUnaryServerInterceptor(harness.Provider, harness.Propagator),
+			tracing.GRPCUnaryServerInterceptor(harness.Provider, harness.Propagator, harness.Propagator),
 			security.GRPCRequestIDUnaryInterceptor(),
 			security.GRPCOperationUnaryInterceptor(),
 			func(ctx context.Context, req any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
@@ -122,7 +123,7 @@ func setupGRPCTest(t *testing.T, extraInterceptors ...grpc.UnaryServerIntercepto
 	server := &testGRPCServer{downstreamURL: downstream.Server.URL, harness: harness}
 
 	interceptors := []grpc.UnaryServerInterceptor{
-		tracing.GRPCUnaryServerInterceptor(harness.Provider, harness.Propagator),
+		tracing.GRPCUnaryServerInterceptor(harness.Provider, harness.Propagator, harness.Propagator),
 	}
 	interceptors = append(interceptors, extraInterceptors...)
 
@@ -398,6 +399,54 @@ func TestGRPCInboundHandlerErrorNonOKStatus(t *testing.T) {
 		"span must carry at least one event from RecordError on the error path")
 }
 
+// TestGRPCUnaryInboundCallerErrorLeavesSpanStatusUnset verifies that caller-side gRPC
+// status codes (InvalidArgument, NotFound, PermissionDenied, Unauthenticated) do NOT
+// set span status to Error on the server span.  The same principle governs HTTP 4xx
+// handling and must apply symmetrically to gRPC caller errors.
+func TestGRPCUnaryInboundCallerErrorLeavesSpanStatusUnset(t *testing.T) {
+	callerCodes := []struct {
+		name string
+		code grpccodes.Code
+	}{
+		{name: "InvalidArgument", code: grpccodes.InvalidArgument},
+		{name: "NotFound", code: grpccodes.NotFound},
+		{name: "PermissionDenied", code: grpccodes.PermissionDenied},
+		{name: "Unauthenticated", code: grpccodes.Unauthenticated},
+	}
+
+	for _, tc := range callerCodes {
+		t.Run(tc.name, func(t *testing.T) {
+			setup := setupGRPCTest(t, func(ctx context.Context, req any, _ *grpc.UnaryServerInfo, _ grpc.UnaryHandler) (any, error) {
+				return nil, status.Error(tc.code, "caller error")
+			})
+
+			traceID := "4bf92f3577b34da6a3ce929d0e0e4736"
+			parentSpanID := "00f067aa0ba902b7"
+			inboundTraceparent := testutil.NewSampledTraceparent(traceID, parentSpanID)
+
+			ctx := metadata.NewOutgoingContext(context.Background(), metadata.Pairs("traceparent", inboundTraceparent))
+			_, err := setup.Client.GetHealth(ctx, &emptypb.Empty{})
+			require.Error(t, err)
+
+			spans := setup.Harness.Exporter.GetSpans()
+			serverSpan := findServerSpan(spans)
+			require.NotNil(t, serverSpan, "server span must be exported")
+
+			// rpc.grpc.status_code must carry the caller's error code.
+			attrs := make(map[string]any)
+			for _, kv := range serverSpan.Attributes {
+				attrs[string(kv.Key)] = kv.Value.AsInterface()
+			}
+			require.Equal(t, int64(tc.code), attrs["rpc.grpc.status_code"],
+				"rpc.grpc.status_code must reflect the caller's error code")
+
+			// Span status must be Unset for caller errors — not Error.
+			require.Equal(t, codes.Unset, serverSpan.Status.Code,
+				"caller-side gRPC errors must not set span status to Error")
+		})
+	}
+}
+
 // TestGRPCInboundHandlerErrorWithOperationEventErrorDetails verifies that when an
 // OperationEvent carrying ErrorDetails IS reachable from the tracing interceptor's ctx
 // (i.e., placed upstream via a pre-tracing interceptor), the errorDetails are emitted
@@ -429,7 +478,7 @@ func TestGRPCInboundHandlerErrorWithOperationEventErrorDetails(t *testing.T) {
 	grpcHarness := testutil.NewGRPCBufConnHarness(
 		grpc.ChainUnaryInterceptor(
 			preTracingInterceptor,
-			tracing.GRPCUnaryServerInterceptor(harness.Provider, harness.Propagator),
+			tracing.GRPCUnaryServerInterceptor(harness.Provider, harness.Propagator, harness.Propagator),
 			func(ctx context.Context, req any, _ *grpc.UnaryServerInfo, _ grpc.UnaryHandler) (any, error) {
 				return nil, status.Error(grpccodes.Internal, "downstream failed")
 			},
@@ -468,4 +517,87 @@ func TestGRPCInboundHandlerErrorWithOperationEventErrorDetails(t *testing.T) {
 	}
 	require.True(t, hasErrorDetailEvent,
 		"span must carry memoryservice.errorDetail event when OperationEvent is on ctx upstream of tracing interceptor")
+}
+
+// outboundPropGRPCServer is a SystemService implementation that makes an outbound HTTP call
+// using OutboundPropagatorFromContext — the same pattern used by production handlers such as
+// StartSourceURLAttachmentDownload — so tests can verify that the context-stored propagator
+// is correctly propagated from the gRPC interceptor to the handler.
+type outboundPropGRPCServer struct {
+	pb.UnimplementedSystemServiceServer
+	downstreamURL string
+	callCount     int
+}
+
+func (s *outboundPropGRPCServer) GetHealth(ctx context.Context, _ *emptypb.Empty) (*pb.HealthResponse, error) {
+	s.callCount++
+	// Use OutboundPropagatorFromContext exactly as production handlers do.
+	prop := tracing.OutboundPropagatorFromContext(ctx)
+	tp := tracing.ProviderFromContextOrNoop(ctx)
+	client := &http.Client{
+		Transport: otelhttp.NewTransport(
+			http.DefaultTransport,
+			otelhttp.WithTracerProvider(tp),
+			otelhttp.WithPropagators(prop),
+		),
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.downstreamURL, nil)
+	if err == nil {
+		resp, err := client.Do(req)
+		if err == nil {
+			_ = resp.Body.Close()
+		}
+	}
+	return &pb.HealthResponse{Status: "SERVING"}, nil
+}
+
+// TestGRPCUnaryInboundConfiguredPropagatorUsedOutbound verifies that when a sampled inbound
+// traceparent is received, the outbound HTTP call made from a gRPC handler carries B3 headers
+// and no W3C traceparent when the interceptor is constructed with a B3 outbound propagator.
+// The outbound propagator is stored on the request context via WithOutboundPropagatorContext
+// so handlers retrieve it via OutboundPropagatorFromContext.
+func TestGRPCUnaryInboundConfiguredPropagatorUsedOutbound(t *testing.T) {
+	harness := testutil.NewTestHarness()
+	t.Cleanup(func() { _ = harness.Shutdown(context.Background()) })
+
+	downstream := testutil.NewDownstreamRecorder()
+	t.Cleanup(downstream.Close)
+
+	// Build a B3 single-header outbound propagator wrapping the participating gate.
+	b3OutboundProp := tracing.NewParticipatingPropagator(
+		tracing.WithNoBaggage(b3.New(b3.WithInjectEncoding(b3.B3SingleHeader))),
+	)
+
+	server := &outboundPropGRPCServer{downstreamURL: downstream.Server.URL}
+	grpcHarness := testutil.NewGRPCBufConnHarness(
+		grpc.ChainUnaryInterceptor(
+			tracing.GRPCUnaryServerInterceptor(harness.Provider, harness.Propagator, b3OutboundProp),
+		),
+	)
+	t.Cleanup(grpcHarness.Close)
+	pb.RegisterSystemServiceServer(grpcHarness.Server, server)
+	grpcHarness.Serve()
+
+	conn, err := grpcHarness.Dial(context.Background())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	client := pb.NewSystemServiceClient(conn)
+	traceID := "4bf92f3577b34da6a3ce929d0e0e4736"
+	parentSpanID := "00f067aa0ba902b7"
+	ctx := metadata.NewOutgoingContext(context.Background(), metadata.Pairs(
+		"traceparent", testutil.NewSampledTraceparent(traceID, parentSpanID)))
+	_, err = client.GetHealth(ctx, &emptypb.Empty{})
+	require.NoError(t, err)
+
+	// Positive assertion: downstream was called.
+	require.Equal(t, 1, downstream.CallCount(), "downstream must be called once")
+
+	lastHeader := downstream.LastHeader()
+	require.NotNil(t, lastHeader)
+	// B3 single-header outbound propagator must inject b3, not traceparent.
+	require.NotEmpty(t, lastHeader.Get("b3"),
+		"configured B3 propagator must inject b3 single-header on outbound call from gRPC handler")
+	require.Empty(t, lastHeader.Get("Traceparent"),
+		"W3C traceparent must not be injected when B3 propagator is configured on gRPC unary interceptor")
 }

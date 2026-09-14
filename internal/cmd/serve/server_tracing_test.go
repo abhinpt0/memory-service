@@ -57,9 +57,12 @@ func TestManagementRouterParticipatesInTrace(t *testing.T) {
 	inboundProp := tracing.NewParticipatingPropagator(
 		propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}),
 	)
+	outboundProp := tracing.NewParticipatingPropagator(
+		tracing.WithNoBaggage(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{})),
+	)
 
 	cfg := &config.Config{}
-	router, err := buildManagementRouter(cfg, tp, inboundProp)
+	router, err := buildManagementRouter(cfg, tp, inboundProp, outboundProp)
 	require.NoError(t, err)
 	// Register a stand-in health route so the router resolves a path.
 	router.GET("/health", func(c *gin.Context) {
@@ -347,3 +350,39 @@ func TestBuildInboundPropagatorHonoursOtelPropagators(t *testing.T) {
 			"OTEL_PROPAGATORS=b3 must not inject W3C traceparent")
 	})
 }
+
+// TestBuildTracerProviderDefaultServiceNamePreserved verifies that when
+// OTEL_SERVICE_NAME is unset, the resource retains a non-empty service.name
+// from the SDK default resource.
+//
+// The failure mode: resource.New(ctx, resource.WithFromEnv()) alone drops the
+// SDK default resource so service.name is empty when no env var is set.
+// Merging with resource.Default() restores the default service.name so spans
+// are identifiable in the collector even without operator configuration.
+//
+// Mutation proof target: removing the resource.Merge with resource.Default()
+// in buildTracerProviderWithExporter causes this test to fail.
+func TestBuildTracerProviderDefaultServiceNamePreserved(t *testing.T) {
+	t.Setenv("OTEL_SERVICE_NAME", "")
+	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "")
+
+	syncer := tracetest.NewInMemoryExporter()
+	sdkTP := buildTracerProviderWithExporter(syncer)
+	t.Cleanup(func() { _ = sdkTP.Shutdown(context.Background()) })
+
+	_, span := sdkTP.Tracer("test").Start(context.Background(), "probe")
+	span.End()
+
+	spans := syncer.GetSpans()
+	require.Len(t, spans, 1)
+	var found string
+	for _, attr := range spans[0].Resource.Attributes() {
+		if string(attr.Key) == "service.name" {
+			found = attr.Value.AsString()
+		}
+	}
+	require.NotEmpty(t, found,
+		"service.name must not be empty when OTEL_SERVICE_NAME is unset; "+
+			"resource.New(WithFromEnv()) alone drops the SDK default — merge with resource.Default() to preserve it")
+}
+

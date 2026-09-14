@@ -13,6 +13,7 @@ import (
 	"github.com/chirino/memory-service/internal/tracing/testutil"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	b3 "go.opentelemetry.io/contrib/propagators/b3"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
@@ -74,7 +75,7 @@ func setupGRPCStreamTest(t *testing.T, extraInterceptors ...grpc.StreamServerInt
 	server := &testEventStreamServer{downstreamURL: downstream.Server.URL, harness: harness}
 
 	interceptors := []grpc.StreamServerInterceptor{
-		tracing.GRPCStreamServerInterceptor(harness.Provider, harness.Propagator),
+		tracing.GRPCStreamServerInterceptor(harness.Provider, harness.Propagator, harness.Propagator),
 	}
 	interceptors = append(interceptors, extraInterceptors...)
 
@@ -407,6 +408,56 @@ func TestGRPCStreamInboundHandlerErrorNonOKStatus(t *testing.T) {
 		"span must carry at least one event from RecordError on the stream error path")
 }
 
+// TestGRPCStreamInboundCallerErrorLeavesSpanStatusUnset verifies that caller-side gRPC
+// status codes (InvalidArgument, NotFound, PermissionDenied, Unauthenticated) do NOT
+// set span status to Error on the stream server span.
+func TestGRPCStreamInboundCallerErrorLeavesSpanStatusUnset(t *testing.T) {
+	callerCodes := []struct {
+		name string
+		code grpccodes.Code
+	}{
+		{name: "InvalidArgument", code: grpccodes.InvalidArgument},
+		{name: "NotFound", code: grpccodes.NotFound},
+		{name: "PermissionDenied", code: grpccodes.PermissionDenied},
+		{name: "Unauthenticated", code: grpccodes.Unauthenticated},
+	}
+
+	for _, tc := range callerCodes {
+		t.Run(tc.name, func(t *testing.T) {
+			errorInterceptor := grpc.StreamServerInterceptor(func(srv any, stream grpc.ServerStream, _ *grpc.StreamServerInfo, _ grpc.StreamHandler) error {
+				return status.Error(tc.code, "caller error")
+			})
+			setup := setupGRPCStreamTest(t, errorInterceptor)
+
+			traceID := "4bf92f3577b34da6a3ce929d0e0e4736"
+			parentSpanID := "00f067aa0ba902b7"
+			inboundTraceparent := testutil.NewSampledTraceparent(traceID, parentSpanID)
+
+			ctx := metadata.NewOutgoingContext(context.Background(), metadata.Pairs("traceparent", inboundTraceparent))
+			stream, err := setup.Client.SubscribeEvents(ctx, &pb.SubscribeEventsRequest{})
+			require.NoError(t, err)
+			err = drainStream(stream)
+			require.Error(t, err, "stream must return the handler's error to the client")
+
+			spans := setup.Harness.Exporter.GetSpans()
+			serverSpan := findServerSpan(spans)
+			require.NotNil(t, serverSpan, "server span must be exported")
+
+			// rpc.grpc.status_code must carry the caller's error code.
+			attrs := make(map[string]any)
+			for _, kv := range serverSpan.Attributes {
+				attrs[string(kv.Key)] = kv.Value.AsInterface()
+			}
+			require.Equal(t, int64(tc.code), attrs["rpc.grpc.status_code"],
+				"rpc.grpc.status_code must reflect the caller's error code")
+
+			// Span status must be Unset for caller errors — not Error.
+			require.Equal(t, codes.Unset, serverSpan.Status.Code,
+				"caller-side gRPC errors must not set span status to Error on stream interceptor")
+		})
+	}
+}
+
 // TestGRPCStreamInboundHandlerErrorWithOperationEventErrorDetails verifies that when an
 // OperationEvent carrying ErrorDetails is placed on the context upstream of the stream
 // tracing interceptor, the errorDetails appear as span events named "memoryservice.errorDetail".
@@ -433,7 +484,7 @@ func TestGRPCStreamInboundHandlerErrorWithOperationEventErrorDetails(t *testing.
 	grpcHarness := testutil.NewGRPCBufConnHarness(
 		grpc.ChainStreamInterceptor(
 			preTracingInterceptor,
-			tracing.GRPCStreamServerInterceptor(harness.Provider, harness.Propagator),
+			tracing.GRPCStreamServerInterceptor(harness.Provider, harness.Propagator, harness.Propagator),
 			// Terminal interceptor: returns a non-OK error so the span records it.
 			grpc.StreamServerInterceptor(func(_ any, _ grpc.ServerStream, _ *grpc.StreamServerInfo, _ grpc.StreamHandler) error {
 				return status.Error(grpccodes.Internal, "downstream stream failed")
@@ -474,4 +525,90 @@ func TestGRPCStreamInboundHandlerErrorWithOperationEventErrorDetails(t *testing.
 	}
 	require.True(t, hasErrorDetailEvent,
 		"span must carry memoryservice.errorDetail event when OperationEvent is upstream of stream tracing interceptor")
+}
+
+// outboundPropStreamServer is an EventStreamService implementation that makes an outbound
+// HTTP call using OutboundPropagatorFromContext — mirroring what production stream handlers
+// would do — so the test can verify the context-stored propagator is correctly stored by
+// the stream interceptor.
+type outboundPropStreamServer struct {
+	pb.UnimplementedEventStreamServiceServer
+	downstreamURL string
+}
+
+func (s *outboundPropStreamServer) SubscribeEvents(
+	req *pb.SubscribeEventsRequest,
+	stream grpc.ServerStreamingServer[pb.EventNotification],
+) error {
+	ctx := stream.Context()
+	// Use OutboundPropagatorFromContext exactly as production handlers do.
+	prop := tracing.OutboundPropagatorFromContext(ctx)
+	tp := tracing.ProviderFromContextOrNoop(ctx)
+	client := &http.Client{
+		Transport: otelhttp.NewTransport(
+			http.DefaultTransport,
+			otelhttp.WithTracerProvider(tp),
+			otelhttp.WithPropagators(prop),
+		),
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, s.downstreamURL, nil)
+	if err == nil {
+		resp, err := client.Do(httpReq)
+		if err == nil {
+			_ = resp.Body.Close()
+		}
+	}
+	return stream.Send(&pb.EventNotification{})
+}
+
+// TestGRPCStreamInboundConfiguredPropagatorUsedOutbound verifies that when a sampled inbound
+// traceparent is received, the outbound HTTP call made from a gRPC stream handler carries B3
+// headers and no W3C traceparent when the interceptor is constructed with a B3 outbound
+// propagator.  The outbound propagator is stored on the stream context via
+// WithOutboundPropagatorContext so handlers retrieve it via OutboundPropagatorFromContext.
+func TestGRPCStreamInboundConfiguredPropagatorUsedOutbound(t *testing.T) {
+	harness := testutil.NewTestHarness()
+	t.Cleanup(func() { _ = harness.Shutdown(context.Background()) })
+
+	downstream := testutil.NewDownstreamRecorder()
+	t.Cleanup(downstream.Close)
+
+	// Build a B3 single-header outbound propagator wrapping the participating gate.
+	b3OutboundProp := tracing.NewParticipatingPropagator(
+		tracing.WithNoBaggage(b3.New(b3.WithInjectEncoding(b3.B3SingleHeader))),
+	)
+
+	server := &outboundPropStreamServer{downstreamURL: downstream.Server.URL}
+	grpcHarness := testutil.NewGRPCBufConnHarness(
+		grpc.ChainStreamInterceptor(
+			tracing.GRPCStreamServerInterceptor(harness.Provider, harness.Propagator, b3OutboundProp),
+		),
+	)
+	t.Cleanup(grpcHarness.Close)
+	pb.RegisterEventStreamServiceServer(grpcHarness.Server, server)
+	grpcHarness.Serve()
+
+	conn, err := grpcHarness.Dial(context.Background())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	client := pb.NewEventStreamServiceClient(conn)
+	traceID := "4bf92f3577b34da6a3ce929d0e0e4736"
+	parentSpanID := "00f067aa0ba902b7"
+	ctx := metadata.NewOutgoingContext(context.Background(), metadata.Pairs(
+		"traceparent", testutil.NewSampledTraceparent(traceID, parentSpanID)))
+	stream, err := client.SubscribeEvents(ctx, &pb.SubscribeEventsRequest{})
+	require.NoError(t, err)
+	require.NoError(t, drainStream(stream))
+
+	// Positive assertion: downstream was called.
+	require.Equal(t, 1, downstream.CallCount(), "downstream must be called once")
+
+	lastHeader := downstream.LastHeader()
+	require.NotNil(t, lastHeader)
+	// B3 single-header outbound propagator must inject b3, not traceparent.
+	require.NotEmpty(t, lastHeader.Get("b3"),
+		"configured B3 propagator must inject b3 single-header on outbound call from gRPC stream handler")
+	require.Empty(t, lastHeader.Get("Traceparent"),
+		"W3C traceparent must not be injected when B3 propagator is configured on gRPC stream interceptor")
 }

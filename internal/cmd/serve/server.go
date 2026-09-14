@@ -58,6 +58,7 @@ type Server struct {
 	tracerProvider  *sdktrace.TracerProvider
 	tp              trace.TracerProvider
 	inboundProp     propagation.TextMapPropagator
+	outboundProp    propagation.TextMapPropagator
 }
 
 // GetTokenResolver returns the TokenResolver used by this server, or nil if not yet built.
@@ -99,9 +100,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // provider is returned so the service behaves identically to before for
 // untraced deployments.
 //
-// The resource is built from environment variables so that operators can set
-// service.name via OTEL_SERVICE_NAME or OTEL_RESOURCE_ATTRIBUTES without the
-// hardcoded value winning the merge.
+// The resource merges the SDK default (service.name, telemetry.sdk.*) with any
+// environment-supplied attributes (OTEL_SERVICE_NAME, OTEL_RESOURCE_ATTRIBUTES)
+// so that operators can override the default service.name while the SDK default
+// is preserved when no override is set.
 //
 // The QueryRedactingExporter wrapper is applied around the OTLP exporter to
 // strip url.full query strings (presigned S3 signatures, OAuth tokens) before
@@ -122,7 +124,7 @@ func buildTracerProvider(ctx context.Context) (trace.TracerProvider, *sdktrace.T
 	if err != nil {
 		return nil, nil, fmt.Errorf("tracing: create OTLP exporter: %w", err)
 	}
-	res, err := resource.New(ctx, resource.WithFromEnv())
+	res, err := buildResource(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("tracing: create resource: %w", err)
 	}
@@ -134,14 +136,35 @@ func buildTracerProvider(ctx context.Context) (trace.TracerProvider, *sdktrace.T
 	return sdkTP, sdkTP, nil
 }
 
+// buildResource constructs the OTel resource for this process by merging the
+// SDK default resource (service.name, telemetry.sdk.*) with any
+// environment-supplied attributes (OTEL_SERVICE_NAME, OTEL_RESOURCE_ATTRIBUTES).
+// Environment values win the merge; SDK defaults are preserved when the
+// corresponding env var is unset.
+//
+// Using resource.New(WithFromEnv()) alone silently drops resource.Default() so
+// service.name is empty in untraced deployments without OTEL_SERVICE_NAME.
+func buildResource(ctx context.Context) (*resource.Resource, error) {
+	envRes, err := resource.New(ctx, resource.WithFromEnv())
+	if err != nil {
+		return nil, err
+	}
+	// Merge: env values (b) overwrite SDK defaults (a).
+	merged, mergeErr := resource.Merge(resource.Default(), envRes)
+	if mergeErr != nil {
+		return nil, mergeErr
+	}
+	return merged, nil
+}
+
 // buildTracerProviderWithExporter constructs a TracerProvider that routes spans
 // through QueryRedactingExporter into the provided exporter using a
 // SimpleSpanProcessor (synchronous, no batching). It is used only in tests
 // that need to inspect exported spans without a live OTLP endpoint.
-// The resource is read from environment variables just as buildTracerProvider
-// does, so OTEL_SERVICE_NAME is honoured in tests.
+// The resource is built by buildResource so OTEL_SERVICE_NAME is honoured and
+// the SDK default service.name is preserved when the env var is unset.
 func buildTracerProviderWithExporter(exporter sdktrace.SpanExporter) *sdktrace.TracerProvider {
-	res, _ := resource.New(context.Background(), resource.WithFromEnv())
+	res, _ := buildResource(context.Background())
 	return sdktrace.NewTracerProvider(
 		sdktrace.WithSyncer(tracing.NewQueryRedactingExporter(exporter)),
 		sdktrace.WithResource(res),
@@ -158,6 +181,17 @@ func buildTracerProviderWithExporter(exporter sdktrace.SpanExporter) *sdktrace.T
 // downstream services.
 func buildInboundPropagator() propagation.TextMapPropagator {
 	return tracing.NewParticipatingPropagator(autoprop.NewTextMapPropagator())
+}
+
+// buildOutboundPropagator constructs the propagator used by outbound clients
+// (OpenAI, Qdrant, Infinispan, episodicQdrant, attachment source-URL).
+// It honours OTEL_PROPAGATORS (via the same autoprop base as inbound) and strips
+// the baggage key so internal baggage is never forwarded to third-party services.
+// Inject is gated by ParticipatingPropagator so untraced requests inject nothing.
+func buildOutboundPropagator() propagation.TextMapPropagator {
+	return tracing.NewParticipatingPropagator(
+		tracing.WithNoBaggage(autoprop.NewTextMapPropagator()),
+	)
 }
 
 func resolveAttachmentStoreName(cfg *config.Config) (string, error) {
@@ -198,8 +232,12 @@ func BuildServer(ctx context.Context, cfg *config.Config) (*Server, error) {
 		return nil, err
 	}
 	inboundProp := buildInboundPropagator()
-	// Thread the provider into the loader context so plugin loaders can retrieve it.
+	outboundProp := buildOutboundPropagator()
+	// Thread the provider and outbound propagator into the loader context so plugin
+	// loaders can retrieve them via ProviderFromContextOrNoop and
+	// OutboundPropagatorFromContext.
 	ctx = tracing.WithProviderContext(ctx, tp)
+	ctx = tracing.WithOutboundPropagatorContext(ctx, outboundProp)
 
 	// Initialize embedder early so vector store migrations can use the detected dimension
 	var embedder registryembed.Embedder
@@ -277,7 +315,7 @@ func BuildServer(ctx context.Context, cfg *config.Config) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("rate limit configuration error: %w", err)
 	}
-	router, err := newConfiguredRouter(cfg, tp, inboundProp, routerOptions{
+	router, err := newConfiguredRouter(cfg, tp, inboundProp, outboundProp, routerOptions{
 		rateLimiter:    rateLimiter,
 		includePublic:  true,
 		trustedProxies: cfg.TrustedProxyCIDRs,
@@ -439,7 +477,7 @@ func BuildServer(ctx context.Context, cfg *config.Config) (*Server, error) {
 	// Set up gRPC server with auth interceptors.
 	grpcServer := grpc.NewServer(
 		grpc.ChainUnaryInterceptor(
-			tracing.GRPCUnaryServerInterceptor(tp, inboundProp),
+			tracing.GRPCUnaryServerInterceptor(tp, inboundProp, outboundProp),
 			security.GRPCRequestIDUnaryInterceptor(),
 			security.GRPCOperationUnaryInterceptor(),
 			security.GRPCSourceRateLimitUnaryInterceptor(rateLimiter),
@@ -449,7 +487,7 @@ func BuildServer(ctx context.Context, cfg *config.Config) (*Server, error) {
 			maxPageSizeUnaryInterceptor(cfg),
 		),
 		grpc.ChainStreamInterceptor(
-			tracing.GRPCStreamServerInterceptor(tp, inboundProp),
+			tracing.GRPCStreamServerInterceptor(tp, inboundProp, outboundProp),
 			security.GRPCRequestIDStreamInterceptor(),
 			security.GRPCOperationStreamInterceptor(),
 			security.GRPCSourceRateLimitStreamInterceptor(rateLimiter),
@@ -513,6 +551,7 @@ func BuildServer(ctx context.Context, cfg *config.Config) (*Server, error) {
 	builtServer.tracerProvider = sdkTP
 	builtServer.tp = tp
 	builtServer.inboundProp = inboundProp
+	builtServer.outboundProp = outboundProp
 	return &builtServer, nil
 }
 
@@ -559,7 +598,7 @@ func StartServer(ctx context.Context, cfg *config.Config) (*Server, error) {
 	}
 
 	if cfg.ManagementListenerEnabled {
-		closeManagement, err := startManagementRoutes(cfg, srv.tp, srv.inboundProp)
+		closeManagement, err := startManagementRoutes(cfg, srv.tp, srv.inboundProp, srv.outboundProp)
 		if err != nil {
 			return nil, err
 		}
@@ -603,6 +642,7 @@ func newConfiguredRouter(
 	cfg *config.Config,
 	tp trace.TracerProvider,
 	inboundProp propagation.TextMapPropagator,
+	outboundProp propagation.TextMapPropagator,
 	opts routerOptions,
 ) (*gin.Engine, error) {
 	router := newGinRouter()
@@ -619,7 +659,7 @@ func newConfiguredRouter(
 	}
 
 	// 1. Tracing
-	router.Use(tracing.HTTPMiddleware(tp, inboundProp))
+	router.Use(tracing.HTTPMiddleware(tp, inboundProp, outboundProp))
 	// 2. Request ID
 	router.Use(security.RequestIDMiddleware())
 	// 3. Operation Event
@@ -659,20 +699,20 @@ func newConfiguredRouter(
 
 // buildManagementRouter constructs the Gin router used by the management
 // listener.  Callers must register routes after calling this function.
-// tp and inboundProp are used to mount the OTel HTTP middleware so that the
-// management router participates in upstream traces (issue #523).
-func buildManagementRouter(cfg *config.Config, tp trace.TracerProvider, inboundProp propagation.TextMapPropagator) (*gin.Engine, error) {
-	return newConfiguredRouter(cfg, tp, inboundProp, routerOptions{
+// tp, inboundProp, and outboundProp are used to mount the OTel HTTP middleware
+// so that the management router participates in upstream traces (issue #523).
+func buildManagementRouter(cfg *config.Config, tp trace.TracerProvider, inboundProp, outboundProp propagation.TextMapPropagator) (*gin.Engine, error) {
+	return newConfiguredRouter(cfg, tp, inboundProp, outboundProp, routerOptions{
 		includePublic: false,
 	})
 }
 
-func startManagementRoutes(cfg *config.Config, tp trace.TracerProvider, inboundProp propagation.TextMapPropagator) (func(context.Context) error, error) {
+func startManagementRoutes(cfg *config.Config, tp trace.TracerProvider, inboundProp, outboundProp propagation.TextMapPropagator) (func(context.Context) error, error) {
 	if !cfg.ManagementListenerEnabled {
 		return nil, nil
 	}
 
-	mgmtRouter, err := buildManagementRouter(cfg, tp, inboundProp)
+	mgmtRouter, err := buildManagementRouter(cfg, tp, inboundProp, outboundProp)
 	if err != nil {
 		return nil, fmt.Errorf("failed to configure management router: %w", err)
 	}
