@@ -4,21 +4,26 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/chirino/memory-service/internal/operationevent"
 	"github.com/gin-gonic/gin"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
+	semconv "go.opentelemetry.io/otel/semconv/v1.38.0"
 	"go.opentelemetry.io/otel/trace"
 	nooptrace "go.opentelemetry.io/otel/trace/noop"
 	"google.golang.org/grpc"
+	grpccodes "google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
 type traceParticipationKey struct{}
 type tracerProviderKey struct{}
+
+type outboundPropagatorKey struct{}
 
 // WithProviderContext stores the given TracerProvider in ctx so plugin loaders
 // can retrieve it via ProviderFromContext.
@@ -46,6 +51,26 @@ func ProviderFromContextOrNoop(ctx context.Context) trace.TracerProvider {
 	return tp
 }
 
+// WithOutboundPropagatorContext stores the outbound propagator in ctx so plugin
+// loaders can retrieve it via OutboundPropagatorFromContext.  The outbound
+// propagator is the configured inbound propagator with baggage stripped, wrapped
+// in ParticipatingPropagator, so it honours OTEL_PROPAGATORS on outbound calls.
+func WithOutboundPropagatorContext(ctx context.Context, prop propagation.TextMapPropagator) context.Context {
+	return context.WithValue(ctx, outboundPropagatorKey{}, prop)
+}
+
+// OutboundPropagatorFromContext retrieves the outbound propagator stored by
+// WithOutboundPropagatorContext.  Returns a TraceContext-only participating
+// propagator if none was stored, preserving the pre-fix behaviour.
+func OutboundPropagatorFromContext(ctx context.Context) propagation.TextMapPropagator {
+	prop, _ := ctx.Value(outboundPropagatorKey{}).(propagation.TextMapPropagator)
+	if prop == nil {
+		// Fallback: pre-fix behaviour — W3C TraceContext only, no baggage.
+		return NewParticipatingPropagator(propagation.TraceContext{})
+	}
+	return prop
+}
+
 // MarkParticipating marks the context as an active participant in an upstream trace.
 func MarkParticipating(ctx context.Context) context.Context {
 	return context.WithValue(ctx, traceParticipationKey{}, true)
@@ -58,6 +83,51 @@ func IsParticipating(ctx context.Context) bool {
 	}
 	val, ok := ctx.Value(traceParticipationKey{}).(bool)
 	return ok && val
+}
+
+// noBaggagePropagator wraps a TextMapPropagator and suppresses the baggage key
+// on Inject so that internal baggage is never forwarded to third-party endpoints.
+// Extract is unchanged — inbound baggage is still parsed for participation gating.
+type noBaggagePropagator struct {
+	base propagation.TextMapPropagator
+}
+
+// WithNoBaggage wraps prop so its Inject never writes the "baggage" key.
+// Use this to thread a configured trace propagator into outbound clients that
+// must not forward internal baggage to third-party services (OpenAI, Qdrant, etc.).
+func WithNoBaggage(prop propagation.TextMapPropagator) propagation.TextMapPropagator {
+	return &noBaggagePropagator{base: prop}
+}
+
+func (p *noBaggagePropagator) Inject(ctx context.Context, carrier propagation.TextMapCarrier) {
+	p.base.Inject(ctx, &filteredCarrier{TextMapCarrier: carrier})
+}
+
+func (p *noBaggagePropagator) Extract(ctx context.Context, carrier propagation.TextMapCarrier) context.Context {
+	return p.base.Extract(ctx, carrier)
+}
+
+func (p *noBaggagePropagator) Fields() []string {
+	fields := p.base.Fields()
+	filtered := fields[:0:len(fields)]
+	for _, f := range fields {
+		if strings.ToLower(f) != "baggage" {
+			filtered = append(filtered, f)
+		}
+	}
+	return filtered
+}
+
+// filteredCarrier wraps a TextMapCarrier and drops the "baggage" key on Set.
+type filteredCarrier struct {
+	propagation.TextMapCarrier
+}
+
+func (c *filteredCarrier) Set(key, val string) {
+	if strings.ToLower(key) == "baggage" {
+		return
+	}
+	c.TextMapCarrier.Set(key, val)
 }
 
 // ParticipatingPropagator wraps a TextMapPropagator, making Inject a no-op unless IsParticipating(ctx) is true.
@@ -100,8 +170,27 @@ func TraceContextFromContext(ctx context.Context) (traceID string, spanID string
 	return sc.TraceID().String(), sc.SpanID().String()
 }
 
+// canonicalHTTPRoute converts a Gin route template (e.g. /v1/entries/:id) to the
+// OTel http.route canonical form (e.g. /v1/entries/{id}).  Wildcard params
+// (*param) are also converted.  This mirrors the same conversion in
+// security.canonicalGinRoute without creating a cross-package dependency.
+func canonicalHTTPRoute(ginPath string) string {
+	parts := strings.Split(ginPath, "/")
+	for i, part := range parts {
+		if strings.HasPrefix(part, ":") && len(part) > 1 {
+			parts[i] = "{" + part[1:] + "}"
+		} else if strings.HasPrefix(part, "*") && len(part) > 1 {
+			parts[i] = "{" + part[1:] + "}"
+		}
+	}
+	return strings.Join(parts, "/")
+}
+
 // HTTPMiddleware creates a Gin middleware for passive OpenTelemetry trace participation.
-func HTTPMiddleware(tp trace.TracerProvider, propagator propagation.TextMapPropagator) gin.HandlerFunc {
+// outboundProp is stored on the request context so per-request handlers that make
+// outbound calls (e.g. source-URL attachment downloads) can retrieve the configured
+// propagator via OutboundPropagatorFromContext without touching the signature of those handlers.
+func HTTPMiddleware(tp trace.TracerProvider, propagator propagation.TextMapPropagator, outboundProp propagation.TextMapPropagator) gin.HandlerFunc {
 	tracer := tp.Tracer("memory-service/http")
 
 	return func(c *gin.Context) {
@@ -114,8 +203,13 @@ func HTTPMiddleware(tp trace.TracerProvider, propagator propagation.TextMapPropa
 			return
 		}
 
-		// Mark context as participating since we received a valid remote parent
-		participatingCtx := WithProviderContext(MarkParticipating(extractedCtx), tp)
+		// Mark context as participating since we received a valid remote parent.
+		// Also store the outbound propagator so per-request handlers that make
+		// downstream calls inherit the configured format.
+		participatingCtx := WithOutboundPropagatorContext(
+			WithProviderContext(MarkParticipating(extractedCtx), tp),
+			outboundProp,
+		)
 
 		// Branch 2: Valid but NOT sampled (traceparent flags != 01)
 		if !spanCtx.IsSampled() {
@@ -125,26 +219,38 @@ func HTTPMiddleware(tp trace.TracerProvider, propagator propagation.TextMapPropa
 		}
 
 		// Branch 3: Valid and sampled (traceparent flags == 01)
-		spanName := c.FullPath()
-		if spanName == "" {
+		//
+		// Use c.FullPath() (the matched route template, e.g. /v1/entries/:id)
+		// converted to the canonical OTel form (e.g. /v1/entries/{id}).
+		// The concrete request path is deliberately excluded from all attributes
+		// to prevent signed tokens and user-supplied IDs from reaching exporters.
+		ginRoute := c.FullPath()
+		var spanName string
+		var spanAttrs []attribute.KeyValue
+		spanAttrs = append(spanAttrs, semconv.HTTPRequestMethodKey.String(c.Request.Method))
+		if ginRoute == "" {
+			// Unmatched route: omit http.route entirely; use a bounded span name.
 			spanName = "HTTP " + c.Request.Method
 		} else {
-			spanName = c.Request.Method + " " + spanName
+			canonicalRoute := canonicalHTTPRoute(ginRoute)
+			spanName = c.Request.Method + " " + canonicalRoute
+			spanAttrs = append(spanAttrs, semconv.HTTPRouteKey.String(canonicalRoute))
 		}
 
 		ctx, span := tracer.Start(
 			participatingCtx,
 			spanName,
 			trace.WithSpanKind(trace.SpanKindServer),
-			trace.WithAttributes(
-				attribute.String("http.request.method", c.Request.Method),
-				attribute.String("url.path", c.Request.URL.Path),
-			),
+			trace.WithAttributes(spanAttrs...),
 		)
 		defer func() {
 			status := c.Writer.Status()
-			span.SetAttributes(attribute.Int("http.response.status_code", status))
-			if len(c.Errors) > 0 {
+			span.SetAttributes(semconv.HTTPResponseStatusCodeKey.Int(status))
+			if len(c.Errors) > 0 && status >= 500 {
+				// RecordError and SetStatus(Error) are skipped for 4xx for two reasons:
+				// (1) OTel HTTP server semconv: 4xx is a client error, not a server error.
+				// (2) Error strings can echo request-supplied input (e.g. resource IDs in
+				//     NotFoundError.Error()), which must not appear in exported telemetry.
 				span.RecordError(c.Errors.Last().Err)
 				span.SetStatus(codes.Error, c.Errors.Last().Error())
 			} else if status >= 500 {
@@ -162,8 +268,28 @@ func HTTPMiddleware(tp trace.TracerProvider, propagator propagation.TextMapPropa
 	}
 }
 
+// grpcIsCallerError reports whether a gRPC status code represents a caller-side
+// error: the server processed the request correctly but the caller supplied bad
+// input or lacked permission.  Per OTel gRPC server semconv, these codes must
+// NOT set span status to Error — the same principle that governs HTTP 4xx.
+func grpcIsCallerError(c grpccodes.Code) bool {
+	switch c {
+	case grpccodes.InvalidArgument,
+		grpccodes.NotFound,
+		grpccodes.AlreadyExists,
+		grpccodes.PermissionDenied,
+		grpccodes.FailedPrecondition,
+		grpccodes.Unauthenticated:
+		return true
+	}
+	return false
+}
+
 // GRPCUnaryServerInterceptor returns a unary server interceptor for passive OpenTelemetry trace participation.
-func GRPCUnaryServerInterceptor(tp trace.TracerProvider, propagator propagation.TextMapPropagator) grpc.UnaryServerInterceptor {
+// outboundProp is stored on the request context so gRPC handlers that make outbound calls
+// (e.g. StartSourceURLAttachmentDownload) can retrieve the configured propagator via
+// OutboundPropagatorFromContext without touching those handlers' signatures.
+func GRPCUnaryServerInterceptor(tp trace.TracerProvider, propagator propagation.TextMapPropagator, outboundProp propagation.TextMapPropagator) grpc.UnaryServerInterceptor {
 	tracer := tp.Tracer("memory-service/grpc")
 
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp any, retErr error) {
@@ -182,8 +308,10 @@ func GRPCUnaryServerInterceptor(tp trace.TracerProvider, propagator propagation.
 		// Security owns the operation event; this reference lets the outer tracer
 		// observe the event created by the downstream operation interceptor.
 		ref := operationevent.NewEventRef()
-		participatingCtx := WithProviderContext(
-			operationevent.WithEventRef(MarkParticipating(extractedCtx), ref), tp)
+		participatingCtx := WithOutboundPropagatorContext(
+			WithProviderContext(
+				operationevent.WithEventRef(MarkParticipating(extractedCtx), ref), tp),
+			outboundProp)
 
 		// Branch 2: Valid but NOT sampled (traceparent flags != 01)
 		if !spanCtx.IsSampled() {
@@ -197,19 +325,23 @@ func GRPCUnaryServerInterceptor(tp trace.TracerProvider, propagator propagation.
 			spanName,
 			trace.WithSpanKind(trace.SpanKindServer),
 			trace.WithAttributes(
-				attribute.String("rpc.system", "grpc"),
-				attribute.String("rpc.service", grpcServiceFromMethod(info.FullMethod)),
-				attribute.String("rpc.method", grpcMethodFromMethod(info.FullMethod)),
+				semconv.RPCSystemGRPC,
+				semconv.RPCServiceKey.String(grpcServiceFromMethod(info.FullMethod)),
+				semconv.RPCMethodKey.String(grpcMethodFromMethod(info.FullMethod)),
 			),
 		)
 		defer func() {
 			if retErr != nil {
 				st, _ := status.FromError(retErr)
-				span.SetAttributes(attribute.Int64("rpc.grpc.status_code", int64(st.Code())))
-				span.RecordError(retErr)
-				span.SetStatus(codes.Error, retErr.Error())
+				span.SetAttributes(semconv.RPCGRPCStatusCodeKey.Int64(int64(st.Code())))
+				// Caller errors (bad input, missing auth) leave span status Unset;
+				// only server-side failures set it to Error.
+				if !grpcIsCallerError(st.Code()) {
+					span.RecordError(retErr)
+					span.SetStatus(codes.Error, retErr.Error())
+				}
 			} else {
-				span.SetAttributes(attribute.Int64("rpc.grpc.status_code", 0))
+				span.SetAttributes(semconv.RPCGRPCStatusCodeKey.Int64(0))
 			}
 			if ref := operationevent.EventRefFromContext(ctx); ref != nil && ref.Get() != nil {
 				enrichSpanFromSnapshot(span, ref.Get().Snapshot())
@@ -224,7 +356,10 @@ func GRPCUnaryServerInterceptor(tp trace.TracerProvider, propagator propagation.
 }
 
 // GRPCStreamServerInterceptor returns a stream server interceptor for passive OpenTelemetry trace participation.
-func GRPCStreamServerInterceptor(tp trace.TracerProvider, propagator propagation.TextMapPropagator) grpc.StreamServerInterceptor {
+// outboundProp is stored on the stream context so gRPC stream handlers that make outbound calls
+// can retrieve the configured propagator via OutboundPropagatorFromContext without touching
+// those handlers' signatures.
+func GRPCStreamServerInterceptor(tp trace.TracerProvider, propagator propagation.TextMapPropagator, outboundProp propagation.TextMapPropagator) grpc.StreamServerInterceptor {
 	tracer := tp.Tracer("memory-service/grpc")
 
 	return func(srv any, stream grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) (retErr error) {
@@ -244,8 +379,10 @@ func GRPCStreamServerInterceptor(tp trace.TracerProvider, propagator propagation
 		// Security owns the operation event; this reference lets the outer tracer
 		// observe the event created by the downstream operation interceptor.
 		ref := operationevent.NewEventRef()
-		participatingCtx := WithProviderContext(
-			operationevent.WithEventRef(MarkParticipating(extractedCtx), ref), tp)
+		participatingCtx := WithOutboundPropagatorContext(
+			WithProviderContext(
+				operationevent.WithEventRef(MarkParticipating(extractedCtx), ref), tp),
+			outboundProp)
 
 		// Branch 2: Valid but NOT sampled
 		if !spanCtx.IsSampled() {
@@ -259,19 +396,23 @@ func GRPCStreamServerInterceptor(tp trace.TracerProvider, propagator propagation
 			spanName,
 			trace.WithSpanKind(trace.SpanKindServer),
 			trace.WithAttributes(
-				attribute.String("rpc.system", "grpc"),
-				attribute.String("rpc.service", grpcServiceFromMethod(info.FullMethod)),
-				attribute.String("rpc.method", grpcMethodFromMethod(info.FullMethod)),
+				semconv.RPCSystemGRPC,
+				semconv.RPCServiceKey.String(grpcServiceFromMethod(info.FullMethod)),
+				semconv.RPCMethodKey.String(grpcMethodFromMethod(info.FullMethod)),
 			),
 		)
 		defer func() {
 			if retErr != nil {
 				st, _ := status.FromError(retErr)
-				span.SetAttributes(attribute.Int64("rpc.grpc.status_code", int64(st.Code())))
-				span.RecordError(retErr)
-				span.SetStatus(codes.Error, retErr.Error())
+				span.SetAttributes(semconv.RPCGRPCStatusCodeKey.Int64(int64(st.Code())))
+				// Caller errors (bad input, missing auth) leave span status Unset;
+				// only server-side failures set it to Error.
+				if !grpcIsCallerError(st.Code()) {
+					span.RecordError(retErr)
+					span.SetStatus(codes.Error, retErr.Error())
+				}
 			} else {
-				span.SetAttributes(attribute.Int64("rpc.grpc.status_code", 0))
+				span.SetAttributes(semconv.RPCGRPCStatusCodeKey.Int64(0))
 			}
 			if ref := operationevent.EventRefFromContext(ctx); ref != nil && ref.Get() != nil {
 				enrichSpanFromSnapshot(span, ref.Get().Snapshot())

@@ -61,7 +61,7 @@ func TestHTTPInboundAbsentTraceparent(t *testing.T) {
 	t.Cleanup(downstream.Close)
 
 	router := testutil.NewGinTestRouter(
-		tracing.HTTPMiddleware(harness.Provider, harness.Propagator),
+		tracing.HTTPMiddleware(harness.Provider, harness.Propagator, harness.Propagator),
 	)
 	router.GET("/v1/entries", func(c *gin.Context) {
 		makeTestHandler(downstream.Server.URL, harness)(c.Writer, c.Request)
@@ -91,7 +91,7 @@ func TestHTTPMiddlewarePropagatesTracerProviderToRequestContext(t *testing.T) {
 
 	var requestProvider trace.TracerProvider
 	router := testutil.NewGinTestRouter(
-		tracing.HTTPMiddleware(harness.Provider, harness.Propagator),
+		tracing.HTTPMiddleware(harness.Provider, harness.Propagator, harness.Propagator),
 	)
 	router.GET("/attachments", func(c *gin.Context) {
 		requestProvider = tracing.ProviderFromContext(c.Request.Context())
@@ -129,7 +129,7 @@ func TestHTTPInboundInvalidGarbageTraceparent(t *testing.T) {
 			t.Cleanup(downstream.Close)
 
 			router := testutil.NewGinTestRouter(
-				tracing.HTTPMiddleware(harness.Provider, harness.Propagator),
+				tracing.HTTPMiddleware(harness.Provider, harness.Propagator, harness.Propagator),
 			)
 			router.GET("/v1/entries", func(c *gin.Context) {
 				makeTestHandler(downstream.Server.URL, harness)(c.Writer, c.Request)
@@ -164,7 +164,7 @@ func TestHTTPInboundValidUnsampledParent(t *testing.T) {
 	t.Cleanup(downstream.Close)
 
 	router := testutil.NewGinTestRouter(
-		tracing.HTTPMiddleware(harness.Provider, harness.Propagator),
+		tracing.HTTPMiddleware(harness.Provider, harness.Propagator, harness.Propagator),
 	)
 	router.GET("/v1/entries", func(c *gin.Context) {
 		makeTestHandler(downstream.Server.URL, harness)(c.Writer, c.Request)
@@ -204,7 +204,7 @@ func TestHTTPInboundValidSampledParent(t *testing.T) {
 	t.Cleanup(downstream.Close)
 
 	router := testutil.NewGinTestRouter(
-		tracing.HTTPMiddleware(harness.Provider, harness.Propagator),
+		tracing.HTTPMiddleware(harness.Provider, harness.Propagator, harness.Propagator),
 	)
 	router.GET("/v1/entries", func(c *gin.Context) {
 		makeTestHandler(downstream.Server.URL, harness)(c.Writer, c.Request)
@@ -259,7 +259,7 @@ func TestHTTPInboundOperationEventTraceContext(t *testing.T) {
 
 	var capturedSnapshot testutil.OperationSnapshotWrapper
 	router := testutil.NewGinTestRouter(
-		tracing.HTTPMiddleware(harness.Provider, harness.Propagator),
+		tracing.HTTPMiddleware(harness.Provider, harness.Propagator, harness.Propagator),
 		testutil.OperationEventCaptureMiddleware(&capturedSnapshot),
 	)
 	router.GET("/v1/entries", func(c *gin.Context) {
@@ -293,7 +293,7 @@ func TestHTTPInboundOperationEventUntracedOmitsTraceContext(t *testing.T) {
 
 	var capturedSnapshot testutil.OperationSnapshotWrapper
 	router := testutil.NewGinTestRouter(
-		tracing.HTTPMiddleware(harness.Provider, harness.Propagator),
+		tracing.HTTPMiddleware(harness.Provider, harness.Propagator, harness.Propagator),
 		testutil.OperationEventCaptureMiddleware(&capturedSnapshot),
 	)
 	router.GET("/v1/entries", func(c *gin.Context) {
@@ -322,7 +322,7 @@ func TestHTTPInboundHandlerError(t *testing.T) {
 	t.Cleanup(func() { _ = harness.Shutdown(context.Background()) })
 
 	router := testutil.NewGinTestRouter(
-		tracing.HTTPMiddleware(harness.Provider, harness.Propagator),
+		tracing.HTTPMiddleware(harness.Provider, harness.Propagator, harness.Propagator),
 	)
 	router.GET("/v1/entries", func(c *gin.Context) {
 		_ = c.Error(net.ErrClosed)
@@ -348,6 +348,88 @@ func TestHTTPInboundHandlerError(t *testing.T) {
 	require.NotEmpty(t, span.Events, "Expected span event (RecordError)")
 }
 
+// TestHTTPInboundServerErrorWithCError verifies that a 5xx response that also sets c.Error
+// DOES mark the span as Error and DOES record an error event.  This is the companion to
+// TestHTTPInboundClientErrorWithCError: the two together pin both sides of the
+// `if len(c.Errors) > 0 && status >= 500` condition so neither side can be inverted
+// without a test going red.
+func TestHTTPInboundServerErrorWithCError(t *testing.T) {
+	harness := testutil.NewTestHarness()
+	t.Cleanup(func() { _ = harness.Shutdown(context.Background()) })
+
+	router := testutil.NewGinTestRouter(
+		tracing.HTTPMiddleware(harness.Provider, harness.Propagator, harness.Propagator),
+	)
+	router.GET("/v1/entries/:id", func(c *gin.Context) {
+		_ = c.Error(net.ErrClosed)
+		c.Status(http.StatusInternalServerError)
+	})
+
+	traceID := "4bf92f3577b34da6a3ce929d0e0e4736"
+	parentSpanID := "00f067aa0ba902b7"
+	inboundTraceparent := testutil.NewSampledTraceparent(traceID, parentSpanID)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/entries/some-id", nil)
+	req.Header.Set("Traceparent", inboundTraceparent)
+	rec := httptest.NewRecorder()
+
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+
+	// Positive assertion: code path executed — span must be exported.
+	spans := harness.Exporter.GetSpans()
+	require.Len(t, spans, 1, "Expected server span to be exported for sampled 5xx request")
+	span := spans[0]
+
+	// 5xx with c.Error must set span status to Error.
+	require.Equal(t, codes.Error, span.Status.Code,
+		"5xx with c.Error must set span status to Error per OTel HTTP server semconv")
+	// RecordError must have been called — the error event must be present.
+	require.NotEmpty(t, span.Events,
+		"5xx with c.Error must record an error event on the span")
+}
+
+// TestHTTPInboundClientErrorWithCError verifies that a 4xx response that also sets c.Error
+// does NOT mark the span as Error and does NOT record an error event.  Per OTel HTTP server
+// semconv, 4xx is a client error; span status must remain Unset.  This matters because every
+// handleError call site calls c.Error before writing the status, so NotFoundError,
+// ValidationError, ForbiddenError and BadRequestError would otherwise pollute the span.
+func TestHTTPInboundClientErrorWithCError(t *testing.T) {
+	harness := testutil.NewTestHarness()
+	t.Cleanup(func() { _ = harness.Shutdown(context.Background()) })
+
+	router := testutil.NewGinTestRouter(
+		tracing.HTTPMiddleware(harness.Provider, harness.Propagator, harness.Propagator),
+	)
+	router.GET("/v1/entries/:id", func(c *gin.Context) {
+		_ = c.Error(net.ErrClosed)
+		c.Status(http.StatusNotFound)
+	})
+
+	traceID := "4bf92f3577b34da6a3ce929d0e0e4736"
+	parentSpanID := "00f067aa0ba902b7"
+	inboundTraceparent := testutil.NewSampledTraceparent(traceID, parentSpanID)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/entries/some-resource-id", nil)
+	req.Header.Set("Traceparent", inboundTraceparent)
+	rec := httptest.NewRecorder()
+
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusNotFound, rec.Code)
+
+	// Positive assertion: code path executed — span must be exported.
+	spans := harness.Exporter.GetSpans()
+	require.Len(t, spans, 1, "Expected server span to be exported for sampled 4xx request")
+	span := spans[0]
+
+	// 4xx with c.Error must leave span status Unset — client errors do not indicate server failure.
+	require.Equal(t, codes.Unset, span.Status.Code,
+		"4xx with c.Error must leave span status Unset per OTel HTTP server semconv")
+	// RecordError must not be called — error strings can echo request-supplied input (e.g. resource IDs).
+	require.Empty(t, span.Events,
+		"4xx with c.Error must not record an error event on the span")
+}
+
 func TestHTTPInboundAuthRateLimitRejection(t *testing.T) {
 	// OTel HTTP server semconv: 4xx is a client error — span status must be
 	// left Unset.  Only 5xx sets the span status to Error.
@@ -359,7 +441,7 @@ func TestHTTPInboundAuthRateLimitRejection(t *testing.T) {
 			t.Cleanup(func() { _ = harness.Shutdown(context.Background()) })
 
 			router := testutil.NewGinTestRouter(
-				tracing.HTTPMiddleware(harness.Provider, harness.Propagator),
+				tracing.HTTPMiddleware(harness.Provider, harness.Propagator, harness.Propagator),
 			)
 			router.GET("/v1/entries", func(c *gin.Context) {
 				c.Status(status)
@@ -391,7 +473,7 @@ func TestHTTPInboundUnmatchedRouteSpanName(t *testing.T) {
 	t.Cleanup(func() { _ = harness.Shutdown(context.Background()) })
 
 	router := testutil.NewGinTestRouter(
-		tracing.HTTPMiddleware(harness.Provider, harness.Propagator),
+		tracing.HTTPMiddleware(harness.Provider, harness.Propagator, harness.Propagator),
 	)
 	router.GET("/v1/entries", func(c *gin.Context) {
 		c.Status(http.StatusOK)
@@ -415,6 +497,17 @@ func TestHTTPInboundUnmatchedRouteSpanName(t *testing.T) {
 	require.Equal(t, "HTTP GET", span.Name, "Unmatched route span name must be bounded (HTTP <METHOD>)")
 	// 404 is a client error; span status must be Unset per OTel HTTP server semconv.
 	require.Equal(t, codes.Unset, span.Status.Code)
+
+	// http.route must be absent for unmatched routes — there is no template to report.
+	// Falling back to the concrete path would expose user-supplied values.
+	attrs := make(map[string]any)
+	for _, kv := range span.Attributes {
+		attrs[string(kv.Key)] = kv.Value.AsInterface()
+	}
+	_, hasRoute := attrs["http.route"]
+	require.False(t, hasRoute, "http.route must not be set when the route is unmatched")
+	_, hasURLPath := attrs["url.path"]
+	require.False(t, hasURLPath, "url.path must not be set on any span")
 }
 
 func TestHTTPInboundSemconvAttributes(t *testing.T) {
@@ -422,8 +515,11 @@ func TestHTTPInboundSemconvAttributes(t *testing.T) {
 	t.Cleanup(func() { _ = harness.Shutdown(context.Background()) })
 
 	router := testutil.NewGinTestRouter(
-		tracing.HTTPMiddleware(harness.Provider, harness.Propagator),
+		tracing.HTTPMiddleware(harness.Provider, harness.Propagator, harness.Propagator),
 	)
+	// Route with a path parameter: the concrete value must NOT appear in any attribute.
+	// The signed-token case (/v1/attachments/download/:token/:filename) is the
+	// motivating example; the principle is tested here with a simpler route.
 	router.GET("/v1/entries/:id", func(c *gin.Context) {
 		c.Status(http.StatusOK)
 	})
@@ -443,7 +539,8 @@ func TestHTTPInboundSemconvAttributes(t *testing.T) {
 	require.Len(t, spans, 1)
 	span := spans[0]
 
-	require.Equal(t, "GET /v1/entries/:id", span.Name)
+	// Span name uses the canonical route, not the concrete path.
+	require.Equal(t, "GET /v1/entries/{id}", span.Name)
 
 	attrs := make(map[string]any)
 	for _, kv := range span.Attributes {
@@ -451,8 +548,13 @@ func TestHTTPInboundSemconvAttributes(t *testing.T) {
 	}
 
 	require.Equal(t, "GET", attrs["http.request.method"])
-	require.Equal(t, "/v1/entries/123", attrs["url.path"])
+	// http.route must carry the parameterised template, not the concrete value.
+	require.Equal(t, "/v1/entries/{id}", attrs["http.route"],
+		"http.route must be the parameterised route template, never the concrete path")
 	require.Equal(t, int64(http.StatusOK), attrs["http.response.status_code"])
+	// url.path must be absent — it would expose signed tokens and user-supplied IDs.
+	_, hasURLPath := attrs["url.path"]
+	require.False(t, hasURLPath, "url.path must not be set on matched routes")
 }
 
 func TestHTTPInboundSpanHasMemoryServiceAttributes(t *testing.T) {
@@ -462,7 +564,7 @@ func TestHTTPInboundSpanHasMemoryServiceAttributes(t *testing.T) {
 	var capturedSnapshot testutil.OperationSnapshotWrapper
 
 	router := testutil.NewGinTestRouter(
-		tracing.HTTPMiddleware(harness.Provider, harness.Propagator),
+		tracing.HTTPMiddleware(harness.Provider, harness.Propagator, harness.Propagator),
 		// Simulate security.OperationEventMiddleware: create an event, populate it, emit on the way out.
 		testutil.OperationEventCaptureMiddleware(&capturedSnapshot),
 	)
