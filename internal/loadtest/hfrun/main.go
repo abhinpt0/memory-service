@@ -221,6 +221,28 @@ func checkStats(raw map[string]any, benchmarkName string) error {
 		totalRequests += rc
 		totalErrors += invalid + connErr + timeouts + internal
 
+		// HTTP 4xx and 5xx responses are not reflected in the fields above —
+		// they are tracked separately in summary.extensions["http"].status_4xx
+		// and status_5xx by Hyperfoil's HttpStats extension.
+		if exts, ok := summary["extensions"].(map[string]any); ok {
+			if http, ok := exts["http"].(map[string]any); ok {
+				s4xx, _ := floatVal(http, "status_4xx")
+				s5xx, _ := floatVal(http, "status_5xx")
+				totalErrors += s4xx + s5xx
+			}
+		}
+
+		// Hyperfoil evaluates sla: blocks declared in the YAML and records any
+		// breaches in the per-entry failedSLAs list.  Collect them so we fail
+		// even when our own p99 check would not catch a custom SLA condition.
+		if fslas, ok := stat["failedSLAs"].([]any); ok {
+			for _, v := range fslas {
+				if msg, ok := v.(string); ok {
+					sloViolations = append(sloViolations, "Hyperfoil SLA: "+msg)
+				}
+			}
+		}
+
 		// Determine the SLO key for this metric.
 		metricName := strVal(stat, "metric")
 		sloKey := benchmarkName
