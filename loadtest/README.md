@@ -36,6 +36,24 @@ task loadtest:all
 
 This executes **seed → bench → correctness → report** in sequence and writes all output to `loadtest/results/`.
 
+> **Disk space warning:** `append-throughput` and `ssedelay` write entries into
+> the database on every run — they are not read-only benchmarks.  Running
+> `task loadtest:all` repeatedly on the same database will accumulate data and
+> eventually fill the Postgres volume.  If you hit
+> `ERROR: could not extend file … No space left on device (SQLSTATE 53100)`,
+> reset the environment before re-running:
+>
+> ```sh
+> # Wipe the Postgres volume, clear result files, restart containers
+> podman compose down -v
+> rm -f loadtest/results/seed-manifest.json loadtest/results/*.json \
+>        loadtest/results/*.csv loadtest/results/*.md
+> podman compose up -d postgres redis
+> # Wait for Postgres to be ready, then restart the service
+> task dev:memory-service
+> task loadtest:all
+> ```
+
 ---
 
 ## Individual Tasks
@@ -75,6 +93,7 @@ go run ./internal/loadtest/generator/ --help
 | `--total-conversations` | `2000` | Number of main conversations to seed |
 | `--fork-chains` | `10` | Number of fork chains (each = 1 root + 1 fork conversation) |
 | `--worker-count` | `5` | Concurrent seeding workers |
+| `--index-batch-size` | `50` | Entries per `POST /v1/conversations/index` batch (reduce if server returns 500) |
 | `--base-url` | `http://localhost:8082` | Memory service base URL |
 | `--api-key` | `agent-api-key-1` | API key |
 | `--seed-manifest-path` | `loadtest/results/seed-manifest.json` | Output manifest path |
@@ -134,8 +153,12 @@ immediately visible.
 
 ### `task loadtest:correctness`
 
-Runs the Go pagination correctness tests. Exhaustively walks every paginated
-endpoint and asserts no entries are skipped or duplicated.
+Runs the Go pagination correctness tests. Walks every paginated endpoint and
+asserts no entries are skipped or duplicated. Covers:
+
+- `GET /v1/conversations` — all pages per owner, checks for duplicates and that every seeded conversation appears
+- `GET /v1/conversations/{id}/entries` — all pages for a sample of conversations, checks entry counts and duplicates
+- `POST /v1/conversations/search` — all search result pages, checks for duplicates and that results are non-empty
 
 ```sh
 task loadtest:correctness
@@ -170,14 +193,13 @@ When result files are absent the corresponding section shows "not yet run" and t
 | append-throughput | 500 ms |
 | list-conversations | 300 ms |
 | list-entries | 300 ms |
-| search-conversations | 1000 ms |
+| search-conversations | 5000 ms (dev laptop; production target 1000 ms) |
 | list-forks | 300 ms |
-| sse-fan-out/burst-append | 500 ms |
-| sse-event-delay/users-1 | N/A (observability) |
-| sse-event-delay/users-10 | N/A (observability) |
-| sse-event-delay/users-50 | N/A (observability) |
+| sse-event-delay/users-1 | 500 ms |
+| sse-event-delay/users-10 | 1000 ms |
+| sse-event-delay/users-50 | 2000 ms |
 
-Override thresholds by editing the corresponding `loadtest/benchmarks/*.hf.yaml` file.
+Override thresholds by editing `internal/loadtest/hfrun/main.go` (`sloThresholds`) and `internal/loadtest/report/main.go` (`sloThresholds`).
 
 ---
 
@@ -188,8 +210,11 @@ All output is written to `loadtest/results/` (gitignored except `.gitkeep`):
 | File | Written by | Description |
 |---|---|---|
 | `seed-manifest.json` | `loadtest:seed` | All seeded conversation IDs, entry counts, fork chains |
-| `conversation-ids.csv` | `loadtest:bench` (via manifest-to-csv helper) | Flat list consumed by Hyperfoil |
-| `hyperfoil-<name>-<timestamp>.json` | `loadtest:bench` | Raw Hyperfoil result per flow |
+| `conversation-ids.csv` | `loadtest:bench` (via manifest-to-csv helper) | Flat list of conversation IDs + owner IDs for Hyperfoil |
+| `deep-conversations.csv` | `loadtest:bench` (via manifest-to-csv helper) | Deep cursors for list-conversations benchmark |
+| `deep-entries.csv` | `loadtest:bench` (via manifest-to-csv helper) | Deep cursors for list-entries benchmark |
+| `deep-search.csv` | `loadtest:bench` (via manifest-to-csv helper) | Deep cursors for search-conversations benchmark |
+| `hyperfoil-<name>-<timestamp>.json` | `loadtest:bench` | Raw Hyperfoil stats per flow |
 | `sse-event-delay-<timestamp>.json` | `loadtest:bench` / `loadtest:bench:sse-delay` | SSE append→event latency at 1/10/50 concurrent users |
 | `correctness-report.json` | `loadtest:correctness` | Per-test pass/fail and item counts |
 | `report.md` | `loadtest:report` | Human-readable Markdown summary |
@@ -221,31 +246,31 @@ loadtest/                          ← non-Go assets
 ├── README.md                      ← this file
 ├── benchmarks/
 │   ├── shared/
-│   │   └── http-config.hf.yaml   ← shared connection pool config
-│   ├── append-throughput.hf.yaml
-│   ├── list-conversations.hf.yaml
-│   ├── list-entries.hf.yaml
-│   ├── search-conversations.hf.yaml
-│   ├── list-forks.hf.yaml
-│   ├── sse-fan-out.hf.yaml        ← Hyperfoil SSE TTFB + burst-append
+│   │   └── http-config.hf.yaml   ← shared HTTP connection pool config
+│   ├── append-throughput.hf.yaml  ← writes entries (DB grows on every run)
+│   ├── list-conversations.hf.yaml ← read-only
+│   ├── list-entries.hf.yaml       ← read-only
+│   ├── search-conversations.hf.yaml ← read-only
+│   ├── list-forks.hf.yaml         ← read-only
+│   ├── manifest-to-csv.go         ← Go helper: generates CSV files from seed manifest
 │   ├── manifest-to-csv.sh         ← shell wrapper for the Go CSV helper
 │   └── run.sh                     ← runs all Hyperfoil flows + ssedelay
 └── results/
-    └── .gitkeep                   ← keeps dir in git; *.json and *.md are gitignored
+    └── .gitkeep                   ← keeps dir in git; *.json and *.csv and *.md are gitignored
 
 internal/loadtest/                 ← all Go source
-├── generator/                     ← data seeder binary
+├── generator/                     ← data seeder binary (writes to DB permanently)
 │   ├── main.go
 │   ├── config.go
 │   ├── distribution.go
 │   └── seeder.go
-├── correctness/                   ← pagination correctness tests
+├── correctness/                   ← pagination correctness tests (read-only)
 │   ├── correctness_test.go
 │   └── reporter.go
 ├── hfrun/                         ← Hyperfoil non-interactive runner
 │   └── main.go                    ← starts jbang, polls log, fetches /stats/total via REST
-├── ssedelay/                      ← SSE event-delivery latency benchmark (Go-native)
+├── ssedelay/                      ← SSE event-delivery latency benchmark (writes to DB)
 │   └── main.go                    ← 1/10/50 concurrent users, append→event p50/p95/p99
-└── report/                        ← results aggregator binary
+└── report/                        ← results aggregator binary (read-only)
     └── main.go
 ```
