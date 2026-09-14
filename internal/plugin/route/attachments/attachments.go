@@ -31,7 +31,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
-	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -595,14 +594,12 @@ func completeSourceURLAttachment(ctx context.Context, store registrystore.Memory
 		markSourceURLAttachmentFailed(ctx, store, attachmentID, userID, err)
 		return err
 	}
-	// TraceContext only — no Baggage to a third party.
-	participatingProp := tracing.NewParticipatingPropagator(propagation.TraceContext{})
 	client := &http.Client{
 		Timeout: 3 * time.Minute,
 		Transport: otelhttp.NewTransport(
 			newSourceURLTransport(cfg.AllowPrivateSourceURLs),
 			otelhttp.WithTracerProvider(tp),
-			otelhttp.WithPropagators(participatingProp),
+			otelhttp.WithPropagators(tracing.OutboundPropagatorFromContext(ctx)),
 		),
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 10 {

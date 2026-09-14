@@ -58,7 +58,7 @@ func init() {
 				vectors: client.Database("memory_service").Collection("memory_vectors"),
 			}
 			if strings.EqualFold(strings.TrimSpace(cfg.VectorType), "qdrant") {
-				qdrantClient, qErr := episodicqdrant.New(cfg, tracing.ProviderFromContext(ctx))
+				qdrantClient, qErr := episodicqdrant.New(cfg, tracing.ProviderFromContext(ctx), tracing.OutboundPropagatorFromContext(ctx))
 				if qErr != nil {
 					log.Warn("Episodic qdrant unavailable; falling back to mongo in-memory vector search", "err", qErr)
 				} else {

@@ -46,12 +46,14 @@ func load(ctx context.Context) (registryembed.Embedder, error) {
 	}
 
 	tp := tracing.ProviderFromContextOrNoop(ctx)
+	prop := tracing.OutboundPropagatorFromContext(ctx)
 	embedder := NewOpenAIEmbedder(
 		cfg.OpenAIAPIKey,
 		cfg.OpenAIModelName,
 		strings.TrimRight(cfg.OpenAIBaseURL, "/"),
 		cfg.OpenAIDimensions,
 		tp,
+		prop,
 	)
 
 	// If dimensions not configured, auto-detect by doing a test embedding
@@ -70,24 +72,24 @@ func load(ctx context.Context) (registryembed.Embedder, error) {
 }
 
 // NewOpenAIEmbedder constructs an OpenAIEmbedder with a local *http.Client whose
-// transport is instrumented with otelhttp.  A TraceContext-only ParticipatingPropagator
-// is used so that Inject is a no-op on untraced requests and Baggage is never forwarded
-// to the third-party OpenAI endpoint.
+// transport is instrumented with otelhttp.  The caller must supply a
+// ParticipatingPropagator (already wrapped with WithNoBaggage) so that Inject is a
+// no-op on untraced requests and Baggage is never forwarded to the third-party
+// OpenAI endpoint, regardless of which propagation format is configured.
 //
 // tp must be the scoped TracerProvider from BuildServer.
+// prop must be the result of tracing.NewParticipatingPropagator(tracing.WithNoBaggage(configured)).
 func NewOpenAIEmbedder(
 	apiKey, model, baseURL string,
 	dimensions int,
 	tp trace.TracerProvider,
+	prop propagation.TextMapPropagator,
 ) *OpenAIEmbedder {
-	// TraceContext only — no Baggage to a third party.
-	participatingProp := tracing.NewParticipatingPropagator(propagation.TraceContext{})
-
 	client := &http.Client{
 		Transport: otelhttp.NewTransport(
 			http.DefaultTransport,
 			otelhttp.WithTracerProvider(tp),
-			otelhttp.WithPropagators(participatingProp),
+			otelhttp.WithPropagators(prop),
 		),
 	}
 	return &OpenAIEmbedder{

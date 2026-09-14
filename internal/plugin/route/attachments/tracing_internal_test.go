@@ -13,14 +13,14 @@ package attachments
 import (
 	"context"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"net/http"
-	"net/http/httptest"
 
 	"github.com/chirino/memory-service/internal/config"
 	"github.com/chirino/memory-service/internal/model"
@@ -30,6 +30,7 @@ import (
 	"github.com/chirino/memory-service/internal/tracing/testutil"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	b3prop "go.opentelemetry.io/contrib/propagators/b3"
 	"go.opentelemetry.io/otel/trace"
 	nooptrace "go.opentelemetry.io/otel/trace/noop"
 )
@@ -157,7 +158,7 @@ func TestAttachmentJobRecordsClientSpanWithRequestProvider(t *testing.T) {
 	}
 	const traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
 	router := gin.New()
-	router.Use(tracing.HTTPMiddleware(h.Provider, h.Propagator))
+	router.Use(tracing.HTTPMiddleware(h.Provider, h.Propagator, h.Propagator))
 	router.GET("/attachments", func(c *gin.Context) {
 		StartSourceURLAttachmentDownload(c.Request.Context(), &minimalMemoryStore{}, &minimalAttachStore{}, cfg,
 			uuid.MustParse("00000000-0000-0000-0000-000000000003"), "user1", downstream.Server.URL, "application/octet-stream")
@@ -199,4 +200,70 @@ func (c staticInternalCarrier) Keys() []string {
 		keys = append(keys, k)
 	}
 	return keys
+}
+
+// TestAttachmentCompleteSourceURLConfiguredPropagatorUsedOutbound verifies that
+// completeSourceURLAttachment uses the outbound propagator stored on the context
+// via WithOutboundPropagatorContext.  When the propagator is B3 multi-header, the
+// outbound download request must carry X-B3-TraceId and must not carry a W3C
+// traceparent.
+//
+// Mutation proof target: if OutboundPropagatorFromContext is removed from
+// completeSourceURLAttachment (reverting to a hardcoded propagation.TraceContext{}),
+// this test fails because X-B3-TraceId is absent from the outbound request.
+func TestAttachmentCompleteSourceURLConfiguredPropagatorUsedOutbound(t *testing.T) {
+	downstream := testutil.NewDownstreamRecorder()
+	t.Cleanup(downstream.Close)
+
+	h := testutil.NewTestHarness()
+	t.Cleanup(func() { _ = h.Shutdown(context.Background()) })
+
+	cfg := &config.Config{
+		AllowPrivateSourceURLs: true,
+		AttachmentMaxSize:      10 * 1024 * 1024,
+		TempDir:                t.TempDir(),
+	}
+
+	traceID := "4bf92f3577b34da6a3ce929d0e0e4736"
+	parentSpanID := "00f067aa0ba902b7"
+
+	// Build a B3 multi-header outbound propagator and store it on the context
+	// the same way HTTPMiddleware does when OTEL_PROPAGATORS=b3multi is set.
+	b3Propagator := tracing.NewParticipatingPropagator(
+		tracing.WithNoBaggage(b3prop.New(b3prop.WithInjectEncoding(b3prop.B3MultipleHeader))),
+	)
+
+	// Extract using B3 multi-header (inbound side also uses B3).
+	b3InboundProp := b3prop.New(b3prop.WithInjectEncoding(b3prop.B3MultipleHeader))
+	extractedCtx := b3InboundProp.Extract(context.Background(),
+		staticInternalCarrier{"x-b3-traceid": traceID, "x-b3-spanid": parentSpanID, "x-b3-sampled": "1"})
+
+	// Store the outbound propagator on the context, matching what HTTPMiddleware does.
+	ctx := tracing.WithOutboundPropagatorContext(
+		tracing.MarkParticipating(extractedCtx),
+		b3Propagator,
+	)
+
+	attachID := uuid.MustParse("00000000-0000-0000-0000-000000000004")
+	err := completeSourceURLAttachment(
+		ctx,
+		&minimalMemoryStore{},
+		&minimalAttachStore{},
+		cfg,
+		attachID,
+		"user1",
+		downstream.Server.URL,
+		"application/octet-stream",
+		h.Provider,
+	)
+	require.NoError(t, err)
+
+	require.Equal(t, 1, downstream.CallCount(), "downstream must be called exactly once")
+
+	lastHeader := downstream.LastHeader()
+	require.NotNil(t, lastHeader)
+	require.NotEmpty(t, lastHeader.Get("X-B3-TraceId"),
+		"B3 propagator must inject X-B3-TraceId on attachment download request")
+	require.Empty(t, lastHeader.Get("Traceparent"),
+		"W3C traceparent must not be injected when B3 propagator is configured")
 }

@@ -15,6 +15,8 @@ import (
 	"github.com/chirino/memory-service/internal/tracing"
 	"github.com/chirino/memory-service/internal/tracing/testutil"
 	"github.com/stretchr/testify/require"
+	b3prop "go.opentelemetry.io/contrib/propagators/b3"
+	"go.opentelemetry.io/otel/propagation"
 	nooptrace "go.opentelemetry.io/otel/trace/noop"
 )
 
@@ -35,7 +37,7 @@ func setupEmbedderTest(t *testing.T) *embedderTestSetup {
 	t.Cleanup(downstream.Close)
 
 	embedder := NewOpenAIEmbedder("test-key", "text-embedding-3-small", downstream.Server.URL, 0,
-		harness.Provider)
+		harness.Provider, harness.Propagator)
 
 	return &embedderTestSetup{
 		Harness:    harness,
@@ -90,6 +92,58 @@ func TestOpenAIEmbedderTracedRequestInjectsTraceparent(t *testing.T) {
 	// Baggage must never be forwarded to a third-party endpoint.
 	require.Empty(t, lastHeader.Get("Baggage"), "baggage must not be forwarded to OpenAI")
 }
+
+// TestOpenAIEmbedderConfiguredPropagatorUsedOutbound verifies that when the embedder
+// is constructed with a B3 propagator, outbound requests carry B3 headers and no
+// traceparent — honouring OTEL_PROPAGATORS=b3 end-to-end.
+func TestOpenAIEmbedderConfiguredPropagatorUsedOutbound(t *testing.T) {
+	harness := testutil.NewTestHarness()
+	t.Cleanup(func() { _ = harness.Shutdown(context.Background()) })
+
+	downstream := testutil.NewDownstreamRecorderWithBody(embeddingBody)
+	t.Cleanup(downstream.Close)
+
+	// Build a B3 multi-header propagator the same way buildInboundPropagator would
+	// when OTEL_PROPAGATORS=b3multi is set: wrapped in ParticipatingPropagator so
+	// Inject is a no-op on untraced requests, and filtered to strip Baggage so it
+	// is never forwarded to a third-party endpoint.
+	b3Propagator := tracing.NewParticipatingPropagator(
+		tracing.WithNoBaggage(b3prop.New(b3prop.WithInjectEncoding(b3prop.B3MultipleHeader))),
+	)
+
+	embedder := NewOpenAIEmbedder(
+		"test-key", "text-embedding-3-small", downstream.Server.URL, 0,
+		harness.Provider,
+		b3Propagator,
+	)
+
+	traceID := "4bf92f3577b34da6a3ce929d0e0e4736"
+	parentSpanID := "00f067aa0ba902b7"
+
+	// Extract using the B3 multi-header propagator (inbound side uses B3 too).
+	b3InboundProp := b3prop.New(b3prop.WithInjectEncoding(b3prop.B3MultipleHeader))
+	b3Carrier := staticCarrier{"x-b3-traceid": traceID, "x-b3-spanid": parentSpanID, "x-b3-sampled": "1"}
+	extractedCtx := b3InboundProp.Extract(context.Background(), b3Carrier)
+	ctx := tracing.MarkParticipating(extractedCtx)
+
+	_, err := embedder.EmbedTexts(ctx, []string{"hello"})
+	require.NoError(t, err)
+	require.Equal(t, 1, downstream.CallCount())
+
+	lastHeader := downstream.LastHeader()
+	require.NotNil(t, lastHeader)
+
+	// With B3 multi-header configured, outbound must carry X-B3-* headers, not traceparent.
+	require.NotEmpty(t, lastHeader.Get("X-B3-TraceId"),
+		"B3 propagator must inject X-B3-TraceId on outbound request")
+	require.Empty(t, lastHeader.Get("Traceparent"),
+		"W3C traceparent must not be injected when B3 propagator is configured")
+	// Baggage must still be suppressed even with B3.
+	require.Empty(t, lastHeader.Get("Baggage"),
+		"baggage must not be forwarded to third-party endpoint regardless of propagator")
+}
+
+
 
 // staticCarrier is a minimal read-only TextMapCarrier for injecting synthetic
 // headers into a context via a propagator during testing.
@@ -157,7 +211,7 @@ func TestEmbedTextsUsesGenericErrorForProviderAuthFailure(t *testing.T) {
 	defer server.Close()
 
 	embedder := NewOpenAIEmbedder(apiKey, "text-embedding-3-small", server.URL, 0,
-		nooptrace.NewTracerProvider())
+		nooptrace.NewTracerProvider(), propagation.TraceContext{})
 
 	_, err := embedder.EmbedTexts(context.Background(), []string{"hello"})
 	if err == nil {
@@ -193,7 +247,7 @@ func TestEmbedTextsOmitsProviderBodyFromNonAuthProviderError(t *testing.T) {
 	defer server.Close()
 
 	embedder := NewOpenAIEmbedder(apiKey, "text-embedding-3-small", server.URL, 0,
-		nooptrace.NewTracerProvider())
+		nooptrace.NewTracerProvider(), propagation.TraceContext{})
 
 	_, err := embedder.EmbedTexts(context.Background(), []string{"hello"})
 	if err == nil {

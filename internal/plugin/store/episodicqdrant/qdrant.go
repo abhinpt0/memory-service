@@ -33,14 +33,17 @@ type Client struct {
 
 // New creates a Qdrant-backed episodic vector client using the given TracerProvider.
 // Pass nil to fall back to a noop provider.
-func New(cfg *config.Config, tp trace.TracerProvider) (*Client, error) {
+// New creates a Qdrant-backed episodic vector client.
+// Pass nil for tp to fall back to a noop provider.
+// Pass nil for prop to fall back to a W3C TraceContext-only participating propagator.
+func New(cfg *config.Config, tp trace.TracerProvider, prop propagation.TextMapPropagator) (*Client, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("qdrant episodic: missing config")
 	}
 	if tp == nil {
 		tp = nooptrace.NewTracerProvider()
 	}
-	conn, err := grpc.NewClient(cfg.QdrantAddress(), dialOptions(cfg, tp)...)
+	conn, err := grpc.NewClient(cfg.QdrantAddress(), dialOptions(cfg, tp, prop)...)
 	if err != nil {
 		return nil, fmt.Errorf("qdrant episodic: connect: %w", err)
 	}
@@ -623,7 +626,7 @@ func toFloat(v interface{}) (float64, bool) {
 	}
 }
 
-func dialOptions(cfg *config.Config, tp trace.TracerProvider) []grpc.DialOption {
+func dialOptions(cfg *config.Config, tp trace.TracerProvider, prop propagation.TextMapPropagator) []grpc.DialOption {
 	opts := make([]grpc.DialOption, 0, 4)
 	if cfg.QdrantUseTLS {
 		opts = append(opts, grpc.WithTransportCredentials(credentials.NewTLS(nil)))
@@ -636,10 +639,12 @@ func dialOptions(cfg *config.Config, tp trace.TracerProvider) []grpc.DialOption 
 			requireTLS: cfg.QdrantUseTLS,
 		}))
 	}
-	// TraceContext only — no Baggage to a third party.
+	if prop == nil {
+		prop = tracing.OutboundPropagatorFromContext(context.Background())
+	}
 	opts = append(opts, grpc.WithStatsHandler(otelgrpc.NewClientHandler(
 		otelgrpc.WithTracerProvider(tp),
-		otelgrpc.WithPropagators(tracing.NewParticipatingPropagator(propagation.TraceContext{})),
+		otelgrpc.WithPropagators(prop),
 	)))
 	return opts
 }

@@ -45,7 +45,7 @@ func init() {
 			}
 			store := &postgresEpisodicStore{db: db, s: ps}
 			if strings.EqualFold(strings.TrimSpace(cfg.VectorType), "qdrant") {
-				client, qErr := episodicqdrant.New(cfg, tracing.ProviderFromContext(ctx))
+				client, qErr := episodicqdrant.New(cfg, tracing.ProviderFromContext(ctx), tracing.OutboundPropagatorFromContext(ctx))
 				if qErr != nil {
 					log.Warn("Episodic qdrant unavailable; falling back to local vector backend", "err", qErr)
 				} else {

@@ -10,6 +10,8 @@ import (
 	"github.com/chirino/memory-service/internal/tracing/testutil"
 	pb "github.com/qdrant/go-client/qdrant"
 	"github.com/stretchr/testify/require"
+	b3prop "go.opentelemetry.io/contrib/propagators/b3"
+	"go.opentelemetry.io/otel/propagation"
 	nooptrace "go.opentelemetry.io/otel/trace/noop"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
@@ -50,7 +52,7 @@ func TestEpisodicQdrantUntracedRequestNoTraceparent(t *testing.T) {
 	grpcH.Serve()
 	t.Cleanup(grpcH.Close)
 
-	conn, err := grpcH.Dial(context.Background(), dialOptions(&config.Config{}, nooptrace.NewTracerProvider())...)
+	conn, err := grpcH.Dial(context.Background(), dialOptions(&config.Config{}, nooptrace.NewTracerProvider(), propagation.TraceContext{})...)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
 
@@ -89,7 +91,7 @@ func TestEpisodicQdrantTracedRequestInjectsTraceparent(t *testing.T) {
 	h := testutil.NewTestHarness()
 	t.Cleanup(func() { _ = h.Shutdown(context.Background()) })
 
-	conn, err := grpcH.Dial(context.Background(), dialOptions(&config.Config{}, h.Provider)...)
+	conn, err := grpcH.Dial(context.Background(), dialOptions(&config.Config{}, h.Provider, h.Propagator)...)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
 
@@ -126,4 +128,66 @@ func (c staticMDCarrier) Keys() []string {
 		keys = append(keys, k)
 	}
 	return keys
+}
+
+// TestEpisodicQdrantConfiguredPropagatorUsedOutbound verifies that dialOptions
+// wires the configured outbound propagator into the gRPC client handler.
+// When the propagator is B3 multi-header, outbound gRPC metadata must carry
+// x-b3-traceid and must not carry a w3c traceparent.
+//
+// Mutation proof target: reverting otelgrpc.WithPropagators(prop) in dialOptions
+// to a hardcoded propagation.TraceContext{} causes this test to fail because
+// x-b3-traceid is absent from the outbound metadata.
+func TestEpisodicQdrantConfiguredPropagatorUsedOutbound(t *testing.T) {
+	srv := newMDCapturingServer()
+	grpcH := testutil.NewGRPCBufConnHarness(
+		grpc.UnaryInterceptor(func(ctx context.Context, req interface{}, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+			if md, ok := metadata.FromIncomingContext(ctx); ok {
+				select {
+				case srv.captured <- md:
+				default:
+				}
+			}
+			return handler(ctx, req)
+		}),
+	)
+	pb.RegisterPointsServer(grpcH.Server, srv)
+	grpcH.Serve()
+	t.Cleanup(grpcH.Close)
+
+	h := testutil.NewTestHarness()
+	t.Cleanup(func() { _ = h.Shutdown(context.Background()) })
+
+	// Build a B3 multi-header outbound propagator the same way buildOutboundPropagator
+	// does when OTEL_PROPAGATORS=b3multi is set.
+	b3Propagator := tracing.NewParticipatingPropagator(
+		tracing.WithNoBaggage(b3prop.New(b3prop.WithInjectEncoding(b3prop.B3MultipleHeader))),
+	)
+
+	conn, err := grpcH.Dial(context.Background(), dialOptions(&config.Config{}, h.Provider, b3Propagator)...)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	client := NewEpisodicQdrantClientForTest(conn, "test-collection")
+
+	traceID := "4bf92f3577b34da6a3ce929d0e0e4736"
+	parentSpanID := "00f067aa0ba902b7"
+
+	// Extract using B3 multi-header (inbound side also uses B3).
+	b3InboundProp := b3prop.New(b3prop.WithInjectEncoding(b3prop.B3MultipleHeader))
+	b3Carrier := staticMDCarrier{
+		"x-b3-traceid": []string{traceID},
+		"x-b3-spanid":  []string{parentSpanID},
+		"x-b3-sampled": []string{"1"},
+	}
+	extractedCtx := b3InboundProp.Extract(context.Background(), b3Carrier)
+	ctx := tracing.MarkParticipating(extractedCtx)
+
+	_, _ = client.SearchMemoryVectors(ctx, "", []float32{0.1}, registryepisodic.AttributeFilter{}, "", 1, registryepisodic.ArchiveFilterExclude)
+
+	md := <-srv.captured
+	require.NotEmpty(t, md.Get("x-b3-traceid"),
+		"B3 propagator must inject x-b3-traceid into outbound gRPC metadata")
+	require.Empty(t, md.Get("traceparent"),
+		"W3C traceparent must not be injected when B3 propagator is configured")
 }

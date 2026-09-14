@@ -42,7 +42,8 @@ func (m *infinispanMigrator) Migrate(ctx context.Context) error {
 	migrateCtx := ctx
 
 	tp := tracing.ProviderFromContextOrNoop(ctx)
-	client, err := newInfinispanClient(cfg, tp)
+	prop := tracing.OutboundPropagatorFromContext(ctx)
+	client, err := newInfinispanClient(cfg, tp, prop)
 	if err != nil {
 		return fmt.Errorf("infinispan migrate: connect: %w", err)
 	}
@@ -136,7 +137,8 @@ func load(ctx context.Context) (registryvector.VectorStore, error) {
 		return nil, fmt.Errorf("infinispan: missing config in context")
 	}
 	tp := tracing.ProviderFromContextOrNoop(ctx)
-	client, err := newInfinispanClient(cfg, tp)
+	prop := tracing.OutboundPropagatorFromContext(ctx)
+	client, err := newInfinispanClient(cfg, tp, prop)
 	if err != nil {
 		return nil, fmt.Errorf("infinispan: connect: %w", err)
 	}
@@ -281,7 +283,7 @@ func effectiveCacheName(cfg *config.Config) string {
 	return fmt.Sprintf("%s_%s-%d", prefix, model, dim)
 }
 
-func newInfinispanClient(cfg *config.Config, tp trace.TracerProvider) (*InfinispanClient, error) {
+func newInfinispanClient(cfg *config.Config, tp trace.TracerProvider, prop propagation.TextMapPropagator) (*InfinispanClient, error) {
 	baseURL := cfg.InfinispanVectorURL
 	if baseURL == "" {
 		// Fall back to MEMORY_SERVICE_INFINISPAN_URL, translating the RESP scheme
@@ -307,12 +309,10 @@ func newInfinispanClient(cfg *config.Config, tp trace.TracerProvider) (*Infinisp
 		base = t
 	}
 
-	// TraceContext only — no Baggage to a third party.
-	participatingProp := tracing.NewParticipatingPropagator(propagation.TraceContext{})
 	otelBase := otelhttp.NewTransport(
 		base,
 		otelhttp.WithTracerProvider(tp),
-		otelhttp.WithPropagators(participatingProp),
+		otelhttp.WithPropagators(prop),
 	)
 
 	var transport http.RoundTripper = otelBase
