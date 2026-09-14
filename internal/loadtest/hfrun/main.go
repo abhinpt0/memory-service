@@ -170,8 +170,10 @@ func main() {
 // requests the benchmark is considered failed.
 //
 // SLO: p99 for each metric must not exceed the threshold defined in
-// sloThresholds. Benchmarks with a single metric use the benchmark name as
-// the key; multi-metric benchmarks use "<benchmark>/<metric>".
+// sloThresholds. For merged-metric benchmarks (e.g. append-throughput whose
+// metrics are collapsed into one report row), the bare benchmark name is used
+// as the SLO key regardless of metric count, so the correct threshold applies.
+// Other multi-metric benchmarks use "<benchmark>/<metric>" as the key.
 func checkStats(raw map[string]any, benchmarkName string) error {
 	statsArr, ok := raw["statistics"].([]any)
 	if !ok || len(statsArr) == 0 {
@@ -188,6 +190,13 @@ func checkStats(raw map[string]any, benchmarkName string) error {
 	}
 	defaultSLO := 1000.0
 
+	// mergedMetricBenchmarks mirrors report/main.go: these benchmarks have
+	// multiple Hyperfoil metric labels but are reported as a single row, so
+	// the SLO key is always the bare benchmark name.
+	mergedMetricBenchmarks := map[string]bool{
+		"append-throughput": true,
+	}
+
 	var totalRequests, totalErrors float64
 	var sloViolations []string
 
@@ -200,7 +209,7 @@ func checkStats(raw map[string]any, benchmarkName string) error {
 		}
 		metricNames[strVal(stat, "metric")] = struct{}{}
 	}
-	multiMetric := len(metricNames) > 1
+	multiMetric := len(metricNames) > 1 && !mergedMetricBenchmarks[benchmarkName]
 
 	for _, s := range statsArr {
 		stat, ok := s.(map[string]any)
@@ -225,9 +234,9 @@ func checkStats(raw map[string]any, benchmarkName string) error {
 		// they are tracked separately in summary.extensions["http"].status_4xx
 		// and status_5xx by Hyperfoil's HttpStats extension.
 		if exts, ok := summary["extensions"].(map[string]any); ok {
-			if http, ok := exts["http"].(map[string]any); ok {
-				s4xx, _ := floatVal(http, "status_4xx")
-				s5xx, _ := floatVal(http, "status_5xx")
+			if httpExt, ok := exts["http"].(map[string]any); ok {
+				s4xx, _ := floatVal(httpExt, "status_4xx")
+				s5xx, _ := floatVal(httpExt, "status_5xx")
 				totalErrors += s4xx + s5xx
 			}
 		}

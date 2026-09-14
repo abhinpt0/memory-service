@@ -52,7 +52,9 @@ type benchmarkRow struct {
 	P99ms   float64 `json:"p99ms"`
 	SLOPass bool    `json:"sloPass"`
 	// hasData indicates whether actual benchmark data was found.
-	// When false the row is shown as "-" and excluded from the overall pass/fail.
+	// When false the row is shown as "-" in the report table.
+	// SLOPass is explicitly false for missing rows, so they do contribute to
+	// the overall allPassed aggregate — an incomplete run is never a pass.
 	hasData bool
 }
 
