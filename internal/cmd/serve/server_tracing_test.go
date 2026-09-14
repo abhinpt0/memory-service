@@ -385,4 +385,3 @@ func TestBuildTracerProviderDefaultServiceNamePreserved(t *testing.T) {
 		"service.name must not be empty when OTEL_SERVICE_NAME is unset; "+
 			"resource.New(WithFromEnv()) alone drops the SDK default — merge with resource.Default() to preserve it")
 }
-

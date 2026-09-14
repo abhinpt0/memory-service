@@ -143,8 +143,6 @@ func TestOpenAIEmbedderConfiguredPropagatorUsedOutbound(t *testing.T) {
 		"baggage must not be forwarded to third-party endpoint regardless of propagator")
 }
 
-
-
 // staticCarrier is a minimal read-only TextMapCarrier for injecting synthetic
 // headers into a context via a propagator during testing.
 type staticCarrier map[string]string
