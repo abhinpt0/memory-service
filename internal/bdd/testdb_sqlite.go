@@ -88,11 +88,11 @@ func (s *SQLiteTestDB) SetConversationEntriesCreatedAt(ctx context.Context, conv
 
 	_, err = db.ExecContext(ctx,
 		`UPDATE entries
-		 SET created_at = ?
+		 SET created_at = ?, created_at_unix_ms = ?
 		 WHERE conversation_group_id = (
 		   SELECT conversation_group_id FROM conversations WHERE id = ?
 		 )`,
-		createdAt, conversationID)
+		createdAt, createdAt.UTC().UnixMilli(), conversationID)
 	if err != nil {
 		return fmt.Errorf("failed to set conversation entry timestamps for %s: %w", conversationID, err)
 	}
@@ -108,9 +108,9 @@ func (s *SQLiteTestDB) SetEntryCreatedAt(ctx context.Context, entryID string, cr
 
 	_, err = db.ExecContext(ctx,
 		`UPDATE entries
-		 SET created_at = ?
+		 SET created_at = ?, created_at_unix_ms = ?
 		 WHERE id = ?`,
-		createdAt, entryID)
+		createdAt, createdAt.UTC().UnixMilli(), entryID)
 	if err != nil {
 		return fmt.Errorf("failed to set entry timestamp for %s: %w", entryID, err)
 	}

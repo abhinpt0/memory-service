@@ -107,6 +107,7 @@ CREATE TABLE IF NOT EXISTS entries (
     indexed_content TEXT,
     indexed_at DATETIME,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_at_unix_ms INTEGER,
     PRIMARY KEY (id, conversation_group_id)
 );
 
@@ -315,3 +316,4 @@ CREATE TABLE IF NOT EXISTS memory_vectors (
 
 CREATE INDEX IF NOT EXISTS idx_memory_vectors_namespace
     ON memory_vectors(namespace);
+

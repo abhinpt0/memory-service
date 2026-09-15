@@ -106,8 +106,29 @@ func (m *sqliteMigrator) Migrate(ctx context.Context) error {
 			return fmt.Errorf("migration: failed to execute fts schema: %w", err)
 		}
 	}
+	// Schema reconciliation: ADD COLUMN IF NOT EXISTS is not supported in SQLite,
+	// so we attempt the ALTER and ignore "duplicate column name" errors.
+	if _, err := handle.sqlDB.ExecContext(ctx,
+		`ALTER TABLE entries ADD COLUMN created_at_unix_ms INTEGER`); err != nil {
+		if !isSQLiteDuplicateColumnError(err) {
+			return fmt.Errorf("migration: failed to add created_at_unix_ms column: %w", err)
+		}
+	}
+	if _, err := handle.sqlDB.ExecContext(ctx,
+		`CREATE INDEX IF NOT EXISTS idx_entries_created_at_unix_ms ON entries(created_at_unix_ms)`); err != nil {
+		return fmt.Errorf("migration: failed to create idx_entries_created_at_unix_ms index: %w", err)
+	}
 	log.Info("SQLite schema migration complete", "fts5Enabled", handle.fts5Enabled)
 	return nil
+}
+
+// isSQLiteDuplicateColumnError returns true when err is a SQLite "duplicate column name" error,
+// which is returned when attempting ALTER TABLE ADD COLUMN on a column that already exists.
+func isSQLiteDuplicateColumnError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "duplicate column name")
 }
 
 func sqliteRequireCurrentSchemaOrEmpty(ctx context.Context, db *sql.DB) error {
@@ -1757,6 +1778,10 @@ func (s *SQLiteStore) appendEntries(ctx context.Context, userID string, conversa
 			}
 			return nil, fmt.Errorf("failed to append entry: %w", err)
 		}
+		if err := db.Exec("UPDATE entries SET created_at_unix_ms = ? WHERE id = ? AND conversation_group_id = ?",
+			entry.CreatedAt.UTC().UnixMilli(), entry.ID.String(), entry.ConversationGroupID.String()).Error; err != nil {
+			return nil, fmt.Errorf("failed to set created_at_unix_ms: %w", err)
+		}
 		entry.Content = req.Content // return unencrypted
 		result[i] = entry
 	}
@@ -1959,6 +1984,10 @@ func (s *SQLiteStore) SyncAgentEntry(ctx context.Context, userID string, convers
 			return nil, registrystore.NewDuplicateSequenceConflict()
 		}
 		return nil, fmt.Errorf("failed to sync entry: %w", err)
+	}
+	if err := db.Exec("UPDATE entries SET created_at_unix_ms = ? WHERE id = ? AND conversation_group_id = ?",
+		newEntry.CreatedAt.UTC().UnixMilli(), newEntry.ID.String(), newEntry.ConversationGroupID.String()).Error; err != nil {
+		return nil, fmt.Errorf("failed to set created_at_unix_ms on sync entry: %w", err)
 	}
 	newEntry.Content = appendContent
 	s.warmEntriesCache(ctx, conv, ancestry, clientID, valueOrEmpty(agentID))
@@ -3582,6 +3611,7 @@ func (s *SQLiteStore) runBoundedSQLQuery(ctx context.Context, base *gorm.DB, fro
 		EntryIDValue:    sqlentry.UUIDStringValue,
 		ScanErr:         scanErr,
 		CreatedAtFilter: createdAtFilter,
+		SQLite:          true,
 	})
 }
 

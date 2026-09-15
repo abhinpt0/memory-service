@@ -40,10 +40,34 @@ type BoundedQuery struct {
 	EntryIDValue     EntryIDValueFunc
 	ScanErr          string
 	CreatedAtFilter  *registrystore.CreatedAtFilter
+	// SQLite signals that ApplyCreatedAtFilter should use the integer
+	// created_at_unix_ms column instead of the DATETIME text column.
+	SQLite bool
 }
 
-func ApplyCreatedAtFilter(base *gorm.DB, filter *registrystore.CreatedAtFilter, alias string) *gorm.DB {
+// ApplyCreatedAtFilter appends timestamp predicates to base.
+// When sqlite is true the integer companion column created_at_unix_ms is used
+// (milliseconds since Unix epoch) so that timezone-offset-bearing DATETIME text
+// values compare as instants rather than strings.
+func ApplyCreatedAtFilter(base *gorm.DB, filter *registrystore.CreatedAtFilter, alias string, sqlite bool) *gorm.DB {
 	if filter == nil || base == nil {
+		return base
+	}
+	if sqlite {
+		col := "created_at_unix_ms"
+		if alias != "" {
+			col = alias + ".created_at_unix_ms"
+		}
+		if filter.Eq != nil {
+			base = base.Where(col+" = ?", filter.Eq.UTC().UnixMilli())
+		} else {
+			if filter.After != nil {
+				base = base.Where(col+" >= ?", filter.After.UTC().UnixMilli())
+			}
+			if filter.Before != nil {
+				base = base.Where(col+" <= ?", filter.Before.UTC().UnixMilli())
+			}
+		}
 		return base
 	}
 	col := "created_at"
@@ -99,7 +123,7 @@ func RunBoundedQuery(ctx context.Context, query BoundedQuery) ([]model.Entry, *s
 		base = base.Where("e.seq IS NOT NULL AND e.seq >= ?", *query.FromSeq)
 	}
 	if query.CreatedAtFilter != nil {
-		base = ApplyCreatedAtFilter(base, query.CreatedAtFilter, "e")
+		base = ApplyCreatedAtFilter(base, query.CreatedAtFilter, "e", query.SQLite)
 	}
 	lookup := func(entryID string) (model.Entry, bool, error) {
 		var entry model.Entry

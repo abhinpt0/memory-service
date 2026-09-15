@@ -55,3 +55,38 @@ Feature: Entries CreatedAt Filtering gRPC API
     """
     Then the gRPC response should have status "INVALID_ARGUMENT"
     And the gRPC error message should contain "mutually exclusive"
+
+  Scenario: Reject out-of-range protobuf timestamp via gRPC
+    When I send gRPC request "EntriesService/ListEntries" with body:
+    """
+    conversation_id: "${conversationId}"
+    created_at_after {
+      seconds: -99999999999
+    }
+    """
+    Then the gRPC response should have status "INVALID_ARGUMENT"
+    And the gRPC error message should contain "created_at_after"
+
+  Scenario: Admin filter entries with createdAtAfter via gRPC
+    Given I am authenticated as admin user "alice"
+    When I send gRPC request "AdminEntriesService/ListEntries" with body:
+    """
+    conversation_id: "${conversationId}"
+    created_at_after {
+      seconds: 1767348000
+    }
+    """
+    Then the gRPC response should not have an error
+    And the gRPC response should contain 2 entries
+
+  Scenario: Filter entries with subsecond createdAtAfter via gRPC
+    When I send gRPC request "EntriesService/ListEntries" with body:
+    """
+    conversation_id: "${conversationId}"
+    created_at_after {
+      seconds: 1767261600
+      nanos: 500000000
+    }
+    """
+    Then the gRPC response should not have an error
+    And the gRPC response should contain 2 entries
