@@ -14,8 +14,12 @@ import (
 	"github.com/chirino/memory-service/internal/config"
 	registrymigrate "github.com/chirino/memory-service/internal/registry/migrate"
 	registryvector "github.com/chirino/memory-service/internal/registry/vector"
+	"github.com/chirino/memory-service/internal/tracing"
 	"github.com/google/uuid"
 	"github.com/urfave/cli/v3"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 )
 
 //go:embed schemas/vector_chunk.proto
@@ -37,7 +41,9 @@ func (m *infinispanMigrator) Migrate(ctx context.Context) error {
 	log.Info("Running migration", "name", m.Name())
 	migrateCtx := ctx
 
-	client, err := newInfinispanClient(cfg)
+	tp := tracing.ProviderFromContextOrNoop(ctx)
+	prop := tracing.OutboundPropagatorFromContext(ctx)
+	client, err := newInfinispanClient(cfg, tp, prop)
 	if err != nil {
 		return fmt.Errorf("infinispan migrate: connect: %w", err)
 	}
@@ -130,7 +136,9 @@ func load(ctx context.Context) (registryvector.VectorStore, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("infinispan: missing config in context")
 	}
-	client, err := newInfinispanClient(cfg)
+	tp := tracing.ProviderFromContextOrNoop(ctx)
+	prop := tracing.OutboundPropagatorFromContext(ctx)
+	client, err := newInfinispanClient(cfg, tp, prop)
 	if err != nil {
 		return nil, fmt.Errorf("infinispan: connect: %w", err)
 	}
@@ -275,7 +283,7 @@ func effectiveCacheName(cfg *config.Config) string {
 	return fmt.Sprintf("%s_%s-%d", prefix, model, dim)
 }
 
-func newInfinispanClient(cfg *config.Config) (*InfinispanClient, error) {
+func newInfinispanClient(cfg *config.Config, tp trace.TracerProvider, prop propagation.TextMapPropagator) (*InfinispanClient, error) {
 	baseURL := cfg.InfinispanVectorURL
 	if baseURL == "" {
 		// Fall back to MEMORY_SERVICE_INFINISPAN_URL, translating the RESP scheme
@@ -301,9 +309,16 @@ func newInfinispanClient(cfg *config.Config) (*InfinispanClient, error) {
 		base = t
 	}
 
-	var transport http.RoundTripper = base
+	otelBase := otelhttp.NewTransport(
+		base,
+		otelhttp.WithTracerProvider(tp),
+		otelhttp.WithPropagators(prop),
+	)
+
+	var transport http.RoundTripper = otelBase
 	if cfg.InfinispanVectorUsername != "" && cfg.InfinispanVectorPassword != "" {
-		// Create auth transport wrapping the (possibly TLS-configured) base transport.
+		// Auth wraps otelhttp so digest challenge-response flows through the
+		// instrumented transport on each attempt.
 		authType := cfg.InfinispanVectorAuthType
 		if authType == "" {
 			authType = "digest"
@@ -312,7 +327,7 @@ func newInfinispanClient(cfg *config.Config) (*InfinispanClient, error) {
 			username: cfg.InfinispanVectorUsername,
 			password: cfg.InfinispanVectorPassword,
 			authType: authType,
-			base:     base,
+			base:     otelBase,
 		}
 	}
 

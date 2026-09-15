@@ -14,7 +14,11 @@ import (
 	"github.com/chirino/memory-service/internal/config"
 	"github.com/chirino/memory-service/internal/operationevent"
 	registryembed "github.com/chirino/memory-service/internal/registry/embed"
+	"github.com/chirino/memory-service/internal/tracing"
 	"github.com/urfave/cli/v3"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func init() {
@@ -41,13 +45,16 @@ func load(ctx context.Context) (registryembed.Embedder, error) {
 		return nil, fmt.Errorf("openai embedder: MEMORY_SERVICE_OPENAI_API_KEY is required")
 	}
 
-	embedder := &OpenAIEmbedder{
-		apiKey:     cfg.OpenAIAPIKey,
-		model:      cfg.OpenAIModelName,
-		baseURL:    strings.TrimRight(cfg.OpenAIBaseURL, "/"),
-		dimensions: cfg.OpenAIDimensions,
-		defaultDim: cfg.OpenAIDimensions,
-	}
+	tp := tracing.ProviderFromContextOrNoop(ctx)
+	prop := tracing.OutboundPropagatorFromContext(ctx)
+	embedder := NewOpenAIEmbedder(
+		cfg.OpenAIAPIKey,
+		cfg.OpenAIModelName,
+		strings.TrimRight(cfg.OpenAIBaseURL, "/"),
+		cfg.OpenAIDimensions,
+		tp,
+		prop,
+	)
 
 	// If dimensions not configured, auto-detect by doing a test embedding
 	if cfg.OpenAIDimensions <= 0 {
@@ -64,12 +71,44 @@ func load(ctx context.Context) (registryembed.Embedder, error) {
 	return embedder, nil
 }
 
+// NewOpenAIEmbedder constructs an OpenAIEmbedder with a local *http.Client whose
+// transport is instrumented with otelhttp.  The caller must supply a
+// ParticipatingPropagator (already wrapped with WithNoBaggage) so that Inject is a
+// no-op on untraced requests and Baggage is never forwarded to the third-party
+// OpenAI endpoint, regardless of which propagation format is configured.
+//
+// tp must be the scoped TracerProvider from BuildServer.
+// prop must be the result of tracing.NewParticipatingPropagator(tracing.WithNoBaggage(configured)).
+func NewOpenAIEmbedder(
+	apiKey, model, baseURL string,
+	dimensions int,
+	tp trace.TracerProvider,
+	prop propagation.TextMapPropagator,
+) *OpenAIEmbedder {
+	client := &http.Client{
+		Transport: otelhttp.NewTransport(
+			http.DefaultTransport,
+			otelhttp.WithTracerProvider(tp),
+			otelhttp.WithPropagators(prop),
+		),
+	}
+	return &OpenAIEmbedder{
+		apiKey:     apiKey,
+		model:      model,
+		baseURL:    baseURL,
+		dimensions: dimensions,
+		defaultDim: dimensions,
+		httpClient: client,
+	}
+}
+
 type OpenAIEmbedder struct {
 	apiKey     string
 	model      string
 	baseURL    string
 	dimensions int
 	defaultDim int
+	httpClient *http.Client
 }
 
 func (e *OpenAIEmbedder) ModelName() string {
@@ -113,7 +152,7 @@ func (e *OpenAIEmbedder) EmbedTexts(ctx context.Context, texts []string) ([][]fl
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+e.apiKey)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := e.httpClient.Do(req)
 	if err != nil {
 		return nil, openAIProviderError(fmt.Errorf("embedding request failed: %w", err), 0, "request_failed", "")
 	}
