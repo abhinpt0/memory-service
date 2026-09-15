@@ -76,9 +76,11 @@ concurrent `BuildServer` calls.
 HTTP spans carry `http.request.method`, `http.route` (the parameterised route template,
 e.g. `/v1/entries/{id}`), and `http.response.status_code`. The concrete request path is
 deliberately excluded to prevent signed tokens and user-supplied IDs from reaching
-exporters. Span status is set to Error on 5xx responses and on handler errors recorded in
-`c.Errors`; 4xx responses leave span status Unset per OTel HTTP server semconv (4xx
-indicates a client error, not a server fault).
+exporters. Span status is set to Error on 5xx responses; 4xx responses leave span status
+Unset per OTel HTTP server semconv (4xx indicates a client error, not a server fault).
+When a 5xx response also carries a handler error in `c.Errors`, the error is recorded on
+the span via `RecordError`. `c.Errors` alone — without a 5xx status — does not set span
+status to Error.
 
 gRPC spans carry `rpc.system`, `rpc.service`, `rpc.method`, and `rpc.grpc.status_code`.
 Span status is set to Error only for server-side failures; caller errors
