@@ -177,7 +177,7 @@ func main() {
 func checkStats(raw map[string]any, benchmarkName string) error {
 	statsArr, ok := raw["statistics"].([]any)
 	if !ok || len(statsArr) == 0 {
-		return nil
+		return fmt.Errorf("no statistics returned")
 	}
 
 	// sloThresholds mirrors the values in report/main.go.
