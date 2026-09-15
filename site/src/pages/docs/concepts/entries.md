@@ -266,11 +266,11 @@ curl "...?channel=context&epoch=all"
 
 Three query parameters let you scope the entry list to a specific time window:
 
-| Parameter       | Type        | Description                                                  |
-| --------------- | ----------- | ------------------------------------------------------------ |
-| `createdAt`     | `date-time` | Return only entries whose `createdAt` equals this instant    |
-| `createdAtAfter`  | `date-time` | Return only entries with `createdAt >= createdAtAfter`       |
-| `createdAtBefore` | `date-time` | Return only entries with `createdAt <= createdAtBefore`      |
+| Parameter         | Type        | Description                                               |
+| ----------------- | ----------- | --------------------------------------------------------- |
+| `createdAt`       | `date-time` | Return only entries whose `createdAt` equals this instant |
+| `createdAtAfter`  | `date-time` | Return only entries with `createdAt >= createdAtAfter`    |
+| `createdAtBefore` | `date-time` | Return only entries with `createdAt <= createdAtBefore`   |
 
 - Both `createdAtAfter` and `createdAtBefore` bounds are **inclusive**.
 - `createdAt` is **mutually exclusive** with `createdAtAfter` and `createdAtBefore`. Combining them returns `400 Bad Request`.

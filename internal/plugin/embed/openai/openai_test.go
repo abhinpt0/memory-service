@@ -12,7 +12,152 @@ import (
 	"testing"
 
 	"github.com/chirino/memory-service/internal/operationevent"
+	"github.com/chirino/memory-service/internal/tracing"
+	"github.com/chirino/memory-service/internal/tracing/testutil"
+	"github.com/stretchr/testify/require"
+	b3prop "go.opentelemetry.io/contrib/propagators/b3"
+	"go.opentelemetry.io/otel/propagation"
+	nooptrace "go.opentelemetry.io/otel/trace/noop"
 )
+
+const embeddingBody = `{"data":[{"index":0,"embedding":[0.1,0.2,0.3]}]}`
+
+type embedderTestSetup struct {
+	Harness    *testutil.Harness
+	Downstream *testutil.DownstreamRecorder
+	Embedder   *OpenAIEmbedder
+}
+
+func setupEmbedderTest(t *testing.T) *embedderTestSetup {
+	t.Helper()
+	harness := testutil.NewTestHarness()
+	t.Cleanup(func() { _ = harness.Shutdown(context.Background()) })
+
+	downstream := testutil.NewDownstreamRecorderWithBody(embeddingBody)
+	t.Cleanup(downstream.Close)
+
+	embedder := NewOpenAIEmbedder("test-key", "text-embedding-3-small", downstream.Server.URL, 0,
+		harness.Provider, harness.Propagator)
+
+	return &embedderTestSetup{
+		Harness:    harness,
+		Downstream: downstream,
+		Embedder:   embedder,
+	}
+}
+
+func TestOpenAIEmbedderUntracedRequestNoTraceparent(t *testing.T) {
+	setup := setupEmbedderTest(t)
+
+	// Untraced context — no MarkParticipating.
+	_, err := setup.Embedder.EmbedTexts(context.Background(), []string{"hello"})
+	require.NoError(t, err)
+
+	// Positive assertion: downstream was reached exactly once.
+	require.Equal(t, 1, setup.Downstream.CallCount(), "downstream must be called exactly once")
+
+	// Negative assertion on executed path: no traceparent header injected.
+	lastHeader := setup.Downstream.LastHeader()
+	require.NotNil(t, lastHeader)
+	require.Empty(t, lastHeader.Get("Traceparent"), "untraced request must not inject traceparent")
+}
+
+func TestOpenAIEmbedderTracedRequestInjectsTraceparent(t *testing.T) {
+	setup := setupEmbedderTest(t)
+
+	traceID := "4bf92f3577b34da6a3ce929d0e0e4736"
+	parentSpanID := "00f067aa0ba902b7"
+	inboundTraceparent := testutil.NewSampledTraceparent(traceID, parentSpanID)
+
+	// Build a participating context the same way the HTTP/gRPC inbound middleware does:
+	// extract the remote span context into ctx, then mark it as participating.
+	extractedCtx := setup.Harness.Propagator.Extract(context.Background(),
+		staticCarrier{"traceparent": inboundTraceparent})
+	ctx := tracing.MarkParticipating(extractedCtx)
+
+	_, err := setup.Embedder.EmbedTexts(ctx, []string{"hello"})
+	require.NoError(t, err)
+
+	// Positive assertion: downstream was reached exactly once.
+	require.Equal(t, 1, setup.Downstream.CallCount(), "downstream must be called exactly once")
+
+	lastHeader := setup.Downstream.LastHeader()
+	require.NotNil(t, lastHeader)
+
+	// traceparent must be present and carry the caller's trace ID.
+	outbound := lastHeader.Get("Traceparent")
+	require.NotEmpty(t, outbound, "traced request must inject outbound traceparent")
+	require.Contains(t, outbound, traceID, "outbound traceparent must carry the caller's trace ID")
+
+	// Baggage must never be forwarded to a third-party endpoint.
+	require.Empty(t, lastHeader.Get("Baggage"), "baggage must not be forwarded to OpenAI")
+}
+
+// TestOpenAIEmbedderConfiguredPropagatorUsedOutbound verifies that when the embedder
+// is constructed with a B3 propagator, outbound requests carry B3 headers and no
+// traceparent — honouring OTEL_PROPAGATORS=b3 end-to-end.
+func TestOpenAIEmbedderConfiguredPropagatorUsedOutbound(t *testing.T) {
+	harness := testutil.NewTestHarness()
+	t.Cleanup(func() { _ = harness.Shutdown(context.Background()) })
+
+	downstream := testutil.NewDownstreamRecorderWithBody(embeddingBody)
+	t.Cleanup(downstream.Close)
+
+	// Build a B3 multi-header propagator the same way buildInboundPropagator would
+	// when OTEL_PROPAGATORS=b3multi is set: wrapped in ParticipatingPropagator so
+	// Inject is a no-op on untraced requests, and filtered to strip Baggage so it
+	// is never forwarded to a third-party endpoint.
+	b3Propagator := tracing.NewParticipatingPropagator(
+		tracing.WithNoBaggage(b3prop.New(b3prop.WithInjectEncoding(b3prop.B3MultipleHeader))),
+	)
+
+	embedder := NewOpenAIEmbedder(
+		"test-key", "text-embedding-3-small", downstream.Server.URL, 0,
+		harness.Provider,
+		b3Propagator,
+	)
+
+	traceID := "4bf92f3577b34da6a3ce929d0e0e4736"
+	parentSpanID := "00f067aa0ba902b7"
+
+	// Extract using the B3 multi-header propagator (inbound side uses B3 too).
+	b3InboundProp := b3prop.New(b3prop.WithInjectEncoding(b3prop.B3MultipleHeader))
+	b3Carrier := staticCarrier{"x-b3-traceid": traceID, "x-b3-spanid": parentSpanID, "x-b3-sampled": "1"}
+	extractedCtx := b3InboundProp.Extract(context.Background(), b3Carrier)
+	ctx := tracing.MarkParticipating(extractedCtx)
+
+	_, err := embedder.EmbedTexts(ctx, []string{"hello"})
+	require.NoError(t, err)
+	require.Equal(t, 1, downstream.CallCount())
+
+	lastHeader := downstream.LastHeader()
+	require.NotNil(t, lastHeader)
+
+	// With B3 multi-header configured, outbound must carry X-B3-* headers, not traceparent.
+	require.NotEmpty(t, lastHeader.Get("X-B3-TraceId"),
+		"B3 propagator must inject X-B3-TraceId on outbound request")
+	require.Empty(t, lastHeader.Get("Traceparent"),
+		"W3C traceparent must not be injected when B3 propagator is configured")
+	// Baggage must still be suppressed even with B3.
+	require.Empty(t, lastHeader.Get("Baggage"),
+		"baggage must not be forwarded to third-party endpoint regardless of propagator")
+}
+
+// staticCarrier is a minimal read-only TextMapCarrier for injecting synthetic
+// headers into a context via a propagator during testing.
+type staticCarrier map[string]string
+
+func (c staticCarrier) Get(key string) string {
+	return c[strings.ToLower(key)]
+}
+func (c staticCarrier) Set(key, val string) {}
+func (c staticCarrier) Keys() []string {
+	keys := make([]string, 0, len(c))
+	for k := range c {
+		keys = append(keys, k)
+	}
+	return keys
+}
 
 func TestRedactAPIKey(t *testing.T) {
 	tests := []struct {
@@ -63,11 +208,8 @@ func TestEmbedTextsUsesGenericErrorForProviderAuthFailure(t *testing.T) {
 	}))
 	defer server.Close()
 
-	embedder := &OpenAIEmbedder{
-		apiKey:  apiKey,
-		model:   "text-embedding-3-small",
-		baseURL: server.URL,
-	}
+	embedder := NewOpenAIEmbedder(apiKey, "text-embedding-3-small", server.URL, 0,
+		nooptrace.NewTracerProvider(), propagation.TraceContext{})
 
 	_, err := embedder.EmbedTexts(context.Background(), []string{"hello"})
 	if err == nil {
@@ -102,11 +244,8 @@ func TestEmbedTextsOmitsProviderBodyFromNonAuthProviderError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	embedder := &OpenAIEmbedder{
-		apiKey:  apiKey,
-		model:   "text-embedding-3-small",
-		baseURL: server.URL,
-	}
+	embedder := NewOpenAIEmbedder(apiKey, "text-embedding-3-small", server.URL, 0,
+		nooptrace.NewTracerProvider(), propagation.TraceContext{})
 
 	_, err := embedder.EmbedTexts(context.Background(), []string{"hello"})
 	if err == nil {
