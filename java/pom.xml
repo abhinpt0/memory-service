@@ -42,7 +42,8 @@
   </scm>
 
   <properties>
-    <compiler-plugin.version>3.15.0</compiler-plugin.version>
+    <!-- Keep pinned until 3.15.x stops deleting generated sources and copied resources. -->
+    <compiler-plugin.version>3.14.1</compiler-plugin.version>
     <maven.compiler.release>21</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
