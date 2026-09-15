@@ -445,6 +445,7 @@ func loadCorrectnessReport(root string) (correctnessReport, bool) {
 // SSE coverage is handled entirely by the Go ssedelay benchmark:
 //   - append throughput under SSE load: ssedelay users-50 (50 senders + 50 subscribers open)
 //   - end-to-end event delivery latency: ssedelay users-1/10/50
+//
 // sse-fan-out.hf.yaml was removed because it permanently wrote entries to the
 // seeded Postgres conversations on every benchmark run (disk-fill risk) and
 // provided no coverage not already in ssedelay or append-throughput.

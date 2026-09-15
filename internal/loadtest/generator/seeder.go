@@ -138,6 +138,16 @@ func appendEntry(
 // indexedContent for each entry is the entry's text content — the same words
 // used in the entry body, which guarantees "load test" search terms will match.
 func indexEntries(client *http.Client, cfg GeneratorConfig, entries []indexEntryRequest, batchSize int) error {
+	return indexEntriesWithSleep(client, cfg, entries, batchSize, time.Sleep)
+}
+
+func indexEntriesWithSleep(
+	client *http.Client,
+	cfg GeneratorConfig,
+	entries []indexEntryRequest,
+	batchSize int,
+	sleep func(time.Duration),
+) error {
 	if len(entries) == 0 {
 		return nil
 	}
@@ -157,6 +167,7 @@ func indexEntries(client *http.Client, cfg GeneratorConfig, entries []indexEntry
 			return err
 		}
 
+		indexed := false
 		for attempt := 0; attempt < 20; attempt++ {
 			req, err := http.NewRequest(http.MethodPost, cfg.BaseURL+"/v1/conversations/index", bytes.NewReader(body))
 			if err != nil {
@@ -174,17 +185,24 @@ func indexEntries(client *http.Client, cfg GeneratorConfig, entries []indexEntry
 			resp.Body.Close()
 
 			if resp.StatusCode == http.StatusTooManyRequests {
+				if attempt == 19 {
+					break
+				}
 				backoff := time.Duration(100*(1<<attempt)) * time.Millisecond
 				if backoff > time.Second {
 					backoff = time.Second
 				}
-				time.Sleep(backoff)
+				sleep(backoff)
 				continue
 			}
 			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 				return fmt.Errorf("indexEntries: status %d: %s", resp.StatusCode, respBody)
 			}
+			indexed = true
 			break
+		}
+		if !indexed {
+			return fmt.Errorf("indexEntries: rate limited after 20 attempts")
 		}
 
 		// Pace index batches to give Postgres WAL time to flush between writes.
@@ -192,7 +210,7 @@ func indexEntries(client *http.Client, cfg GeneratorConfig, entries []indexEntry
 		// cause a WAL write spike that crashes the local Postgres instance.
 		// 50ms between batches = ~20 batches/sec max throughput for indexing.
 		if i+batchSize < total {
-			time.Sleep(50 * time.Millisecond)
+			sleep(50 * time.Millisecond)
 		}
 	}
 	return nil
