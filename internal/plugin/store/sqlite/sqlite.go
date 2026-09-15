@@ -101,11 +101,6 @@ func (m *sqliteMigrator) Migrate(ctx context.Context) error {
 	); err != nil {
 		return fmt.Errorf("migration: seed built-in default memory kind: %w", err)
 	}
-	if handle.fts5Enabled {
-		if _, err := handle.sqlDB.ExecContext(ctx, ftsSchemaSQL); err != nil {
-			return fmt.Errorf("migration: failed to execute fts schema: %w", err)
-		}
-	}
 	// Schema reconciliation: ADD COLUMN IF NOT EXISTS is not supported in SQLite,
 	// so we attempt the ALTER and ignore "duplicate column name" errors.
 	if _, err := handle.sqlDB.ExecContext(ctx,
@@ -114,11 +109,81 @@ func (m *sqliteMigrator) Migrate(ctx context.Context) error {
 			return fmt.Errorf("migration: failed to add created_at_unix_ms column: %w", err)
 		}
 	}
+	if err := backfillSQLiteEntryCreatedAtUnixMS(ctx, handle.sqlDB); err != nil {
+		return err
+	}
 	if _, err := handle.sqlDB.ExecContext(ctx,
 		`CREATE INDEX IF NOT EXISTS idx_entries_created_at_unix_ms ON entries(created_at_unix_ms)`); err != nil {
 		return fmt.Errorf("migration: failed to create idx_entries_created_at_unix_ms index: %w", err)
 	}
+	if handle.fts5Enabled {
+		if _, err := handle.sqlDB.ExecContext(ctx, ftsSchemaSQL); err != nil {
+			return fmt.Errorf("migration: failed to execute fts schema: %w", err)
+		}
+	}
 	log.Info("SQLite schema migration complete", "fts5Enabled", handle.fts5Enabled)
+	return nil
+}
+
+func backfillSQLiteEntryCreatedAtUnixMS(ctx context.Context, db *sql.DB) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("migration: begin created_at_unix_ms backfill: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	type pendingEntry struct {
+		rowID     int64
+		createdAt time.Time
+	}
+	for {
+		rows, err := tx.QueryContext(ctx, `
+			SELECT rowid, created_at
+			FROM entries
+			WHERE created_at_unix_ms IS NULL
+			LIMIT 1000
+		`)
+		if err != nil {
+			return fmt.Errorf("migration: query entries for created_at_unix_ms backfill: %w", err)
+		}
+
+		batch := make([]pendingEntry, 0, 1000)
+		for rows.Next() {
+			var entry pendingEntry
+			if err := rows.Scan(&entry.rowID, &entry.createdAt); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("migration: scan entry for created_at_unix_ms backfill: %w", err)
+			}
+			if entry.createdAt.IsZero() {
+				_ = rows.Close()
+				return fmt.Errorf("migration: entry rowid %d has invalid created_at", entry.rowID)
+			}
+			batch = append(batch, entry)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("migration: iterate entries for created_at_unix_ms backfill: %w", err)
+		}
+		if err := rows.Close(); err != nil {
+			return fmt.Errorf("migration: close created_at_unix_ms backfill rows: %w", err)
+		}
+		if len(batch) == 0 {
+			break
+		}
+
+		for _, entry := range batch {
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE entries SET created_at_unix_ms = ? WHERE rowid = ? AND created_at_unix_ms IS NULL`,
+				entry.createdAt.UTC().UnixMilli(), entry.rowID,
+			); err != nil {
+				return fmt.Errorf("migration: backfill created_at_unix_ms for entry rowid %d: %w", entry.rowID, err)
+			}
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("migration: commit created_at_unix_ms backfill: %w", err)
+	}
 	return nil
 }
 

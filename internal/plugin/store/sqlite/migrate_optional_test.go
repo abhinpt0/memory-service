@@ -6,7 +6,9 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/chirino/memory-service/internal/config"
 	registryepisodic "github.com/chirino/memory-service/internal/registry/episodic"
@@ -72,6 +74,56 @@ func TestSQLiteMigratorCreatesCoreTablesWithoutOptionalExtensions(t *testing.T) 
 		require.NoError(t, err, table)
 		require.Equal(t, int64(1), count, table)
 	}
+}
+
+func TestSQLiteMigratorBackfillsEntryCreatedAtUnixMS(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "memory.db")
+	legacy, err := sql.Open("sqlite3", dbPath)
+	require.NoError(t, err)
+	legacySchema := strings.Replace(schemaSQL, "    created_at_unix_ms INTEGER,\n", "", 1)
+	require.NotEqual(t, schemaSQL, legacySchema)
+	_, err = legacy.Exec(legacySchema)
+	require.NoError(t, err)
+
+	createdAt := time.Date(2026, time.January, 2, 3, 4, 5, 678999999, time.FixedZone("UTC-5", -5*60*60))
+	_, err = legacy.Exec(`
+		INSERT INTO conversation_groups (id) VALUES ('group-1');
+		INSERT INTO conversations (
+			id, owner_user_id, client_id, conversation_group_id
+		) VALUES ('conversation-1', 'alice', 'test-client', 'group-1');
+		INSERT INTO entries (
+			id, conversation_id, conversation_group_id, channel, content_type, content, created_at
+		) VALUES ('entry-1', 'conversation-1', 'group-1', 'history', 'history', '[]', ?);
+	`, createdAt)
+	require.NoError(t, err)
+	require.NoError(t, legacy.Close())
+
+	cfg := &config.Config{
+		DatastoreType:           "sqlite",
+		DBURL:                   dbPath,
+		DatastoreMigrateAtStart: true,
+	}
+	ctx := config.WithContext(context.Background(), cfg)
+	require.NoError(t, (&sqliteMigrator{}).Migrate(ctx))
+
+	db, _, err := SharedDB(ctx)
+	require.NoError(t, err)
+	var unixMS int64
+	require.NoError(t, db.Raw(
+		"SELECT created_at_unix_ms FROM entries WHERE id = ?",
+		"entry-1",
+	).Scan(&unixMS).Error)
+	require.Equal(t, createdAt.UnixMilli(), unixMS)
+
+	require.NoError(t, (&sqliteMigrator{}).Migrate(ctx))
+	var unixMSAfterSecondMigration int64
+	require.NoError(t, db.Raw(
+		"SELECT created_at_unix_ms FROM entries WHERE id = ?",
+		"entry-1",
+	).Scan(&unixMSAfterSecondMigration).Error)
+	require.Equal(t, unixMS, unixMSAfterSecondMigration)
 }
 
 func TestSQLiteMigratorDropsObsoleteMemoryKindDefaults(t *testing.T) {

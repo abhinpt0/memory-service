@@ -139,8 +139,9 @@ directions:
 
 `afterCursor`, `beforeCursor`, and `tail=true` are mutually exclusive. Invalid
 combinations or an invalid/invisible `beforeCursor` return `400 Bad Request`.
-Channel, fork ancestry, epoch, `upToEntryId`, and `fromSeq` filters are applied
-before the page is selected.
+Channel, fork ancestry, epoch, `upToEntryId`, `fromSeq`, `createdAt`,
+`createdAtAfter`, and `createdAtBefore` filters are applied before the page is
+selected.
 
 ### First page
 

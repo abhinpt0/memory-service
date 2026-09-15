@@ -2,7 +2,7 @@
 status: implemented
 ---
 
-# Enhancement 116: CreatedAt Date Filtering for Entries API
+# Enhancement 116: `createdAt` date filtering for the entries API
 
 > **Status**: Implemented.
 
@@ -55,7 +55,7 @@ Fields added to `contracts/protobuf/memory/v1/memory_service.proto`:
   - `Eq`: exact equality (`= ?`)
   - `After`: lower bound (`>= ?`)
   - `Before`: upper bound (`<= ?`)
-- **SQLite**: uses a companion `created_at_unix_ms INTEGER` column (milliseconds since Unix epoch) so that timezone-offset-bearing `DATETIME` text values compare as instants. The `BoundedQuery.SQLite` flag enables this path. `created_at_unix_ms` is populated on every entry insert and on every `SetEntryCreatedAt` / `SetConversationEntriesCreatedAt` test-helper call.
+- **SQLite**: uses a companion `created_at_unix_ms INTEGER` column (milliseconds since Unix epoch) so that timezone-offset-bearing `DATETIME` text values compare as instants. The `BoundedQuery.SQLite` flag enables this path. Entry writes and test helpers populate the column. Startup migration backfills older rows in batches before it creates the index and reconciles the FTS schema.
 - **PostgreSQL**: queries the native `TIMESTAMPTZ` column directly; no companion column needed.
 - Applied to both bounded scanning queries (`BoundedQuery.CreatedAtFilter`) and fallback/unbounded queries in `internal/plugin/store/postgres` and `internal/plugin/store/sqlite`.
 - In-memory `FilterEntriesByCreatedAt` applied when scanning ancestor branches across fork trees to ensure bounded scans discard non-matching rows.
@@ -82,6 +82,7 @@ Fields added to `contracts/protobuf/memory/v1/memory_service.proto`:
   - gRPC `created_at_eq` exact match.
   - gRPC `created_at_after` + `created_at_before` range match.
   - gRPC `INVALID_ARGUMENT` rejection when combining `created_at_eq` with range parameters.
+- `internal/plugin/store/sqlite/migrate_optional_test.go` verifies that migration backfills an entry written before `created_at_unix_ms` existed. The timestamp includes fractional seconds and a non-UTC offset.
 
 ## Tasks
 
@@ -94,8 +95,9 @@ Fields added to `contracts/protobuf/memory/v1/memory_service.proto`:
 - [x] Accept RFC 3339 Nano (sub-second) timestamps in REST handlers (`parseTimestamp` helper)
 - [x] Add live API verification curl tests
 - [x] Add BDD tests and step definitions for REST and gRPC
-- [x] Write enhancement document `docs/enhancements/116-createdAt-entry-filter.md`
+- [x] Move the completed enhancement document to `docs/enhancements/implemented/116-createdAt-entry-filter.md`
 - [x] Fix SQLite timestamp correctness: add `created_at_unix_ms INTEGER` companion column; use integer comparisons in `ApplyCreatedAtFilter` when `SQLite=true`
+- [x] Backfill `created_at_unix_ms` during SQLite startup migration
 - [x] Validate protobuf `Timestamp` fields with `CheckValid()` before `AsTime()` in both gRPC handlers
 - [x] Add admin gRPC BDD scenario and invalid-timestamp rejection scenario to `entries-created-at-filter-grpc.feature`
 - [x] Add offset-equivalence BDD scenario to `entries-created-at-filter-rest.feature`
@@ -111,7 +113,8 @@ Fields added to `contracts/protobuf/memory/v1/memory_service.proto`:
 | `internal/registry/store/plugin.go` | Added `CreatedAtFilter` to `EntryListQuery` and `AdminMessageQuery` |
 | `internal/plugin/store/sqlentry/pager.go` | Added `ApplyCreatedAtFilter` and `FilterEntriesByCreatedAt` |
 | `internal/plugin/store/postgres/postgres.go` | Wired `CreatedAtFilter` through Postgres queries |
-| `internal/plugin/store/sqlite/sqlite.go` | Wired `CreatedAtFilter` through SQLite queries |
+| `internal/plugin/store/sqlite/sqlite.go` | Wired `CreatedAtFilter` through SQLite queries and backfilled `created_at_unix_ms` during migration |
+| `internal/plugin/store/sqlite/migrate_optional_test.go` | Verified the SQLite timestamp backfill and repeated migration |
 | `internal/plugin/store/mongo/mongo.go` | Wired `CreatedAtFilter` through Mongo queries |
 | `internal/plugin/route/entries/entries.go` | Handled `createdAt` params, parsing, and validation |
 | `internal/plugin/route/admin/admin.go` | Handled admin `createdAt` params, parsing, and validation |
@@ -123,7 +126,7 @@ Fields added to `contracts/protobuf/memory/v1/memory_service.proto`:
 | `internal/bdd/steps_entries.go` | Added `entry "..." has createdAt "..."` step definition |
 | `internal/bdd/testdata/features/entries-created-at-filter-rest.feature` | Added REST BDD feature |
 | `internal/bdd/testdata/features-grpc/entries-created-at-filter-grpc.feature` | Added gRPC BDD feature |
-| `docs/enhancements/116-createdAt-entry-filter.md` | Created enhancement document |
+| `docs/enhancements/implemented/116-createdAt-entry-filter.md` | Recorded the implemented design and verification |
 
 ## Verification
 
@@ -131,7 +134,10 @@ Fields added to `contracts/protobuf/memory/v1/memory_service.proto`:
 # Verify codegen and compilation
 go generate .
 go build ./...
+./java/mvnw -f java/pom.xml compile
 
-# Run focused BDD tests
+# Run focused tests
+go test -tags 'sqlite_fts5' ./internal/plugin/store/sqlite -count=1
 go test -tags 'sqlite_fts5 auth_testfixtures' ./internal/bdd -run 'TestFeaturesSQLite/(entries-created-at-filter-rest|entries-created-at-filter-grpc)$' -count=1
+task test:site
 ```
