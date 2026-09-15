@@ -101,6 +101,21 @@ func (m *sqliteMigrator) Migrate(ctx context.Context) error {
 	); err != nil {
 		return fmt.Errorf("migration: seed built-in default memory kind: %w", err)
 	}
+	// Schema reconciliation: ADD COLUMN IF NOT EXISTS is not supported in SQLite,
+	// so we attempt the ALTER and ignore "duplicate column name" errors.
+	if _, err := handle.sqlDB.ExecContext(ctx,
+		`ALTER TABLE entries ADD COLUMN created_at_unix_ms INTEGER`); err != nil {
+		if !isSQLiteDuplicateColumnError(err) {
+			return fmt.Errorf("migration: failed to add created_at_unix_ms column: %w", err)
+		}
+	}
+	if err := backfillSQLiteEntryCreatedAtUnixMS(ctx, handle.sqlDB); err != nil {
+		return err
+	}
+	if _, err := handle.sqlDB.ExecContext(ctx,
+		`CREATE INDEX IF NOT EXISTS idx_entries_created_at_unix_ms ON entries(created_at_unix_ms)`); err != nil {
+		return fmt.Errorf("migration: failed to create idx_entries_created_at_unix_ms index: %w", err)
+	}
 	if handle.fts5Enabled {
 		if _, err := handle.sqlDB.ExecContext(ctx, ftsSchemaSQL); err != nil {
 			return fmt.Errorf("migration: failed to execute fts schema: %w", err)
@@ -108,6 +123,77 @@ func (m *sqliteMigrator) Migrate(ctx context.Context) error {
 	}
 	log.Info("SQLite schema migration complete", "fts5Enabled", handle.fts5Enabled)
 	return nil
+}
+
+func backfillSQLiteEntryCreatedAtUnixMS(ctx context.Context, db *sql.DB) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("migration: begin created_at_unix_ms backfill: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	type pendingEntry struct {
+		rowID     int64
+		createdAt time.Time
+	}
+	for {
+		rows, err := tx.QueryContext(ctx, `
+			SELECT rowid, created_at
+			FROM entries
+			WHERE created_at_unix_ms IS NULL
+			LIMIT 1000
+		`)
+		if err != nil {
+			return fmt.Errorf("migration: query entries for created_at_unix_ms backfill: %w", err)
+		}
+
+		batch := make([]pendingEntry, 0, 1000)
+		for rows.Next() {
+			var entry pendingEntry
+			if err := rows.Scan(&entry.rowID, &entry.createdAt); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("migration: scan entry for created_at_unix_ms backfill: %w", err)
+			}
+			if entry.createdAt.IsZero() {
+				_ = rows.Close()
+				return fmt.Errorf("migration: entry rowid %d has invalid created_at", entry.rowID)
+			}
+			batch = append(batch, entry)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("migration: iterate entries for created_at_unix_ms backfill: %w", err)
+		}
+		if err := rows.Close(); err != nil {
+			return fmt.Errorf("migration: close created_at_unix_ms backfill rows: %w", err)
+		}
+		if len(batch) == 0 {
+			break
+		}
+
+		for _, entry := range batch {
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE entries SET created_at_unix_ms = ? WHERE rowid = ? AND created_at_unix_ms IS NULL`,
+				entry.createdAt.UTC().UnixMilli(), entry.rowID,
+			); err != nil {
+				return fmt.Errorf("migration: backfill created_at_unix_ms for entry rowid %d: %w", entry.rowID, err)
+			}
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("migration: commit created_at_unix_ms backfill: %w", err)
+	}
+	return nil
+}
+
+// isSQLiteDuplicateColumnError returns true when err is a SQLite "duplicate column name" error,
+// which is returned when attempting ALTER TABLE ADD COLUMN on a column that already exists.
+func isSQLiteDuplicateColumnError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "duplicate column name")
 }
 
 func sqliteRequireCurrentSchemaOrEmpty(ctx context.Context, db *sql.DB) error {
@@ -1371,6 +1457,7 @@ func (s *SQLiteStore) GetEntries(ctx context.Context, userID string, conversatio
 	fromSeq := query.FromSeq
 	channel := query.Channel
 	epochFilter := query.EpochFilter
+	createdAtFilter := query.CreatedAtFilter
 
 	// channel==nil means "all channels" (agent without filter).
 	// Determine effective channel for filtering.
@@ -1387,7 +1474,7 @@ func (s *SQLiteStore) GetEntries(ctx context.Context, userID string, conversatio
 	}
 
 	if allForks && effectiveChannel == model.ChannelHistory {
-		page, afterCursor, beforeCursor, err := s.boundedGroupHistory(ctx, conv.ConversationGroupID, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit)
+		page, afterCursor, beforeCursor, err := s.boundedGroupHistory(ctx, conv.ConversationGroupID, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit, createdAtFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -1398,7 +1485,7 @@ func (s *SQLiteStore) GetEntries(ctx context.Context, userID string, conversatio
 	}
 
 	if allForks && effectiveChannel == model.ChannelContext {
-		page, afterCursor, beforeCursor, err := s.boundedGroupContext(ctx, conv.ConversationGroupID, clientID, epochFilter, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit)
+		page, afterCursor, beforeCursor, err := s.boundedGroupContext(ctx, conv.ConversationGroupID, clientID, epochFilter, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit, createdAtFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -1409,7 +1496,7 @@ func (s *SQLiteStore) GetEntries(ctx context.Context, userID string, conversatio
 	}
 
 	if allForks && effectiveChannel == model.ChannelJournal {
-		page, afterCursor, beforeCursor, err := s.boundedGroupChannel(ctx, conv.ConversationGroupID, model.ChannelJournal, clientID, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit)
+		page, afterCursor, beforeCursor, err := s.boundedGroupChannel(ctx, conv.ConversationGroupID, model.ChannelJournal, clientID, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit, createdAtFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -1420,7 +1507,7 @@ func (s *SQLiteStore) GetEntries(ctx context.Context, userID string, conversatio
 	}
 
 	if allForks && effectiveChannel == "" {
-		page, afterCursor, beforeCursor, err := s.boundedGroupAllChannels(ctx, conv.ConversationGroupID, clientID, true, epochFilter, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit)
+		page, afterCursor, beforeCursor, err := s.boundedGroupAllChannels(ctx, conv.ConversationGroupID, clientID, true, epochFilter, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit, createdAtFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -1444,6 +1531,9 @@ func (s *SQLiteStore) GetEntries(ctx context.Context, userID string, conversatio
 		if fromSeq != nil {
 			entries = filterEntriesByFromSeq(entries, *fromSeq)
 		}
+		if createdAtFilter != nil {
+			entries = sqlentry.FilterEntriesByCreatedAt(entries, createdAtFilter)
+		}
 		page, afterCursor, beforeCursor, err := registrystore.PaginateEntries(entries, afterEntryID, beforeEntryID, tail, limit)
 		if err != nil {
 			return nil, &registrystore.BadRequestError{Message: err.Error()}
@@ -1460,7 +1550,7 @@ func (s *SQLiteStore) GetEntries(ctx context.Context, userID string, conversatio
 	}
 
 	if effectiveChannel == model.ChannelHistory && !allForks {
-		page, afterCursor, beforeCursor, err := s.boundedVisibleHistory(ctx, conv, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit)
+		page, afterCursor, beforeCursor, err := s.boundedVisibleHistory(ctx, conv, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit, createdAtFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -1471,7 +1561,7 @@ func (s *SQLiteStore) GetEntries(ctx context.Context, userID string, conversatio
 	}
 
 	if effectiveChannel == model.ChannelContext && !allForks {
-		page, afterCursor, beforeCursor, err := s.boundedVisibleContext(ctx, conv, clientID, epochFilter, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit)
+		page, afterCursor, beforeCursor, err := s.boundedVisibleContext(ctx, conv, clientID, epochFilter, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit, createdAtFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -1482,7 +1572,7 @@ func (s *SQLiteStore) GetEntries(ctx context.Context, userID string, conversatio
 	}
 
 	if effectiveChannel == model.ChannelJournal && !allForks {
-		page, afterCursor, beforeCursor, err := s.boundedVisibleChannel(ctx, conv, model.ChannelJournal, clientID, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit)
+		page, afterCursor, beforeCursor, err := s.boundedVisibleChannel(ctx, conv, model.ChannelJournal, clientID, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit, createdAtFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -1493,7 +1583,7 @@ func (s *SQLiteStore) GetEntries(ctx context.Context, userID string, conversatio
 	}
 
 	if effectiveChannel == "" && !allForks {
-		page, afterCursor, beforeCursor, err := s.boundedVisibleAllChannels(ctx, conv, clientID, true, epochFilter, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit)
+		page, afterCursor, beforeCursor, err := s.boundedVisibleAllChannels(ctx, conv, clientID, true, epochFilter, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit, createdAtFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -1787,6 +1877,10 @@ func (s *SQLiteStore) appendEntries(ctx context.Context, userID string, conversa
 			}
 			return nil, fmt.Errorf("failed to append entry: %w", err)
 		}
+		if err := db.Exec("UPDATE entries SET created_at_unix_ms = ? WHERE id = ? AND conversation_group_id = ?",
+			entry.CreatedAt.UTC().UnixMilli(), entry.ID.String(), entry.ConversationGroupID.String()).Error; err != nil {
+			return nil, fmt.Errorf("failed to set created_at_unix_ms: %w", err)
+		}
 		entry.Content = req.Content // return unencrypted
 		result[i] = entry
 	}
@@ -1989,6 +2083,10 @@ func (s *SQLiteStore) SyncAgentEntry(ctx context.Context, userID string, convers
 			return nil, registrystore.NewDuplicateSequenceConflict()
 		}
 		return nil, fmt.Errorf("failed to sync entry: %w", err)
+	}
+	if err := db.Exec("UPDATE entries SET created_at_unix_ms = ? WHERE id = ? AND conversation_group_id = ?",
+		newEntry.CreatedAt.UTC().UnixMilli(), newEntry.ID.String(), newEntry.ConversationGroupID.String()).Error; err != nil {
+		return nil, fmt.Errorf("failed to set created_at_unix_ms on sync entry: %w", err)
 	}
 	newEntry.Content = appendContent
 	s.warmEntriesCache(ctx, conv, ancestry, clientID, valueOrEmpty(agentID))
@@ -2569,7 +2667,7 @@ func (s *SQLiteStore) AdminGetEntries(ctx context.Context, conversationID string
 
 	var err error
 	if query.AllForks && query.Channel != nil && *query.Channel == model.ChannelHistory {
-		page, afterCursor, beforeCursor, err := s.boundedGroupHistory(ctx, conv.ConversationGroupID, query.FromSeq, query.UpToEntryID, query.AfterCursor, query.BeforeCursor, query.Tail, limit)
+		page, afterCursor, beforeCursor, err := s.boundedGroupHistory(ctx, conv.ConversationGroupID, query.FromSeq, query.UpToEntryID, query.AfterCursor, query.BeforeCursor, query.Tail, limit, query.CreatedAtFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -2584,7 +2682,7 @@ func (s *SQLiteStore) AdminGetEntries(ctx context.Context, conversationID string
 		if epochFilter == nil {
 			epochFilter = &registrystore.MemoryEpochFilter{Mode: registrystore.MemoryEpochModeAll}
 		}
-		page, afterCursor, beforeCursor, err := s.boundedGroupContext(ctx, conv.ConversationGroupID, nil, epochFilter, query.FromSeq, query.UpToEntryID, query.AfterCursor, query.BeforeCursor, query.Tail, limit)
+		page, afterCursor, beforeCursor, err := s.boundedGroupContext(ctx, conv.ConversationGroupID, nil, epochFilter, query.FromSeq, query.UpToEntryID, query.AfterCursor, query.BeforeCursor, query.Tail, limit, query.CreatedAtFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -2595,7 +2693,7 @@ func (s *SQLiteStore) AdminGetEntries(ctx context.Context, conversationID string
 	}
 
 	if query.AllForks && query.Channel != nil && *query.Channel == model.ChannelJournal {
-		page, afterCursor, beforeCursor, err := s.boundedGroupChannel(ctx, conv.ConversationGroupID, model.ChannelJournal, nil, query.FromSeq, query.UpToEntryID, query.AfterCursor, query.BeforeCursor, query.Tail, limit)
+		page, afterCursor, beforeCursor, err := s.boundedGroupChannel(ctx, conv.ConversationGroupID, model.ChannelJournal, nil, query.FromSeq, query.UpToEntryID, query.AfterCursor, query.BeforeCursor, query.Tail, limit, query.CreatedAtFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -2606,7 +2704,7 @@ func (s *SQLiteStore) AdminGetEntries(ctx context.Context, conversationID string
 	}
 
 	if query.AllForks && query.Channel == nil {
-		page, afterCursor, beforeCursor, err := s.boundedGroupAllChannels(ctx, conv.ConversationGroupID, nil, false, query.EpochFilter, query.FromSeq, query.UpToEntryID, query.AfterCursor, query.BeforeCursor, query.Tail, limit)
+		page, afterCursor, beforeCursor, err := s.boundedGroupAllChannels(ctx, conv.ConversationGroupID, nil, false, query.EpochFilter, query.FromSeq, query.UpToEntryID, query.AfterCursor, query.BeforeCursor, query.Tail, limit, query.CreatedAtFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -2617,7 +2715,7 @@ func (s *SQLiteStore) AdminGetEntries(ctx context.Context, conversationID string
 	}
 
 	if !query.AllForks && query.Channel != nil && *query.Channel == model.ChannelHistory {
-		page, afterCursor, beforeCursor, err := s.boundedVisibleHistory(ctx, conv, query.FromSeq, query.UpToEntryID, query.AfterCursor, query.BeforeCursor, query.Tail, limit)
+		page, afterCursor, beforeCursor, err := s.boundedVisibleHistory(ctx, conv, query.FromSeq, query.UpToEntryID, query.AfterCursor, query.BeforeCursor, query.Tail, limit, query.CreatedAtFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -2632,7 +2730,7 @@ func (s *SQLiteStore) AdminGetEntries(ctx context.Context, conversationID string
 		if epochFilter == nil {
 			epochFilter = &registrystore.MemoryEpochFilter{Mode: registrystore.MemoryEpochModeAll}
 		}
-		page, afterCursor, beforeCursor, err := s.boundedVisibleContext(ctx, conv, nil, epochFilter, query.FromSeq, query.UpToEntryID, query.AfterCursor, query.BeforeCursor, query.Tail, limit)
+		page, afterCursor, beforeCursor, err := s.boundedVisibleContext(ctx, conv, nil, epochFilter, query.FromSeq, query.UpToEntryID, query.AfterCursor, query.BeforeCursor, query.Tail, limit, query.CreatedAtFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -2643,7 +2741,7 @@ func (s *SQLiteStore) AdminGetEntries(ctx context.Context, conversationID string
 	}
 
 	if !query.AllForks && query.Channel != nil && *query.Channel == model.ChannelJournal {
-		page, afterCursor, beforeCursor, err := s.boundedVisibleChannel(ctx, conv, model.ChannelJournal, nil, query.FromSeq, query.UpToEntryID, query.AfterCursor, query.BeforeCursor, query.Tail, limit)
+		page, afterCursor, beforeCursor, err := s.boundedVisibleChannel(ctx, conv, model.ChannelJournal, nil, query.FromSeq, query.UpToEntryID, query.AfterCursor, query.BeforeCursor, query.Tail, limit, query.CreatedAtFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -2654,7 +2752,7 @@ func (s *SQLiteStore) AdminGetEntries(ctx context.Context, conversationID string
 	}
 
 	if !query.AllForks && query.Channel == nil {
-		page, afterCursor, beforeCursor, err := s.boundedVisibleAllChannels(ctx, conv, nil, false, query.EpochFilter, query.FromSeq, query.UpToEntryID, query.AfterCursor, query.BeforeCursor, query.Tail, limit)
+		page, afterCursor, beforeCursor, err := s.boundedVisibleAllChannels(ctx, conv, nil, false, query.EpochFilter, query.FromSeq, query.UpToEntryID, query.AfterCursor, query.BeforeCursor, query.Tail, limit, query.CreatedAtFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -2699,6 +2797,9 @@ func (s *SQLiteStore) AdminGetEntries(ctx context.Context, conversationID string
 	}
 	if query.FromSeq != nil {
 		filtered = filterEntriesByFromSeq(filtered, *query.FromSeq)
+	}
+	if query.CreatedAtFilter != nil {
+		filtered = sqlentry.FilterEntriesByCreatedAt(filtered, query.CreatedAtFilter)
 	}
 
 	page, afterCursor, beforeCursor, err := registrystore.PaginateEntries(filtered, query.AfterCursor, query.BeforeCursor, query.Tail, limit)
@@ -3620,7 +3721,7 @@ func (s *SQLiteStore) groupAllChannelsQuery(ctx context.Context, groupID uuid.UU
 	return tx.Where("(e.channel NOT IN ? OR e.client_id = ?)", scopedChannels, *clientID)
 }
 
-func (s *SQLiteStore) runBoundedSQLQuery(ctx context.Context, base *gorm.DB, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int, upToLookup sqlentry.LookupFunc, transform func(*gorm.DB) (*gorm.DB, error), scanErr string) ([]model.Entry, *string, *string, error) {
+func (s *SQLiteStore) runBoundedSQLQuery(ctx context.Context, base *gorm.DB, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int, upToLookup sqlentry.LookupFunc, transform func(*gorm.DB) (*gorm.DB, error), createdAtFilter *registrystore.CreatedAtFilter, scanErr string) ([]model.Entry, *string, *string, error) {
 	return sqlentry.RunBoundedQuery(ctx, sqlentry.BoundedQuery{
 		Base:             base,
 		FromSeq:          fromSeq,
@@ -3639,73 +3740,75 @@ func (s *SQLiteStore) runBoundedSQLQuery(ctx context.Context, base *gorm.DB, fro
 		EntryNotFound: func(entryID string) error {
 			return &registrystore.NotFoundError{Resource: "entry", ID: entryID}
 		},
-		EntryIDValue: sqlentry.UUIDStringValue,
-		ScanErr:      scanErr,
+		EntryIDValue:    sqlentry.UUIDStringValue,
+		ScanErr:         scanErr,
+		CreatedAtFilter: createdAtFilter,
+		SQLite:          true,
 	})
 }
 
-func (s *SQLiteStore) boundedVisibleHistory(ctx context.Context, conv model.Conversation, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int) ([]model.Entry, *string, *string, error) {
+func (s *SQLiteStore) boundedVisibleHistory(ctx context.Context, conv model.Conversation, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int, createdAtFilter *registrystore.CreatedAtFilter) ([]model.Entry, *string, *string, error) {
 	base := s.visibleHistoryEntriesQuery(ctx, conv)
 	return s.runBoundedSQLQuery(ctx, base, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit, func(entryID string) (model.Entry, bool, error) {
 		return s.visibleEntryByID(ctx, conv, entryID)
-	}, nil, "bounded history scan failed")
+	}, nil, createdAtFilter, "bounded history scan failed")
 }
 
-func (s *SQLiteStore) boundedVisibleContext(ctx context.Context, conv model.Conversation, clientID *string, epochFilter *registrystore.MemoryEpochFilter, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int) ([]model.Entry, *string, *string, error) {
+func (s *SQLiteStore) boundedVisibleContext(ctx context.Context, conv model.Conversation, clientID *string, epochFilter *registrystore.MemoryEpochFilter, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int, createdAtFilter *registrystore.CreatedAtFilter) ([]model.Entry, *string, *string, error) {
 	base := s.visibleChannelEntriesQuery(ctx, conv, model.ChannelContext, clientID)
 	return s.runBoundedSQLQuery(ctx, base, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit, func(entryID string) (model.Entry, bool, error) {
 		return s.visibleEntryByID(ctx, conv, entryID)
 	}, func(base *gorm.DB) (*gorm.DB, error) {
 		return sqlentry.ApplyEpochFilter(base, epochFilter, true, "failed to get latest context epoch")
-	}, "bounded context scan failed")
+	}, createdAtFilter, "bounded context scan failed")
 }
 
-func (s *SQLiteStore) boundedVisibleChannel(ctx context.Context, conv model.Conversation, channel model.Channel, clientID *string, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int) ([]model.Entry, *string, *string, error) {
+func (s *SQLiteStore) boundedVisibleChannel(ctx context.Context, conv model.Conversation, channel model.Channel, clientID *string, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int, createdAtFilter *registrystore.CreatedAtFilter) ([]model.Entry, *string, *string, error) {
 	base := s.visibleChannelEntriesQuery(ctx, conv, channel, clientID)
 	return s.runBoundedSQLQuery(ctx, base, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit, func(entryID string) (model.Entry, bool, error) {
 		return s.visibleEntryByID(ctx, conv, entryID)
-	}, nil, "bounded channel scan failed")
+	}, nil, createdAtFilter, "bounded channel scan failed")
 }
 
-func (s *SQLiteStore) boundedVisibleAllChannels(ctx context.Context, conv model.Conversation, clientID *string, suppressScopedWithoutClient bool, epochFilter *registrystore.MemoryEpochFilter, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int) ([]model.Entry, *string, *string, error) {
+func (s *SQLiteStore) boundedVisibleAllChannels(ctx context.Context, conv model.Conversation, clientID *string, suppressScopedWithoutClient bool, epochFilter *registrystore.MemoryEpochFilter, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int, createdAtFilter *registrystore.CreatedAtFilter) ([]model.Entry, *string, *string, error) {
 	base := s.visibleAllChannelsQuery(ctx, conv, clientID, suppressScopedWithoutClient)
 	return s.runBoundedSQLQuery(ctx, base, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit, func(entryID string) (model.Entry, bool, error) {
 		return s.visibleEntryByID(ctx, conv, entryID)
 	}, func(base *gorm.DB) (*gorm.DB, error) {
 		return applySQLEpochFilterToBase(base, epochFilter)
-	}, "bounded all-channel scan failed")
+	}, createdAtFilter, "bounded all-channel scan failed")
 }
 
-func (s *SQLiteStore) boundedGroupHistory(ctx context.Context, groupID uuid.UUID, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int) ([]model.Entry, *string, *string, error) {
+func (s *SQLiteStore) boundedGroupHistory(ctx context.Context, groupID uuid.UUID, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int, createdAtFilter *registrystore.CreatedAtFilter) ([]model.Entry, *string, *string, error) {
 	base := s.groupHistoryEntriesQuery(ctx, groupID, nil)
 	return s.runBoundedSQLQuery(ctx, base, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit, func(entryID string) (model.Entry, bool, error) {
 		return s.groupEntryByID(ctx, groupID, entryID)
-	}, nil, "bounded group history scan failed")
+	}, nil, createdAtFilter, "bounded group history scan failed")
 }
 
-func (s *SQLiteStore) boundedGroupContext(ctx context.Context, groupID uuid.UUID, clientID *string, epochFilter *registrystore.MemoryEpochFilter, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int) ([]model.Entry, *string, *string, error) {
+func (s *SQLiteStore) boundedGroupContext(ctx context.Context, groupID uuid.UUID, clientID *string, epochFilter *registrystore.MemoryEpochFilter, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int, createdAtFilter *registrystore.CreatedAtFilter) ([]model.Entry, *string, *string, error) {
 	base := s.groupChannelEntriesQuery(ctx, groupID, model.ChannelContext, clientID)
 	return s.runBoundedSQLQuery(ctx, base, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit, func(entryID string) (model.Entry, bool, error) {
 		return s.groupEntryByID(ctx, groupID, entryID)
 	}, func(base *gorm.DB) (*gorm.DB, error) {
 		return sqlentry.ApplyEpochFilter(base, epochFilter, true, "failed to get latest context epoch")
-	}, "bounded group context scan failed")
+	}, createdAtFilter, "bounded group context scan failed")
 }
 
-func (s *SQLiteStore) boundedGroupChannel(ctx context.Context, groupID uuid.UUID, channel model.Channel, clientID *string, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int) ([]model.Entry, *string, *string, error) {
+func (s *SQLiteStore) boundedGroupChannel(ctx context.Context, groupID uuid.UUID, channel model.Channel, clientID *string, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int, createdAtFilter *registrystore.CreatedAtFilter) ([]model.Entry, *string, *string, error) {
 	base := s.groupChannelEntriesQuery(ctx, groupID, channel, clientID)
 	return s.runBoundedSQLQuery(ctx, base, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit, func(entryID string) (model.Entry, bool, error) {
 		return s.groupEntryByID(ctx, groupID, entryID)
-	}, nil, "bounded group channel scan failed")
+	}, nil, createdAtFilter, "bounded group channel scan failed")
 }
 
-func (s *SQLiteStore) boundedGroupAllChannels(ctx context.Context, groupID uuid.UUID, clientID *string, suppressScopedWithoutClient bool, epochFilter *registrystore.MemoryEpochFilter, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int) ([]model.Entry, *string, *string, error) {
+func (s *SQLiteStore) boundedGroupAllChannels(ctx context.Context, groupID uuid.UUID, clientID *string, suppressScopedWithoutClient bool, epochFilter *registrystore.MemoryEpochFilter, fromSeq *uint32, upToEntryID, afterEntryID, beforeEntryID *string, tail bool, limit int, createdAtFilter *registrystore.CreatedAtFilter) ([]model.Entry, *string, *string, error) {
 	base := s.groupAllChannelsQuery(ctx, groupID, clientID, suppressScopedWithoutClient)
 	return s.runBoundedSQLQuery(ctx, base, fromSeq, upToEntryID, afterEntryID, beforeEntryID, tail, limit, func(entryID string) (model.Entry, bool, error) {
 		return s.groupEntryByID(ctx, groupID, entryID)
 	}, func(base *gorm.DB) (*gorm.DB, error) {
 		return applySQLEpochFilterToBase(base, epochFilter)
-	}, "bounded group all-channel scan failed")
+	}, createdAtFilter, "bounded group all-channel scan failed")
 }
 
 func (s *SQLiteStore) buildAncestryStack(ctx context.Context, target model.Conversation) ([]forkAncestor, error) {

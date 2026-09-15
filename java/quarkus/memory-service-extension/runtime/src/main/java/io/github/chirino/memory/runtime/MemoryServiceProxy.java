@@ -180,7 +180,10 @@ public class MemoryServiceProxy {
                                         options.channel(),
                                         options.epoch(),
                                         options.fromSeq(),
-                                        options.forks()),
+                                        options.forks(),
+                                        null,
+                                        null,
+                                        null),
                 OK,
                 "Error listing entries for history %s",
                 conversationId);

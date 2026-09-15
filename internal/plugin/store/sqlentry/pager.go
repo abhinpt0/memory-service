@@ -39,6 +39,52 @@ type BoundedQuery struct {
 	EntryNotFound    func(string) error
 	EntryIDValue     EntryIDValueFunc
 	ScanErr          string
+	CreatedAtFilter  *registrystore.CreatedAtFilter
+	// SQLite signals that ApplyCreatedAtFilter should use the integer
+	// created_at_unix_ms column instead of the DATETIME text column.
+	SQLite bool
+}
+
+// ApplyCreatedAtFilter appends timestamp predicates to base.
+// When sqlite is true the integer companion column created_at_unix_ms is used
+// (milliseconds since Unix epoch) so that timezone-offset-bearing DATETIME text
+// values compare as instants rather than strings.
+func ApplyCreatedAtFilter(base *gorm.DB, filter *registrystore.CreatedAtFilter, alias string, sqlite bool) *gorm.DB {
+	if filter == nil || base == nil {
+		return base
+	}
+	if sqlite {
+		col := "created_at_unix_ms"
+		if alias != "" {
+			col = alias + ".created_at_unix_ms"
+		}
+		if filter.Eq != nil {
+			base = base.Where(col+" = ?", filter.Eq.UTC().UnixMilli())
+		} else {
+			if filter.After != nil {
+				base = base.Where(col+" >= ?", filter.After.UTC().UnixMilli())
+			}
+			if filter.Before != nil {
+				base = base.Where(col+" <= ?", filter.Before.UTC().UnixMilli())
+			}
+		}
+		return base
+	}
+	col := "created_at"
+	if alias != "" {
+		col = alias + ".created_at"
+	}
+	if filter.Eq != nil {
+		base = base.Where(col+" = ?", *filter.Eq)
+	} else {
+		if filter.After != nil {
+			base = base.Where(col+" >= ?", *filter.After)
+		}
+		if filter.Before != nil {
+			base = base.Where(col+" <= ?", *filter.Before)
+		}
+	}
+	return base
 }
 
 func RunBoundedQuery(ctx context.Context, query BoundedQuery) ([]model.Entry, *string, *string, error) {
@@ -75,6 +121,9 @@ func RunBoundedQuery(ctx context.Context, query BoundedQuery) ([]model.Entry, *s
 	}
 	if query.FromSeq != nil {
 		base = base.Where("e.seq IS NOT NULL AND e.seq >= ?", *query.FromSeq)
+	}
+	if query.CreatedAtFilter != nil {
+		base = ApplyCreatedAtFilter(base, query.CreatedAtFilter, "e", query.SQLite)
 	}
 	lookup := func(entryID string) (model.Entry, bool, error) {
 		var entry model.Entry
@@ -117,6 +166,30 @@ func ApplyEpochFilter(base *gorm.DB, epochFilter *registrystore.MemoryEpochFilte
 		}
 		return base.Where("COALESCE(e.epoch, 0) = ?", *epochRow.MaxEpoch), nil
 	}
+}
+
+// FilterEntriesByCreatedAt filters in-memory entries based on CreatedAtFilter.
+func FilterEntriesByCreatedAt(entries []model.Entry, filter *registrystore.CreatedAtFilter) []model.Entry {
+	if filter == nil {
+		return entries
+	}
+	filtered := make([]model.Entry, 0, len(entries))
+	for _, e := range entries {
+		if filter.Eq != nil {
+			if e.CreatedAt.Equal(*filter.Eq) {
+				filtered = append(filtered, e)
+			}
+			continue
+		}
+		if filter.After != nil && e.CreatedAt.Before(*filter.After) {
+			continue
+		}
+		if filter.Before != nil && e.CreatedAt.After(*filter.Before) {
+			continue
+		}
+		filtered = append(filtered, e)
+	}
+	return filtered
 }
 
 func normalizeEpochFilter(filter *registrystore.MemoryEpochFilter) registrystore.MemoryEpochFilter {

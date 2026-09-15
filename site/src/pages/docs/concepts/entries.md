@@ -262,6 +262,65 @@ curl "...?channel=context&epoch=all"
 # Returns: [detailed_entry1, ..., detailed_entry50, summary, recent_entry1, recent_entry2]
 ```
 
+## Filtering by Timestamp
+
+Three query parameters let you scope the entry list to a specific time window:
+
+| Parameter         | Type        | Description                                               |
+| ----------------- | ----------- | --------------------------------------------------------- |
+| `createdAt`       | `date-time` | Return only entries whose `createdAt` equals this instant |
+| `createdAtAfter`  | `date-time` | Return only entries with `createdAt >= createdAtAfter`    |
+| `createdAtBefore` | `date-time` | Return only entries with `createdAt <= createdAtBefore`   |
+
+- Both `createdAtAfter` and `createdAtBefore` bounds are **inclusive**.
+- `createdAt` is **mutually exclusive** with `createdAtAfter` and `createdAtBefore`. Combining them returns `400 Bad Request`.
+- All three parameters accept any [RFC 3339](https://datatracker.ietf.org/doc/html/rfc3339) datetime string, including sub-second precision and non-UTC timezone offsets (e.g. `2026-01-02T15:30:00.500+05:30`). Timezone offsets are normalised to the same instant before comparison.
+
+### REST examples
+
+```bash
+# Entries created on or after a specific instant
+curl "http://localhost:8080/v1/conversations/{conversationId}/entries?createdAtAfter=2026-01-02T10:00:00Z" \
+  -H "Authorization: Bearer <token>"
+
+# Entries within a time window (both bounds inclusive)
+curl "http://localhost:8080/v1/conversations/{conversationId}/entries?createdAtAfter=2026-01-01T00:00:00Z&createdAtBefore=2026-01-02T23:59:59Z" \
+  -H "Authorization: Bearer <token>"
+
+# Entries matching a single exact instant
+curl "http://localhost:8080/v1/conversations/{conversationId}/entries?createdAt=2026-01-02T10:00:00Z" \
+  -H "Authorization: Bearer <token>"
+```
+
+The same parameters are available on the admin endpoint (`GET /v1/admin/conversations/{conversationId}/entries`).
+
+### gRPC examples
+
+Use `google.protobuf.Timestamp` fields `created_at_after`, `created_at_before`, or `created_at_eq` in `ListEntriesRequest`:
+
+```proto
+// Lower bound (inclusive)
+ListEntriesRequest {
+  conversation_id: "conv_01HF8XH1XABCD1234EFGH5678"
+  created_at_after { seconds: 1767261600 }
+}
+
+// Time window (both bounds inclusive)
+ListEntriesRequest {
+  conversation_id: "conv_01HF8XH1XABCD1234EFGH5678"
+  created_at_after  { seconds: 1767261600 }
+  created_at_before { seconds: 1767348000 }
+}
+
+// Exact instant
+ListEntriesRequest {
+  conversation_id: "conv_01HF8XH1XABCD1234EFGH5678"
+  created_at_eq { seconds: 1767348000 }
+}
+```
+
+Supplying `created_at_eq` alongside `created_at_after` or `created_at_before` returns `INVALID_ARGUMENT`. An out-of-range `Timestamp` (e.g. negative seconds before the Unix epoch minimum) also returns `INVALID_ARGUMENT`.
+
 ## Next Steps
 
 - Learn about [Indexing & Search](/docs/concepts/indexing-and-search/)

@@ -1097,19 +1097,50 @@ func (s *EntriesServer) ListEntries(ctx context.Context, req *pb.ListEntriesRequ
 	allForks := req.GetForks() == "all"
 	fromSeq := req.FromSeq
 
+	// Parse createdAt date filters.
+	var createdAtFilter *registrystore.CreatedAtFilter
+	if req.CreatedAtEq != nil && (req.CreatedAtAfter != nil || req.CreatedAtBefore != nil) {
+		return nil, status.Error(codes.InvalidArgument, "created_at_eq is mutually exclusive with created_at_after and created_at_before")
+	}
+	if req.CreatedAtEq != nil {
+		t, err := validatedTimestampAsTime(req.CreatedAtEq, "created_at_eq")
+		if err != nil {
+			return nil, err
+		}
+		createdAtFilter = &registrystore.CreatedAtFilter{Eq: &t}
+	} else if req.CreatedAtAfter != nil || req.CreatedAtBefore != nil {
+		f := &registrystore.CreatedAtFilter{}
+		if req.CreatedAtAfter != nil {
+			t, err := validatedTimestampAsTime(req.CreatedAtAfter, "created_at_after")
+			if err != nil {
+				return nil, err
+			}
+			f.After = &t
+		}
+		if req.CreatedAtBefore != nil {
+			t, err := validatedTimestampAsTime(req.CreatedAtBefore, "created_at_before")
+			if err != nil {
+				return nil, err
+			}
+			f.Before = &t
+		}
+		createdAtFilter = f
+	}
+
 	result, err := withMemoryRead(ctx, s.Store, func(txCtx context.Context) (*registrystore.PagedEntries, error) {
 		return s.Store.GetEntries(txCtx, userID, convID, registrystore.EntryListQuery{
-			AfterCursor:  afterCursor,
-			BeforeCursor: beforeCursor,
-			Tail:         tail,
-			UpToEntryID:  upToEntryID,
-			Limit:        limit,
-			Channel:      channelPtr,
-			EpochFilter:  epochFilter,
-			ClientID:     clientIDPtr,
-			AgentID:      agentIDPtr,
-			AllForks:     allForks,
-			FromSeq:      fromSeq,
+			AfterCursor:     afterCursor,
+			BeforeCursor:    beforeCursor,
+			Tail:            tail,
+			UpToEntryID:     upToEntryID,
+			Limit:           limit,
+			Channel:         channelPtr,
+			EpochFilter:     epochFilter,
+			ClientID:        clientIDPtr,
+			AgentID:         agentIDPtr,
+			AllForks:        allForks,
+			FromSeq:         fromSeq,
+			CreatedAtFilter: createdAtFilter,
 		})
 	})
 	if err != nil {
@@ -1215,6 +1246,35 @@ func (s *AdminEntriesServer) ListEntries(ctx context.Context, req *pb.AdminListE
 	}
 	query.AllForks = req.GetForks() == "all"
 	query.FromSeq = req.FromSeq
+
+	// Parse createdAt date filters.
+	if req.CreatedAtEq != nil && (req.CreatedAtAfter != nil || req.CreatedAtBefore != nil) {
+		return nil, status.Error(codes.InvalidArgument, "created_at_eq is mutually exclusive with created_at_after and created_at_before")
+	}
+	if req.CreatedAtEq != nil {
+		t, err := validatedTimestampAsTime(req.CreatedAtEq, "created_at_eq")
+		if err != nil {
+			return nil, err
+		}
+		query.CreatedAtFilter = &registrystore.CreatedAtFilter{Eq: &t}
+	} else if req.CreatedAtAfter != nil || req.CreatedAtBefore != nil {
+		f := &registrystore.CreatedAtFilter{}
+		if req.CreatedAtAfter != nil {
+			t, err := validatedTimestampAsTime(req.CreatedAtAfter, "created_at_after")
+			if err != nil {
+				return nil, err
+			}
+			f.After = &t
+		}
+		if req.CreatedAtBefore != nil {
+			t, err := validatedTimestampAsTime(req.CreatedAtBefore, "created_at_before")
+			if err != nil {
+				return nil, err
+			}
+			f.Before = &t
+		}
+		query.CreatedAtFilter = f
+	}
 
 	result, err := withMemoryRead(ctx, s.Store, func(txCtx context.Context) (*registrystore.PagedEntries, error) {
 		return s.Store.AdminGetEntries(txCtx, convID, query)
@@ -2437,6 +2497,15 @@ func linkGRPCAttachmentLinks(ctx context.Context, store registrystore.MemoryStor
 		}
 	}
 	return nil
+}
+
+// validatedTimestampAsTime calls CheckValid on ts and returns its UTC time, or
+// a gRPC INVALID_ARGUMENT status error if the timestamp is out of range.
+func validatedTimestampAsTime(ts *timestamppb.Timestamp, field string) (time.Time, error) {
+	if err := ts.CheckValid(); err != nil {
+		return time.Time{}, status.Errorf(codes.InvalidArgument, "%s: invalid timestamp: %v", field, err)
+	}
+	return ts.AsTime(), nil
 }
 
 func entryToProto(e *model.Entry) *pb.Entry {
