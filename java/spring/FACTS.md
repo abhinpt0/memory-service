@@ -1,5 +1,11 @@
 # Spring Module Facts
 
+**Maven compiler plugin pin**: Keep `maven-compiler-plugin` at 3.14.1 until the
+3.15.x incremental rebuild path stops deleting protobuf-generated sources and
+copied `META-INF/spring` auto-configuration metadata before compilation. The
+loss of that metadata makes downstream Spring Boot apps skip Memory Service
+auto-configuration.
+
 **Chat example encryption**: `java/spring/examples/chat-spring/compose.yaml` selects `MEMORY_SERVICE_ENCRYPTION_KIND=dek` with a well-known development-only DEK so encrypted local storage and public signed attachment URLs work without setup.
 **Chat example OIDC audience**: The local Compose example sets `MEMORY_SERVICE_OIDC_ALLOWED_AUDIENCES=memory-service`; its Keycloak realm adds that audience to browser-client access tokens.
 **Chat example management routes**: The local Compose example sets `MEMORY_SERVICE_MANAGEMENT_ON_MAIN_LISTENER=true`; hardened server startup otherwise requires a dedicated management listener.
