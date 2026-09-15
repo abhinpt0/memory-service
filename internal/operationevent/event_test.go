@@ -93,6 +93,7 @@ func TestSnapshotLogArgsUseStableCanonicalOrder(t *testing.T) {
 		RequestID:      "request-1",
 		Status:         200,
 		Result:         ResultSuccess,
+		RateLimiter:    "identity",
 		ConversationID: "conversation-1",
 		WorkCount:      2,
 	})
@@ -101,6 +102,7 @@ func TestSnapshotLogArgsUseStableCanonicalOrder(t *testing.T) {
 		"requestID", "request-1",
 		"status", 200,
 		"result", ResultSuccess,
+		"rateLimiter", "identity",
 		"conversationID", "conversation-1",
 		"workCount", int64(2),
 	}

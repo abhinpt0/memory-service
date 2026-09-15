@@ -1,5 +1,11 @@
 # Workarounds
 
+## Maven compiler plugin 3.14.1 pin
+
+- What: `java/pom.xml` pins `maven-compiler-plugin` to 3.14.1 instead of 3.15.0.
+- Why: In this reactor, the 3.15.0 incremental rebuild path deletes protobuf-generated Java sources before compilation and removes copied `META-INF/spring` auto-configuration metadata from `target/classes`. The first failure breaks `memory-service-proto-spring` compilation on an incremental reactor run. The second lets compilation finish but makes `chat-spring` fail because `MemoryServiceClientProperties` is never registered.
+- Proper fix: Upgrade after a compiler-plugin release preserves generated source roots and non-class resources during incremental rebuilds, then verify with `task test:java`.
+
 ## sqlite-vec musl typedef aliases
 
 - What: `Dockerfile.portable` builds the static Linux binary with `CGO_CFLAGS="-Du_int8_t=uint8_t -Du_int16_t=uint16_t -Du_int64_t=uint64_t"` while compiling sqlite-vec.

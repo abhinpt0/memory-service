@@ -1,14 +1,18 @@
 package security
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/chirino/memory-service/internal/config"
+	"github.com/chirino/memory-service/internal/operationevent"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func TestParseRateLimitSpecRejectsInvalidValues(t *testing.T) {
@@ -170,4 +174,40 @@ func TestTrustedUserAssertionRunsBeforeIdentityRateLimit(t *testing.T) {
 	require.Equal(t, http.StatusOK, request("alice"))
 	require.Equal(t, http.StatusOK, request("bob"))
 	require.Equal(t, http.StatusTooManyRequests, request("alice"))
+}
+
+func TestRateLimitErrorsEnrichOperationalEvent(t *testing.T) {
+	classes := []RateLimitClass{
+		RateLimitSource,
+		RateLimitIdentity,
+		RateLimitAuthFailure,
+		RateLimitExpensive,
+		RateLimitStreamOpen,
+	}
+
+	for _, class := range classes {
+		t.Run(string(class)+"/http", func(t *testing.T) {
+			event := operationevent.New("http GET /v1/test", operationevent.WithEmitter(func(string, operationevent.Level, operationevent.Snapshot) {}))
+			request := httptest.NewRequest(http.MethodGet, "/v1/test", nil)
+			request = request.WithContext(operationevent.WithContext(request.Context(), event))
+			response := httptest.NewRecorder()
+			ginContext, _ := gin.CreateTestContext(response)
+			ginContext.Request = request
+
+			rejectHTTPRateLimited(ginContext, class, 1)
+
+			require.Equal(t, http.StatusTooManyRequests, response.Code)
+			require.Equal(t, string(class), event.Snapshot().RateLimiter)
+		})
+
+		t.Run(string(class)+"/grpc", func(t *testing.T) {
+			event := operationevent.New("grpc /memory.v1.TestService/Test", operationevent.WithEmitter(func(string, operationevent.Level, operationevent.Snapshot) {}))
+			ctx := operationevent.WithContext(context.Background(), event)
+
+			err := grpcRateLimitError(ctx, class, 1)
+
+			require.Equal(t, codes.ResourceExhausted, status.Code(err))
+			require.Equal(t, string(class), event.Snapshot().RateLimiter)
+		})
+	}
 }

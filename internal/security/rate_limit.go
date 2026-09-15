@@ -14,6 +14,7 @@ import (
 
 	"github.com/charmbracelet/log"
 	"github.com/chirino/memory-service/internal/config"
+	"github.com/chirino/memory-service/internal/operationevent"
 	"github.com/gin-gonic/gin"
 	"golang.org/x/time/rate"
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
@@ -358,6 +359,9 @@ func rejectHTTPRateLimited(c *gin.Context, class RateLimitClass, retryAfter int)
 	if retryAfter < 1 {
 		retryAfter = 1
 	}
+	if event := OperationEventFromGin(c); event != nil {
+		event.SetRateLimiter(string(class))
+	}
 	c.Header("Retry-After", strconv.Itoa(retryAfter))
 	c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
 		"code":  "rate_limited",
@@ -486,10 +490,10 @@ func applyGRPCSourceRateLimit(ctx context.Context, limiter *RateLimiter) error {
 	key := grpcSourceKey(ctx)
 	if decision := limiter.available(RateLimitAuthFailure, key); !decision.Allowed {
 		recordRateLimit(RateLimitAuthFailure, "rejected")
-		return grpcRateLimitError(RateLimitAuthFailure, decision.RetryAfterSeconds)
+		return grpcRateLimitError(ctx, RateLimitAuthFailure, decision.RetryAfterSeconds)
 	}
 	if decision := limiter.allow(RateLimitSource, key); !decision.Allowed {
-		return grpcRateLimitError(RateLimitSource, decision.RetryAfterSeconds)
+		return grpcRateLimitError(ctx, RateLimitSource, decision.RetryAfterSeconds)
 	}
 	return nil
 }
@@ -504,16 +508,16 @@ func applyGRPCAuthenticatedRateLimits(ctx context.Context, limiter *RateLimiter,
 	}
 	key := identityKey(id)
 	if decision := limiter.allow(RateLimitIdentity, key); !decision.Allowed {
-		return grpcRateLimitError(RateLimitIdentity, decision.RetryAfterSeconds)
+		return grpcRateLimitError(ctx, RateLimitIdentity, decision.RetryAfterSeconds)
 	}
 	if isGRPCExpensive(fullMethod) {
 		if decision := limiter.allow(RateLimitExpensive, key); !decision.Allowed {
-			return grpcRateLimitError(RateLimitExpensive, decision.RetryAfterSeconds)
+			return grpcRateLimitError(ctx, RateLimitExpensive, decision.RetryAfterSeconds)
 		}
 	}
 	if stream {
 		if decision := limiter.allow(RateLimitStreamOpen, key); !decision.Allowed {
-			return grpcRateLimitError(RateLimitStreamOpen, decision.RetryAfterSeconds)
+			return grpcRateLimitError(ctx, RateLimitStreamOpen, decision.RetryAfterSeconds)
 		}
 	}
 	return nil
@@ -539,9 +543,12 @@ func isGRPCExpensive(fullMethod string) bool {
 		strings.HasSuffix(fullMethod, "/AdminEvict")
 }
 
-func grpcRateLimitError(class RateLimitClass, retryAfter int) error {
+func grpcRateLimitError(ctx context.Context, class RateLimitClass, retryAfter int) error {
 	if retryAfter < 1 {
 		retryAfter = 1
+	}
+	if event := operationevent.FromContext(ctx); event != nil {
+		event.SetRateLimiter(string(class))
 	}
 	st := status.New(codes.ResourceExhausted, "rate limit exceeded")
 	withDetails, err := st.WithDetails(&errdetails.RetryInfo{
