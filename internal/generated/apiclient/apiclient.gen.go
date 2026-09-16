@@ -598,12 +598,17 @@ type ChildConversationSummary struct {
 	CreatedAt *time.Time `json:"createdAt,omitempty"`
 
 	// Id Unique identifier for the child conversation.
-	Id                 *string             `json:"id,omitempty"`
-	LastMessagePreview *string             `json:"lastMessagePreview,omitempty"`
-	OwnerUserId        *string             `json:"ownerUserId,omitempty"`
-	StartedByEntryId   *openapi_types.UUID `json:"startedByEntryId,omitempty"`
-	Title              *string             `json:"title,omitempty"`
-	UpdatedAt          *time.Time          `json:"updatedAt,omitempty"`
+	Id                 *string `json:"id,omitempty"`
+	LastMessagePreview *string `json:"lastMessagePreview,omitempty"`
+	OwnerUserId        *string `json:"ownerUserId,omitempty"`
+
+	// StartedByConversationId Parent conversation that started this logical child conversation tree.
+	StartedByConversationId *string `json:"startedByConversationId,omitempty"`
+
+	// StartedByEntryId Parent entry that started this logical child conversation tree.
+	StartedByEntryId *openapi_types.UUID `json:"startedByEntryId,omitempty"`
+	Title            *string             `json:"title,omitempty"`
+	UpdatedAt        *time.Time          `json:"updatedAt,omitempty"`
 }
 
 // Conversation defines model for Conversation.
@@ -632,10 +637,10 @@ type Conversation struct {
 	Metadata    *map[string]interface{} `json:"metadata,omitempty"`
 	OwnerUserId *string                 `json:"ownerUserId,omitempty"`
 
-	// StartedByConversationId Parent conversation that started this child conversation.
+	// StartedByConversationId Parent conversation that started this logical conversation tree. Fork branches inherit this value.
 	StartedByConversationId *string `json:"startedByConversationId,omitempty"`
 
-	// StartedByEntryId Parent entry that started this child conversation.
+	// StartedByEntryId Parent entry that started this logical conversation tree. Fork branches inherit this value.
 	StartedByEntryId *openapi_types.UUID `json:"startedByEntryId,omitempty"`
 	Title            *string             `json:"title,omitempty"`
 	UpdatedAt        *time.Time          `json:"updatedAt,omitempty"`
@@ -704,12 +709,16 @@ type ConversationSummary struct {
 	LastMessagePreview *string `json:"lastMessagePreview,omitempty"`
 
 	// Metadata Arbitrary key-value metadata stored on the conversation.
-	Metadata                *map[string]interface{} `json:"metadata,omitempty"`
-	OwnerUserId             *string                 `json:"ownerUserId,omitempty"`
-	StartedByConversationId *string                 `json:"startedByConversationId,omitempty"`
-	StartedByEntryId        *openapi_types.UUID     `json:"startedByEntryId,omitempty"`
-	Title                   *string                 `json:"title,omitempty"`
-	UpdatedAt               *time.Time              `json:"updatedAt,omitempty"`
+	Metadata    *map[string]interface{} `json:"metadata,omitempty"`
+	OwnerUserId *string                 `json:"ownerUserId,omitempty"`
+
+	// StartedByConversationId Parent conversation that started this logical conversation tree. Fork branches inherit this value.
+	StartedByConversationId *string `json:"startedByConversationId,omitempty"`
+
+	// StartedByEntryId Parent entry that started this logical conversation tree. Fork branches inherit this value.
+	StartedByEntryId *openapi_types.UUID `json:"startedByEntryId,omitempty"`
+	Title            *string             `json:"title,omitempty"`
+	UpdatedAt        *time.Time          `json:"updatedAt,omitempty"`
 }
 
 // CreateConversationRequest defines model for CreateConversationRequest.
@@ -1324,7 +1333,7 @@ type ListConversationsParams struct {
 
 	// Ancestry Started-conversation ancestry filter.
 	// - `roots`: include only top-level conversations not started from another conversation.
-	// - `children`: include only conversations started from another conversation.
+	// - `children`: include every branch of conversation trees started from another conversation.
 	// - `all`: include both root and child conversations.
 	Ancestry *ListConversationsParamsAncestry `form:"ancestry,omitempty" json:"ancestry,omitempty"`
 
@@ -1984,6 +1993,10 @@ type ClientInterface interface {
 	UpdateConversation(ctx context.Context, conversationId string, body UpdateConversationJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ListConversationChildren List direct child conversations
+	//
+	// Lists each logical child conversation tree once, using the original child
+	// conversation as its representative. Fork branches retain the same started-by
+	// relationship and are available through conversation listing and fork navigation.
 	//
 	// Corresponds with GET /v1/conversations/{conversationId}/children (the `ListConversationChildren` operationId).
 	ListConversationChildren(ctx context.Context, conversationId string, params *ListConversationChildrenParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -2742,6 +2755,10 @@ func (c *Client) UpdateConversation(ctx context.Context, conversationId string, 
 }
 
 // ListConversationChildren List direct child conversations
+//
+// Lists each logical child conversation tree once, using the original child
+// conversation as its representative. Fork branches retain the same started-by
+// relationship and are available through conversation listing and fork navigation.
 //
 // Corresponds with GET /v1/conversations/{conversationId}/children (the `ListConversationChildren` operationId).
 func (c *Client) ListConversationChildren(ctx context.Context, conversationId string, params *ListConversationChildrenParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
@@ -5931,6 +5948,10 @@ type ClientWithResponsesInterface interface {
 
 	// ListConversationChildrenWithResponse List direct child conversations
 	//
+	// Lists each logical child conversation tree once, using the original child
+	// conversation as its representative. Fork branches retain the same started-by
+	// relationship and are available through conversation listing and fork navigation.
+	//
 	// Returns a wrapper object for the known response body format(s).
 	//
 	// Corresponds with GET /v1/conversations/{conversationId}/children (the `ListConversationChildren` operationId).
@@ -8651,6 +8672,10 @@ func (c *ClientWithResponses) UpdateConversationWithResponse(ctx context.Context
 }
 
 // ListConversationChildrenWithResponse List direct child conversations
+//
+// Lists each logical child conversation tree once, using the original child
+// conversation as its representative. Fork branches retain the same started-by
+// relationship and are available through conversation listing and fork navigation.
 //
 // Returns a wrapper object for the known response body format(s).
 //

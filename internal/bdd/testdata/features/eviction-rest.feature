@@ -86,6 +86,169 @@ Feature: Data Eviction
       | count |
       | 1     |
 
+  # Serial required: this scenario runs a datastore-wide eviction sweep and verifies dangling soft lineage across logical child trees.
+  Scenario: Evicting a parent group preserves child groups and their forks
+    Given I have a conversation with title "Eviction lineage parent"
+    And set "parentConversationId" to "${conversationId}"
+    And set "parentGroupId" to "${conversationGroupId}"
+    And I am authenticated as agent with API key "test-agent-key"
+    And I append an entry to the conversation:
+      """
+      {
+        "channel": "HISTORY",
+        "contentType": "history",
+        "content": [{"role": "USER", "text": "Delegate retained child work"}]
+      }
+      """
+    And set "parentEntryId" to the json response field "id"
+    When I call POST "/v1/conversations/00000000-0000-4000-8000-000000000801/entries" with body:
+      """
+      {
+        "channel": "HISTORY",
+        "contentType": "history",
+        "startedByConversationId": "${parentConversationId}",
+        "startedByEntryId": "${parentEntryId}",
+        "content": [{"role": "USER", "text": "Direct child work"}]
+      }
+      """
+    Then the response status should be 201
+    And set "childConversationId" to "00000000-0000-4000-8000-000000000801"
+    And set "childEntryId" to the json response field "id"
+    And I resolve the conversation group ID for conversation "${childConversationId}" into "childGroupId"
+    When I fork conversation "${childConversationId}" at entry "${childEntryId}" with request:
+      """
+      {}
+      """
+    And set "childForkId" to "${forkedConversationId}"
+    And set "nestedConversationId" to "00000000-0000-4000-8000-000000000802"
+    When I call POST "/v1/conversations/${nestedConversationId}/entries" with body:
+      """
+      {
+        "channel": "HISTORY",
+        "contentType": "history",
+        "startedByConversationId": "${childForkId}",
+        "content": [{"role": "USER", "text": "Nested child work"}]
+      }
+      """
+    Then the response status should be 201
+    And set "nestedEntryId" to the json response field "id"
+    And I resolve the conversation group ID for conversation "${nestedConversationId}" into "nestedGroupId"
+    When I fork conversation "${nestedConversationId}" at entry "${nestedEntryId}" with request:
+      """
+      {}
+      """
+    And set "nestedForkId" to "${forkedConversationId}"
+
+    When I archive conversation "${parentConversationId}"
+    Then the response status should be 200
+    And the response body field "archived" should be "true"
+    When I call GET "/v1/conversations/${childConversationId}"
+    Then the response status should be 200
+    And the response body field "archived" should be "false"
+    When I call GET "/v1/conversations/${childForkId}"
+    Then the response status should be 200
+    And the response body field "archived" should be "false"
+    When I call GET "/v1/conversations/${nestedConversationId}"
+    Then the response status should be 200
+    And the response body field "archived" should be "false"
+    When I call GET "/v1/conversations/${nestedForkId}"
+    Then the response status should be 200
+    And the response body field "archived" should be "false"
+
+    And set "conversationId" to "${parentConversationId}"
+    And the conversation was archived 100 days ago
+    And "alice" is connected to the SSE event stream
+    When I call POST "/v1/admin/evict" with body:
+      """
+      {
+        "retentionPeriod": "P90D",
+        "resourceTypes": ["conversations"]
+      }
+      """
+    Then the response status should be 204
+    And "alice" should receive an SSE event with kind "conversation" and event "deleted"
+    And "alice" should not receive an SSE event with kind "conversation" and event "deleted" within 2 seconds
+    When I execute SQL query:
+      """
+      SELECT COUNT(*) AS count FROM conversation_groups
+      WHERE id IN ('${parentGroupId}', '${childGroupId}', '${nestedGroupId}')
+      """
+    Then the SQL result should match:
+      | count |
+      | 2     |
+    When I execute MongoDB query:
+      """
+      {
+        "collection": "conversation_groups",
+        "operation": "count",
+        "filter": {
+          "_id": {
+            "$in": ["${parentGroupId}", "${childGroupId}", "${nestedGroupId}"]
+          }
+        }
+      }
+      """
+    Then the MongoDB result should match:
+      | count |
+      | 2     |
+    When I execute SQL query:
+      """
+      SELECT COUNT(*) AS count FROM tasks
+      WHERE task_type = 'vector_store_delete'
+        AND task_body->>'conversationGroupId' IN ('${parentGroupId}', '${childGroupId}', '${nestedGroupId}')
+      """
+    Then the SQL result should match:
+      | count |
+      | 1     |
+    When I execute MongoDB query:
+      """
+      {
+        "collection": "tasks",
+        "operation": "count",
+        "filter": {
+          "task_type": "vector_store_delete",
+          "task_body.conversationGroupId": {
+            "$in": ["${parentGroupId}", "${childGroupId}", "${nestedGroupId}"]
+          }
+        }
+      }
+      """
+    Then the MongoDB result should match:
+      | count |
+      | 1     |
+
+    When I call GET "/v1/conversations/${parentConversationId}"
+    Then the response status should be 404
+    When I call GET "/v1/conversations/${childConversationId}"
+    Then the response status should be 200
+    And the response body field "startedByConversationId" should be "${parentConversationId}"
+    And the response body field "startedByEntryId" should be "${parentEntryId}"
+    When I call GET "/v1/conversations/${childForkId}"
+    Then the response status should be 200
+    And the response body field "startedByConversationId" should be "${parentConversationId}"
+    And the response body field "startedByEntryId" should be "${parentEntryId}"
+    And the response body field "forkedAtConversationId" should be "${childConversationId}"
+    When I call GET "/v1/conversations/${nestedConversationId}"
+    Then the response status should be 200
+    And the response body field "startedByConversationId" should be "${childForkId}"
+    And the response body should not contain "startedByEntryId"
+    When I call GET "/v1/conversations/${nestedForkId}"
+    Then the response status should be 200
+    And the response body field "startedByConversationId" should be "${childForkId}"
+    And the response body should not contain "startedByEntryId"
+    And the response body field "forkedAtConversationId" should be "${nestedConversationId}"
+
+    When I call GET "/v1/conversations?ancestry=roots&mode=all"
+    Then the response status should be 200
+    And the response should contain 0 conversations
+    When I call GET "/v1/conversations?ancestry=children&mode=all"
+    Then the response status should be 200
+    And the response should contain 4 conversations
+    And the response body should contain "${childConversationId}"
+    And the response body should contain "${childForkId}"
+    And the response body should contain "${nestedConversationId}"
+    And the response body should contain "${nestedForkId}"
+
   # Serial required: this scenario runs a datastore-wide eviction sweep that can hard-delete records created by other scenarios.
   Scenario: Evict with SSE progress stream via Accept header
     Given I have a conversation with title "To Evict"

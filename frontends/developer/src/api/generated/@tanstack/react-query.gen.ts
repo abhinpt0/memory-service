@@ -923,6 +923,9 @@ export const adminListChildConversationsQueryKey = (options: Options<AdminListCh
 
 /**
  * List direct child conversations
+ *
+ * Lists each logical child conversation tree once, using the original child
+ * conversation as its representative. Fork branches retain the same started-by relationship.
  */
 export const adminListChildConversationsOptions = (options: Options<AdminListChildConversationsData>) =>
   queryOptions<

@@ -651,22 +651,24 @@ func (x *PageInfo) GetPreviousPageToken() string {
 type ConversationSummary struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Conversation identifier
-	Id                      string           `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	Title                   string           `protobuf:"bytes,2,opt,name=title,proto3" json:"title,omitempty"`
-	OwnerUserId             string           `protobuf:"bytes,3,opt,name=owner_user_id,json=ownerUserId,proto3" json:"owner_user_id,omitempty"`
-	CreatedAt               string           `protobuf:"bytes,4,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
-	UpdatedAt               string           `protobuf:"bytes,5,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
-	LastMessagePreview      string           `protobuf:"bytes,6,opt,name=last_message_preview,json=lastMessagePreview,proto3" json:"last_message_preview,omitempty"`
-	AccessLevel             AccessLevel      `protobuf:"varint,7,opt,name=access_level,json=accessLevel,proto3,enum=memory.v1.AccessLevel" json:"access_level,omitempty"`
-	StartedByConversationId string           `protobuf:"bytes,8,opt,name=started_by_conversation_id,json=startedByConversationId,proto3" json:"started_by_conversation_id,omitempty"`
-	StartedByEntryId        []byte           `protobuf:"bytes,9,opt,name=started_by_entry_id,json=startedByEntryId,proto3" json:"started_by_entry_id,omitempty"`
-	Archived                bool             `protobuf:"varint,10,opt,name=archived,proto3" json:"archived,omitempty"`
-	AgentId                 *string          `protobuf:"bytes,11,opt,name=agent_id,json=agentId,proto3,oneof" json:"agent_id,omitempty"`
-	Metadata                *structpb.Struct `protobuf:"bytes,12,opt,name=metadata,proto3" json:"metadata,omitempty"`
-	ForkedAtEntryId         []byte           `protobuf:"bytes,13,opt,name=forked_at_entry_id,json=forkedAtEntryId,proto3" json:"forked_at_entry_id,omitempty"`
-	ForkedAtConversationId  string           `protobuf:"bytes,14,opt,name=forked_at_conversation_id,json=forkedAtConversationId,proto3" json:"forked_at_conversation_id,omitempty"`
-	unknownFields           protoimpl.UnknownFields
-	sizeCache               protoimpl.SizeCache
+	Id                 string      `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Title              string      `protobuf:"bytes,2,opt,name=title,proto3" json:"title,omitempty"`
+	OwnerUserId        string      `protobuf:"bytes,3,opt,name=owner_user_id,json=ownerUserId,proto3" json:"owner_user_id,omitempty"`
+	CreatedAt          string      `protobuf:"bytes,4,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	UpdatedAt          string      `protobuf:"bytes,5,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
+	LastMessagePreview string      `protobuf:"bytes,6,opt,name=last_message_preview,json=lastMessagePreview,proto3" json:"last_message_preview,omitempty"`
+	AccessLevel        AccessLevel `protobuf:"varint,7,opt,name=access_level,json=accessLevel,proto3,enum=memory.v1.AccessLevel" json:"access_level,omitempty"`
+	// Parent conversation that started this logical conversation tree. Fork branches inherit it.
+	StartedByConversationId string `protobuf:"bytes,8,opt,name=started_by_conversation_id,json=startedByConversationId,proto3" json:"started_by_conversation_id,omitempty"`
+	// Parent entry that started this logical conversation tree. Fork branches inherit it.
+	StartedByEntryId       []byte           `protobuf:"bytes,9,opt,name=started_by_entry_id,json=startedByEntryId,proto3" json:"started_by_entry_id,omitempty"`
+	Archived               bool             `protobuf:"varint,10,opt,name=archived,proto3" json:"archived,omitempty"`
+	AgentId                *string          `protobuf:"bytes,11,opt,name=agent_id,json=agentId,proto3,oneof" json:"agent_id,omitempty"`
+	Metadata               *structpb.Struct `protobuf:"bytes,12,opt,name=metadata,proto3" json:"metadata,omitempty"`
+	ForkedAtEntryId        []byte           `protobuf:"bytes,13,opt,name=forked_at_entry_id,json=forkedAtEntryId,proto3" json:"forked_at_entry_id,omitempty"`
+	ForkedAtConversationId string           `protobuf:"bytes,14,opt,name=forked_at_conversation_id,json=forkedAtConversationId,proto3" json:"forked_at_conversation_id,omitempty"`
+	unknownFields          protoimpl.UnknownFields
+	sizeCache              protoimpl.SizeCache
 }
 
 func (x *ConversationSummary) Reset() {
@@ -800,16 +802,18 @@ func (x *ConversationSummary) GetForkedAtConversationId() string {
 type ChildConversationSummary struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Conversation identifier
-	Id                      string      `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	Title                   string      `protobuf:"bytes,2,opt,name=title,proto3" json:"title,omitempty"`
-	OwnerUserId             string      `protobuf:"bytes,3,opt,name=owner_user_id,json=ownerUserId,proto3" json:"owner_user_id,omitempty"`
-	CreatedAt               string      `protobuf:"bytes,4,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
-	UpdatedAt               string      `protobuf:"bytes,5,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
-	LastMessagePreview      string      `protobuf:"bytes,6,opt,name=last_message_preview,json=lastMessagePreview,proto3" json:"last_message_preview,omitempty"`
-	AccessLevel             AccessLevel `protobuf:"varint,7,opt,name=access_level,json=accessLevel,proto3,enum=memory.v1.AccessLevel" json:"access_level,omitempty"`
-	StartedByEntryId        []byte      `protobuf:"bytes,8,opt,name=started_by_entry_id,json=startedByEntryId,proto3" json:"started_by_entry_id,omitempty"`
-	Archived                bool        `protobuf:"varint,9,opt,name=archived,proto3" json:"archived,omitempty"`
-	StartedByConversationId string      `protobuf:"bytes,10,opt,name=started_by_conversation_id,json=startedByConversationId,proto3" json:"started_by_conversation_id,omitempty"`
+	Id                 string      `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Title              string      `protobuf:"bytes,2,opt,name=title,proto3" json:"title,omitempty"`
+	OwnerUserId        string      `protobuf:"bytes,3,opt,name=owner_user_id,json=ownerUserId,proto3" json:"owner_user_id,omitempty"`
+	CreatedAt          string      `protobuf:"bytes,4,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	UpdatedAt          string      `protobuf:"bytes,5,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
+	LastMessagePreview string      `protobuf:"bytes,6,opt,name=last_message_preview,json=lastMessagePreview,proto3" json:"last_message_preview,omitempty"`
+	AccessLevel        AccessLevel `protobuf:"varint,7,opt,name=access_level,json=accessLevel,proto3,enum=memory.v1.AccessLevel" json:"access_level,omitempty"`
+	// Parent entry that started this logical child conversation tree.
+	StartedByEntryId []byte `protobuf:"bytes,8,opt,name=started_by_entry_id,json=startedByEntryId,proto3" json:"started_by_entry_id,omitempty"`
+	Archived         bool   `protobuf:"varint,9,opt,name=archived,proto3" json:"archived,omitempty"`
+	// Parent conversation that started this logical child conversation tree.
+	StartedByConversationId string `protobuf:"bytes,10,opt,name=started_by_conversation_id,json=startedByConversationId,proto3" json:"started_by_conversation_id,omitempty"`
 	unknownFields           protoimpl.UnknownFields
 	sizeCache               protoimpl.SizeCache
 }
@@ -929,15 +933,17 @@ type Conversation struct {
 	// invalid anchors. Empty if root or blank-slate fork.
 	ForkedAtEntryId []byte `protobuf:"bytes,9,opt,name=forked_at_entry_id,json=forkedAtEntryId,proto3" json:"forked_at_entry_id,omitempty"`
 	// Conversation ID from which this was forked (empty if root)
-	ForkedAtConversationId  string           `protobuf:"bytes,10,opt,name=forked_at_conversation_id,json=forkedAtConversationId,proto3" json:"forked_at_conversation_id,omitempty"`
-	StartedByConversationId string           `protobuf:"bytes,11,opt,name=started_by_conversation_id,json=startedByConversationId,proto3" json:"started_by_conversation_id,omitempty"`
-	StartedByEntryId        []byte           `protobuf:"bytes,12,opt,name=started_by_entry_id,json=startedByEntryId,proto3" json:"started_by_entry_id,omitempty"`
-	AgentId                 string           `protobuf:"bytes,13,opt,name=agent_id,json=agentId,proto3" json:"agent_id,omitempty"`
-	Archived                bool             `protobuf:"varint,14,opt,name=archived,proto3" json:"archived,omitempty"`
-	Metadata                *structpb.Struct `protobuf:"bytes,15,opt,name=metadata,proto3" json:"metadata,omitempty"`
-	HasResponseInProgress   bool             `protobuf:"varint,16,opt,name=has_response_in_progress,json=hasResponseInProgress,proto3" json:"has_response_in_progress,omitempty"`
-	unknownFields           protoimpl.UnknownFields
-	sizeCache               protoimpl.SizeCache
+	ForkedAtConversationId string `protobuf:"bytes,10,opt,name=forked_at_conversation_id,json=forkedAtConversationId,proto3" json:"forked_at_conversation_id,omitempty"`
+	// Parent conversation that started this logical conversation tree. Fork branches inherit it.
+	StartedByConversationId string `protobuf:"bytes,11,opt,name=started_by_conversation_id,json=startedByConversationId,proto3" json:"started_by_conversation_id,omitempty"`
+	// Parent entry that started this logical conversation tree. Fork branches inherit it.
+	StartedByEntryId      []byte           `protobuf:"bytes,12,opt,name=started_by_entry_id,json=startedByEntryId,proto3" json:"started_by_entry_id,omitempty"`
+	AgentId               string           `protobuf:"bytes,13,opt,name=agent_id,json=agentId,proto3" json:"agent_id,omitempty"`
+	Archived              bool             `protobuf:"varint,14,opt,name=archived,proto3" json:"archived,omitempty"`
+	Metadata              *structpb.Struct `protobuf:"bytes,15,opt,name=metadata,proto3" json:"metadata,omitempty"`
+	HasResponseInProgress bool             `protobuf:"varint,16,opt,name=has_response_in_progress,json=hasResponseInProgress,proto3" json:"has_response_in_progress,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
 }
 
 func (x *Conversation) Reset() {
@@ -1873,9 +1879,11 @@ func (x *ConversationForkOption) GetCreatedAt() string {
 }
 
 type ListChildConversationsRequest struct {
-	state          protoimpl.MessageState `protogen:"open.v1"`
-	ConversationId string                 `protobuf:"bytes,1,opt,name=conversation_id,json=conversationId,proto3" json:"conversation_id,omitempty"`
-	Page           *PageRequest           `protobuf:"bytes,2,opt,name=page,proto3" json:"page,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Parent conversation identifier. The response contains one original
+	// conversation per logical child fork tree.
+	ConversationId string       `protobuf:"bytes,1,opt,name=conversation_id,json=conversationId,proto3" json:"conversation_id,omitempty"`
+	Page           *PageRequest `protobuf:"bytes,2,opt,name=page,proto3" json:"page,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -3463,22 +3471,24 @@ func (x *AdminListChildConversationsResponse) GetPageInfo() *PageInfo {
 }
 
 type AdminConversationSummary struct {
-	state                   protoimpl.MessageState `protogen:"open.v1"`
-	Id                      string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	Title                   string                 `protobuf:"bytes,2,opt,name=title,proto3" json:"title,omitempty"`
-	OwnerUserId             string                 `protobuf:"bytes,3,opt,name=owner_user_id,json=ownerUserId,proto3" json:"owner_user_id,omitempty"`
-	CreatedAt               string                 `protobuf:"bytes,4,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
-	UpdatedAt               string                 `protobuf:"bytes,5,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
-	LastMessagePreview      string                 `protobuf:"bytes,6,opt,name=last_message_preview,json=lastMessagePreview,proto3" json:"last_message_preview,omitempty"`
-	AccessLevel             AccessLevel            `protobuf:"varint,7,opt,name=access_level,json=accessLevel,proto3,enum=memory.v1.AccessLevel" json:"access_level,omitempty"`
-	StartedByConversationId string                 `protobuf:"bytes,8,opt,name=started_by_conversation_id,json=startedByConversationId,proto3" json:"started_by_conversation_id,omitempty"`
-	StartedByEntryId        []byte                 `protobuf:"bytes,9,opt,name=started_by_entry_id,json=startedByEntryId,proto3" json:"started_by_entry_id,omitempty"`
-	Archived                bool                   `protobuf:"varint,10,opt,name=archived,proto3" json:"archived,omitempty"`
-	ClientId                string                 `protobuf:"bytes,11,opt,name=client_id,json=clientId,proto3" json:"client_id,omitempty"`
-	AgentId                 *string                `protobuf:"bytes,12,opt,name=agent_id,json=agentId,proto3,oneof" json:"agent_id,omitempty"`
-	Metadata                *structpb.Struct       `protobuf:"bytes,13,opt,name=metadata,proto3" json:"metadata,omitempty"`
-	unknownFields           protoimpl.UnknownFields
-	sizeCache               protoimpl.SizeCache
+	state              protoimpl.MessageState `protogen:"open.v1"`
+	Id                 string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Title              string                 `protobuf:"bytes,2,opt,name=title,proto3" json:"title,omitempty"`
+	OwnerUserId        string                 `protobuf:"bytes,3,opt,name=owner_user_id,json=ownerUserId,proto3" json:"owner_user_id,omitempty"`
+	CreatedAt          string                 `protobuf:"bytes,4,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	UpdatedAt          string                 `protobuf:"bytes,5,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
+	LastMessagePreview string                 `protobuf:"bytes,6,opt,name=last_message_preview,json=lastMessagePreview,proto3" json:"last_message_preview,omitempty"`
+	AccessLevel        AccessLevel            `protobuf:"varint,7,opt,name=access_level,json=accessLevel,proto3,enum=memory.v1.AccessLevel" json:"access_level,omitempty"`
+	// Parent conversation that started this logical conversation tree. Fork branches inherit it.
+	StartedByConversationId string `protobuf:"bytes,8,opt,name=started_by_conversation_id,json=startedByConversationId,proto3" json:"started_by_conversation_id,omitempty"`
+	// Parent entry that started this logical conversation tree. Fork branches inherit it.
+	StartedByEntryId []byte           `protobuf:"bytes,9,opt,name=started_by_entry_id,json=startedByEntryId,proto3" json:"started_by_entry_id,omitempty"`
+	Archived         bool             `protobuf:"varint,10,opt,name=archived,proto3" json:"archived,omitempty"`
+	ClientId         string           `protobuf:"bytes,11,opt,name=client_id,json=clientId,proto3" json:"client_id,omitempty"`
+	AgentId          *string          `protobuf:"bytes,12,opt,name=agent_id,json=agentId,proto3,oneof" json:"agent_id,omitempty"`
+	Metadata         *structpb.Struct `protobuf:"bytes,13,opt,name=metadata,proto3" json:"metadata,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *AdminConversationSummary) Reset() {

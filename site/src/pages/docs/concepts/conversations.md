@@ -173,19 +173,25 @@ curl -X POST http://localhost:8080/v1/conversations/{conversationId}/entries \
 
 ## Conversation Properties
 
-| Property                 | Description                                                          |
-| ------------------------ | -------------------------------------------------------------------- |
-| `id`                     | Unique identifier (string)                                           |
-| `title`                  | Optional conversation title                                          |
-| `ownerUserId`            | User who owns the conversation                                       |
-| `metadata`               | Arbitrary key-value map, agent-defined                               |
-| `createdAt`              | Creation timestamp                                                   |
-| `updatedAt`              | Last modification timestamp                                          |
-| `archived`               | Boolean indicating whether the conversation is archived              |
-| `lastEntryPreview`       | Preview of the last entry                                            |
-| `accessLevel`            | Current user's access level (`owner`, `manager`, `writer`, `reader`) |
-| `forkedAtConversationId` | ID of conversation this was forked from (if forked)                  |
-| `forkedAtEntryId`        | Entry ID where the fork occurred (if forked)                         |
+| Property                  | Description                                                            |
+| ------------------------- | ---------------------------------------------------------------------- |
+| `id`                      | Unique identifier (string)                                             |
+| `title`                   | Optional conversation title                                            |
+| `ownerUserId`             | User who owns the conversation                                         |
+| `metadata`                | Arbitrary key-value map, agent-defined                                 |
+| `createdAt`               | Creation timestamp                                                     |
+| `updatedAt`               | Last modification timestamp                                            |
+| `archived`                | Boolean indicating whether the conversation is archived                |
+| `lastEntryPreview`        | Preview of the last entry                                              |
+| `accessLevel`             | Current user's access level (`owner`, `manager`, `writer`, `reader`)   |
+| `forkedAtConversationId`  | ID of conversation this was forked from (if forked)                    |
+| `forkedAtEntryId`         | Entry ID where the fork occurred (if forked)                           |
+| `startedByConversationId` | Parent conversation that started this logical child conversation tree  |
+| `startedByEntryId`        | Optional parent entry that started the logical child conversation tree |
+
+Started-by lineage applies to the whole fork tree. A fork of a child reports
+the same `startedByConversationId` and `startedByEntryId` as the original child.
+The fork remains a branch of that child and does not become a separate child.
 
 ## Best Practices
 

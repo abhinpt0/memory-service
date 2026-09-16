@@ -98,7 +98,7 @@ paths:
           description: |-
             Started-conversation ancestry filter.
             - `roots`: include only top-level conversations not started from another conversation.
-            - `children`: include only conversations started from another conversation.
+            - `children`: include every branch of conversation trees started from another conversation.
             - `all`: include both root and child conversations.
           schema:
             type: string
@@ -561,6 +561,10 @@ paths:
     get:
       tags: [Conversations]
       summary: List direct child conversations
+      description: |-
+        Lists each logical child conversation tree once, using the original child
+        conversation as its representative. Fork branches retain the same started-by
+        relationship and are available through conversation listing and fork navigation.
       operationId: listConversationChildren
       parameters:
         - name: conversationId
@@ -1999,10 +2003,12 @@ components:
         startedByConversationId:
           type: string
           nullable: true
+          description: Parent conversation that started this logical conversation tree. Fork branches inherit this value.
         startedByEntryId:
           type: string
           format: uuid
           nullable: true
+          description: Parent entry that started this logical conversation tree. Fork branches inherit this value.
         archived:
           type: boolean
           description: Synthetic archive flag derived from the internal archived timestamp.
@@ -2041,10 +2047,15 @@ components:
           nullable: true
         accessLevel:
           $ref: '#/components/schemas/AccessLevel'
+        startedByConversationId:
+          type: string
+          nullable: true
+          description: Parent conversation that started this logical child conversation tree.
         startedByEntryId:
           type: string
           format: uuid
           nullable: true
+          description: Parent entry that started this logical child conversation tree.
         archived:
           type: boolean
           description: Synthetic archive flag derived from the internal archived timestamp.
@@ -2080,12 +2091,12 @@ components:
             startedByConversationId:
               type: string
               nullable: true
-              description: Parent conversation that started this child conversation.
+              description: Parent conversation that started this logical conversation tree. Fork branches inherit this value.
             startedByEntryId:
               type: string
               format: uuid
               nullable: true
-              description: Parent entry that started this child conversation.
+              description: Parent entry that started this logical conversation tree. Fork branches inherit this value.
           example:
             id: "550e8400-e29b-41d4-a716-446655440000"
             title: "Brainstorming UI for memory service"

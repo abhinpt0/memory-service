@@ -81,6 +81,9 @@ func (m *sqliteMigrator) Migrate(ctx context.Context) error {
 	if err := sqliteRequireCurrentSchemaOrEmpty(ctx, handle.sqlDB); err != nil {
 		return err
 	}
+	if err := sqliteDropStartedByConversationForeignKey(ctx, handle.sqlDB); err != nil {
+		return err
+	}
 	// The schema creates memory_kind_versions before memories so fresh databases
 	// resolve all FK references in table-definition order.
 	if _, err := handle.sqlDB.ExecContext(ctx, schemaSQL); err != nil {
@@ -122,6 +125,96 @@ func (m *sqliteMigrator) Migrate(ctx context.Context) error {
 		}
 	}
 	log.Info("SQLite schema migration complete", "fts5Enabled", handle.fts5Enabled)
+	return nil
+}
+
+// sqliteDropStartedByConversationForeignKey reconciles schema-v2 databases
+// created while started_by_conversation_id was a cascading foreign key. The
+// lineage value is a soft reference and must survive deletion of its target.
+func sqliteDropStartedByConversationForeignKey(ctx context.Context, db *sql.DB) (returnErr error) {
+	rows, err := db.QueryContext(ctx, `PRAGMA foreign_key_list(conversations)`)
+	if err != nil {
+		return fmt.Errorf("migration: inspect conversation foreign keys: %w", err)
+	}
+	hasStartedByForeignKey := false
+	for rows.Next() {
+		var id, seq int
+		var table, from, to, onUpdate, onDelete, match string
+		if err := rows.Scan(&id, &seq, &table, &from, &to, &onUpdate, &onDelete, &match); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("migration: scan conversation foreign key: %w", err)
+		}
+		if from == "started_by_conversation_id" {
+			hasStartedByForeignKey = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("migration: iterate conversation foreign keys: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("migration: close conversation foreign keys: %w", err)
+	}
+	if !hasStartedByForeignKey {
+		return nil
+	}
+
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("migration: acquire connection for conversation lineage reconciliation: %w", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+		return fmt.Errorf("migration: disable foreign keys for conversation lineage reconciliation: %w", err)
+	}
+	defer func() {
+		if _, err := conn.ExecContext(context.WithoutCancel(ctx), `PRAGMA foreign_keys = ON`); err != nil && returnErr == nil {
+			returnErr = fmt.Errorf("migration: re-enable foreign keys after conversation lineage reconciliation: %w", err)
+		}
+	}()
+
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("migration: begin conversation lineage reconciliation: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	statements := []string{
+		`CREATE TABLE conversations_without_started_by_fk (
+			id TEXT PRIMARY KEY,
+			title BLOB,
+			owner_user_id TEXT NOT NULL,
+			client_id TEXT NOT NULL,
+			agent_id TEXT,
+			metadata TEXT NOT NULL DEFAULT '{}',
+			conversation_group_id TEXT NOT NULL REFERENCES conversation_groups(id) ON DELETE CASCADE,
+			started_by_conversation_id TEXT,
+			started_by_entry_id TEXT,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			vectorized_at DATETIME,
+			archived_at DATETIME
+		)`,
+		`INSERT INTO conversations_without_started_by_fk (
+			id, title, owner_user_id, client_id, agent_id, metadata,
+			conversation_group_id, started_by_conversation_id, started_by_entry_id,
+			created_at, updated_at, vectorized_at, archived_at
+		) SELECT
+			id, title, owner_user_id, client_id, agent_id, metadata,
+			conversation_group_id, started_by_conversation_id, started_by_entry_id,
+			created_at, updated_at, vectorized_at, archived_at
+		FROM conversations`,
+		`DROP TABLE conversations`,
+		`ALTER TABLE conversations_without_started_by_fk RENAME TO conversations`,
+		`CREATE UNIQUE INDEX idx_conversations_group_id_id ON conversations(conversation_group_id, id)`,
+	}
+	for _, statement := range statements {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("migration: reconcile started-by soft reference: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("migration: commit conversation lineage reconciliation: %w", err)
+	}
 	return nil
 }
 
@@ -390,6 +483,8 @@ func (s *SQLiteStore) createConversationWithID(ctx context.Context, userID strin
 	var membershipsToCopy []model.ConversationMembership
 	var sourceConv *model.Conversation
 	var anchorOwnerDepth *int
+	logicalStartedByConversationID := startedByConversationID
+	logicalStartedByEntryID := startedByEntryID
 	if forkedAtConversationID != nil {
 		var parent model.Conversation
 		if err := db.Where("id = ? AND archived_at IS NULL", *forkedAtConversationID).First(&parent).Error; err != nil {
@@ -423,6 +518,11 @@ func (s *SQLiteStore) createConversationWithID(ctx context.Context, userID strin
 			}
 			anchorOwnerDepth = ownerDepth
 		}
+		if err := s.hydrateConversationLineage(ctx, &parent); err != nil {
+			return nil, err
+		}
+		logicalStartedByConversationID = parent.StartedByConversationID
+		logicalStartedByEntryID = parent.StartedByEntryID
 		actualGroupID = parent.ConversationGroupID
 	} else if startedByConversationID != nil {
 		var parentConv model.Conversation
@@ -545,8 +645,8 @@ func (s *SQLiteStore) createConversationWithID(ctx context.Context, userID strin
 			ConversationGroupID:     actualGroupID,
 			ForkedAtConversationID:  forkedAtConversationID,
 			ForkedAtEntryID:         forkedAtEntryID,
-			StartedByConversationID: startedByConversationID,
-			StartedByEntryID:        startedByEntryID,
+			StartedByConversationID: logicalStartedByConversationID,
+			StartedByEntryID:        logicalStartedByEntryID,
 			CreatedAt:               now,
 			UpdatedAt:               now,
 			AccessLevel:             model.AccessLevelOwner,
@@ -623,10 +723,10 @@ func (s *SQLiteStore) ListConversations(ctx context.Context, userID string, quer
 
 	switch ancestry {
 	case model.ConversationAncestryChildren:
-		base = base.Where("c.started_by_conversation_id IS NOT NULL")
+		base = base.Where("EXISTS (SELECT 1 FROM conversations lineage WHERE lineage.conversation_group_id = c.conversation_group_id AND lineage.started_by_conversation_id IS NOT NULL)")
 	case model.ConversationAncestryAll:
 	default:
-		base = base.Where("c.started_by_conversation_id IS NULL")
+		base = base.Where("NOT EXISTS (SELECT 1 FROM conversations lineage WHERE lineage.conversation_group_id = c.conversation_group_id AND lineage.started_by_conversation_id IS NOT NULL)")
 	}
 
 	for _, p := range metadataFilters {
@@ -863,18 +963,14 @@ func (s *SQLiteStore) ArchiveConversation(ctx context.Context, userID string, co
 	// and if called standalone the two updates are wrapped in a single transaction.
 	return s.InWriteTx(ctx, func(txCtx context.Context) error {
 		wdb := s.writeDBFor(txCtx, "sqlite store archive conversation")
-		groupIDs, err := s.startedConversationGroupIDsForDelete(txCtx, groupID)
-		if err != nil {
-			return err
-		}
 		// Archive the conversation group and its fork tree.
 		if err := wdb.Model(&model.ConversationGroup{}).
-			Where("id IN ?", groupIDs).
+			Where("id = ?", groupID).
 			Update("archived_at", now).Error; err != nil {
 			return fmt.Errorf("failed to archive group: %w", err)
 		}
 		if err := wdb.Model(&model.Conversation{}).
-			Where("conversation_group_id IN ? AND archived_at IS NULL", groupIDs).
+			Where("conversation_group_id = ? AND archived_at IS NULL", groupID).
 			Update("archived_at", now).Error; err != nil {
 			return fmt.Errorf("failed to archive conversations: %w", err)
 		}
@@ -899,11 +995,7 @@ func (s *SQLiteStore) ArchiveConversationIfNeeded(ctx context.Context, userID st
 	now := time.Now()
 	err := s.InWriteTx(ctx, func(txCtx context.Context) error {
 		wdb := s.writeDBFor(txCtx, "sqlite archive conversation if needed")
-		groupIDs, err := s.startedConversationGroupIDsForDelete(txCtx, conv.ConversationGroupID)
-		if err != nil {
-			return err
-		}
-		update := wdb.Model(&model.ConversationGroup{}).Where("id IN ? AND archived_at IS NULL", groupIDs).Update("archived_at", now)
+		update := wdb.Model(&model.ConversationGroup{}).Where("id = ? AND archived_at IS NULL", conv.ConversationGroupID).Update("archived_at", now)
 		if update.Error != nil {
 			return update.Error
 		}
@@ -911,7 +1003,7 @@ func (s *SQLiteStore) ArchiveConversationIfNeeded(ctx context.Context, userID st
 		if !result.Changed {
 			return nil
 		}
-		return wdb.Model(&model.Conversation{}).Where("conversation_group_id IN ? AND archived_at IS NULL", groupIDs).Update("archived_at", now).Error
+		return wdb.Model(&model.Conversation{}).Where("conversation_group_id = ? AND archived_at IS NULL", conv.ConversationGroupID).Update("archived_at", now).Error
 	})
 	return result, err
 }
@@ -933,17 +1025,13 @@ func (s *SQLiteStore) UnarchiveConversation(ctx context.Context, userID string, 
 	groupID := conv.ConversationGroupID
 	return s.InWriteTx(ctx, func(txCtx context.Context) error {
 		wdb := s.writeDBFor(txCtx, "sqlite store unarchive conversation")
-		groupIDs, err := s.startedConversationGroupIDsForDelete(txCtx, groupID)
-		if err != nil {
-			return err
-		}
 		if err := wdb.Model(&model.ConversationGroup{}).
-			Where("id IN ?", groupIDs).
+			Where("id = ?", groupID).
 			Update("archived_at", nil).Error; err != nil {
 			return fmt.Errorf("failed to unarchive group: %w", err)
 		}
 		if err := wdb.Model(&model.Conversation{}).
-			Where("conversation_group_id IN ? AND archived_at IS NOT NULL", groupIDs).
+			Where("conversation_group_id = ? AND archived_at IS NOT NULL", groupID).
 			Update("archived_at", nil).Error; err != nil {
 			return fmt.Errorf("failed to unarchive conversations: %w", err)
 		}
@@ -967,16 +1055,12 @@ func (s *SQLiteStore) UnarchiveConversationIfNeeded(ctx context.Context, userID 
 	result := registrystore.UnarchiveConversationResult{ConversationGroupID: conv.ConversationGroupID}
 	err := s.InWriteTx(ctx, func(txCtx context.Context) error {
 		wdb := s.writeDBFor(txCtx, "sqlite unarchive conversation if needed")
-		groupIDs, err := s.startedConversationGroupIDsForDelete(txCtx, conv.ConversationGroupID)
-		if err != nil {
-			return err
-		}
-		update := wdb.Model(&model.ConversationGroup{}).Where("id IN ? AND archived_at IS NOT NULL", groupIDs).Update("archived_at", nil)
+		update := wdb.Model(&model.ConversationGroup{}).Where("id = ? AND archived_at IS NOT NULL", conv.ConversationGroupID).Update("archived_at", nil)
 		if update.Error != nil {
 			return update.Error
 		}
 		result.Changed = update.RowsAffected > 0
-		return wdb.Model(&model.Conversation{}).Where("conversation_group_id IN ? AND archived_at IS NOT NULL", groupIDs).Update("archived_at", nil).Error
+		return wdb.Model(&model.Conversation{}).Where("conversation_group_id = ? AND archived_at IS NOT NULL", conv.ConversationGroupID).Update("archived_at", nil).Error
 	})
 	return result, err
 }
@@ -2491,10 +2575,10 @@ func (s *SQLiteStore) AdminListConversations(ctx context.Context, query registry
 	}
 	switch query.Ancestry {
 	case model.ConversationAncestryChildren:
-		base = base.Where("c.started_by_conversation_id IS NOT NULL")
+		base = base.Where("EXISTS (SELECT 1 FROM conversations lineage WHERE lineage.conversation_group_id = c.conversation_group_id AND lineage.started_by_conversation_id IS NOT NULL)")
 	case model.ConversationAncestryAll:
 	default:
-		base = base.Where("c.started_by_conversation_id IS NULL")
+		base = base.Where("NOT EXISTS (SELECT 1 FROM conversations lineage WHERE lineage.conversation_group_id = c.conversation_group_id AND lineage.started_by_conversation_id IS NOT NULL)")
 	}
 	var anchorCreatedAt *time.Time
 	var anchorID *string
@@ -2638,12 +2722,8 @@ func (s *SQLiteStore) AdminSetConversationArchived(ctx context.Context, conversa
 	}
 	if archived {
 		now := time.Now()
-		groupIDs, err := s.startedConversationGroupIDsForDelete(ctx, conv.ConversationGroupID)
-		if err != nil {
-			return err
-		}
-		db.Model(&model.ConversationGroup{}).Where("id IN ?", groupIDs).Update("archived_at", now)
-		db.Model(&model.Conversation{}).Where("conversation_group_id IN ? AND archived_at IS NULL", groupIDs).Update("archived_at", now)
+		db.Model(&model.ConversationGroup{}).Where("id = ?", conv.ConversationGroupID).Update("archived_at", now)
+		db.Model(&model.Conversation{}).Where("conversation_group_id = ? AND archived_at IS NULL", conv.ConversationGroupID).Update("archived_at", now)
 		return nil
 	}
 	if conv.ArchivedAt == nil {
@@ -3248,7 +3328,7 @@ func valueOrEmpty(ptr *string) string {
 	return *ptr
 }
 
-const conversationSelectColumns = "c.id, c.title, c.owner_user_id, c.client_id, c.agent_id, c.metadata, c.conversation_group_id, ca_direct.forked_at_entry_id, ca_direct.ancestor_conversation_id AS forked_at_conversation_id, c.started_by_conversation_id, c.started_by_entry_id, c.created_at, c.updated_at, c.archived_at"
+const conversationSelectColumns = "c.id, c.title, c.owner_user_id, c.client_id, c.agent_id, c.metadata, c.conversation_group_id, ca_direct.forked_at_entry_id, ca_direct.ancestor_conversation_id AS forked_at_conversation_id, (SELECT lineage.started_by_conversation_id FROM conversations lineage WHERE lineage.conversation_group_id = c.conversation_group_id AND lineage.started_by_conversation_id IS NOT NULL LIMIT 1) AS started_by_conversation_id, (SELECT lineage.started_by_entry_id FROM conversations lineage WHERE lineage.conversation_group_id = c.conversation_group_id AND lineage.started_by_conversation_id IS NOT NULL LIMIT 1) AS started_by_entry_id, c.created_at, c.updated_at, c.archived_at"
 
 func joinDirectConversationAncestry(tx *gorm.DB) *gorm.DB {
 	return tx.Joins("LEFT JOIN conversation_ancestry ca_direct ON ca_direct.conversation_group_id = c.conversation_group_id AND ca_direct.descendant_conversation_id = c.id AND ca_direct.depth = 1")
@@ -3310,11 +3390,31 @@ func (s *SQLiteStore) hydrateConversationFork(ctx context.Context, conv *model.C
 	if result.RowsAffected == 0 {
 		conv.ForkedAtConversationID = nil
 		conv.ForkedAtEntryID = nil
+	} else {
+		parentID := direct.AncestorConversationID
+		conv.ForkedAtConversationID = &parentID
+		conv.ForkedAtEntryID = direct.ForkedAtEntryID
+	}
+	return s.hydrateConversationLineage(ctx, conv)
+}
+
+func (s *SQLiteStore) hydrateConversationLineage(ctx context.Context, conv *model.Conversation) error {
+	if conv.StartedByConversationID != nil {
 		return nil
 	}
-	parentID := direct.AncestorConversationID
-	conv.ForkedAtConversationID = &parentID
-	conv.ForkedAtEntryID = direct.ForkedAtEntryID
+	var lineage model.Conversation
+	result := s.dbFor(ctx).
+		Select("started_by_conversation_id, started_by_entry_id").
+		Where("conversation_group_id = ? AND started_by_conversation_id IS NOT NULL", conv.ConversationGroupID).
+		Limit(1).
+		Find(&lineage)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected > 0 {
+		conv.StartedByConversationID = lineage.StartedByConversationID
+		conv.StartedByEntryID = lineage.StartedByEntryID
+	}
 	return nil
 }
 
@@ -3332,36 +3432,6 @@ func (s *SQLiteStore) entryVisibleInConversationAncestry(ctx context.Context, co
 	}
 	depth, err := s.visibleAncestryDepthForEntry(ctx, conv, entry)
 	return depth != nil, err
-}
-
-func (s *SQLiteStore) startedConversationGroupIDsForDelete(ctx context.Context, rootGroupID uuid.UUID) ([]uuid.UUID, error) {
-	type row struct {
-		GroupID uuid.UUID `gorm:"column:conversation_group_id"`
-	}
-	var rows []row
-	query := `
-		WITH RECURSIVE lineage(id) AS (
-			SELECT id FROM conversations WHERE conversation_group_id = ?
-			UNION
-			SELECT c.id
-			FROM conversations c
-			JOIN lineage l ON c.started_by_conversation_id = l.id
-		)
-		SELECT DISTINCT conversation_group_id
-		FROM conversations
-		WHERE id IN (SELECT id FROM lineage)
-	`
-	if err := s.dbFor(ctx).Raw(query, rootGroupID).Scan(&rows).Error; err != nil {
-		return nil, fmt.Errorf("failed to resolve started conversation descendants: %w", err)
-	}
-	groupIDs := make([]uuid.UUID, 0, len(rows))
-	for _, row := range rows {
-		groupIDs = append(groupIDs, row.GroupID)
-	}
-	if len(groupIDs) == 0 {
-		groupIDs = append(groupIDs, rootGroupID)
-	}
-	return groupIDs, nil
 }
 
 func (s *SQLiteStore) listChildConversationsForBase(ctx context.Context, tx *gorm.DB, afterCursor *string, limit int) ([]registrystore.ConversationSummary, *string, error) {

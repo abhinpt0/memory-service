@@ -50,6 +50,10 @@ The child conversation:
 - copies the parent conversation's ownership and memberships, and
 - does not inherit or replay the parent conversation's history.
 
+If the child is forked, every branch keeps the child's `startedByConversationId`
+and optional `startedByEntryId`. The fork is another branch of the same logical
+child, not a second delegated task.
+
 That last point is intentional. Parent and child conversations are separate tasks, not two views of the same transcript.
 
 ```mermaid
@@ -98,14 +102,14 @@ curl -X POST "http://localhost:8080/v1/conversations/$CHILD_ID/entries" \
   }'
 ```
 
-The server creates the child conversation and writes that first entry in one operation. If the parent conversation is later deleted, its started child-conversation tree is cascade-deleted as well.
+The server creates the child conversation and writes that first entry in one operation. Archiving or unarchiving the parent changes only the parent's fork group. If retention eviction later hard-deletes the parent group, the child group remains readable. Its `startedByConversationId` and optional `startedByEntryId` remain as provenance, even though the referenced parent no longer exists.
 
 ## Listing Root and Child Conversations
 
 Conversation listing can now filter by ancestry before applying the existing fork-tree `mode`.
 
 - `ancestry=roots` returns conversations that were not started from another conversation.
-- `ancestry=children` returns only child conversations.
+- `ancestry=children` returns every branch whose logical fork tree is a child.
 - `ancestry=all` returns both.
 
 Examples:
@@ -133,6 +137,11 @@ curl "http://localhost:8080/v1/conversations/$PARENT_ID/children?limit=20" \
 ```
 
 Child conversations are ordered by `createdAt` ascending, with `conversationId` as the tie-breaker. Pagination resumes strictly after the child identified by `afterCursor`.
+
+This endpoint returns each logical child fork tree once. Its representative is
+the original child conversation. Use `ancestry=children&mode=all` to list every
+branch, or request `/v1/conversations/{childId}/forks` to navigate that child's
+fork tree.
 
 Example response:
 

@@ -123,8 +123,8 @@ Conversation:
 
 Semantics:
 
-- `startedByConversationId` identifies the parent conversation.
-- `startedByEntryId` identifies the source parent entry that caused the child conversation to be started.
+- `startedByConversationId` identifies the parent conversation for the logical child fork tree. Every branch reports the same value.
+- `startedByEntryId` identifies the source parent entry that caused the logical child conversation to be started. Every branch reports the same value when present.
 - `startedByEntryId` must belong to the visible ancestry of `startedByConversationId`, including entries inherited through that conversation's fork lineage.
 - When `startedByConversationId` is set, the service copies the parent's conversation memberships into the child conversation during creation.
 - The child conversation does not inherit or copy parent history entries.
@@ -249,7 +249,7 @@ The API should only return conversations visible to the authenticated caller und
 
 Visibility rules for child listing:
 
-- only direct children of the requested parent conversation are returned.
+- only direct children of the requested parent conversation are returned, once per logical child fork tree using its original conversation as the representative.
 - child conversations are ordered by `createdAt` ascending, with `conversationId` ascending as the deterministic tie-breaker.
 - `afterCursor` is the last returned child `conversationId`; the server resolves that conversation and continues strictly after its `(createdAt, conversationId)` sort position.
 - pagination follows the same cursor/limit pattern as other conversation-list APIs.
@@ -359,18 +359,19 @@ Add nullable columns / fields:
 
 ```sql
 ALTER TABLE conversations
-    ADD COLUMN started_by_conversation_id TEXT NULL REFERENCES conversations(id),
+    ADD COLUMN started_by_conversation_id TEXT NULL,
     ADD COLUMN started_by_entry_id UUID NULL REFERENCES entries(id);
 
 CREATE INDEX idx_conversations_started_by_conversation_id
     ON conversations (started_by_conversation_id);
 ```
 
-Deletion semantics:
+Lifecycle semantics:
 
-- deleting a conversation still deletes its fork tree under the existing rules,
-- deleting a parent conversation also cascade-deletes all direct and indirect started child conversations, and
-- deleting a child conversation deletes that child's own descendants in addition to its fork tree.
+- archive and unarchive operations change only the selected conversation's fork group,
+- hard eviction deletes only the selected conversation group and its fork tree,
+- started child groups remain readable when the referenced parent group is evicted, and
+- surviving branches keep their raw `startedByConversationId` and optional `startedByEntryId` values as dangling soft references.
 
 #### Entries
 
@@ -580,7 +581,7 @@ Feature: Agent conversation lineage
 - Store tests verifying child conversations start with only the atomic first entry and no inherited history
 - Store tests verifying child conversations copy parent ownership
 - Store tests verifying child conversations copy parent memberships
-- Store tests verifying deleting a parent conversation cascade-deletes all descendant child conversations
+- Store tests verifying parent-group eviction preserves descendant child groups and their started-by lineage
 - Child-listing API tests verifying only direct visible children are returned
 - Child-listing API tests verifying cursor/limit pagination
 - Conversation-list tests for `ancestry=roots|children|all`
@@ -630,7 +631,7 @@ The current partial implementation still reflects the more general multi-agent-p
 - [x] Copy parent ownership on child conversation creation
 - [x] Implement child membership copying on conversation creation
 - [x] Ensure child conversations start with the atomic first entry and no inherited history
-- [x] Cascade-delete started child-conversation trees when deleting a parent or child conversation
+- [x] Preserve started child-conversation trees and their lineage when hard-evicting a parent group
 - [x] Add REST and gRPC child-listing APIs
 - [x] Ensure child-listing returns only direct visible children
 - [x] Add child-listing pagination parameters and cursor handling

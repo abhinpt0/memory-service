@@ -306,6 +306,8 @@ func (s *PostgresStore) createConversationWithID(ctx context.Context, userID str
 	var membershipsToCopy []model.ConversationMembership
 	var sourceConv *model.Conversation
 	var anchorOwnerDepth *int
+	logicalStartedByConversationID := startedByConversationID
+	logicalStartedByEntryID := startedByEntryID
 	if forkedAtConversationID != nil {
 		var parent model.Conversation
 		if err := db.Where("id = ? AND archived_at IS NULL", *forkedAtConversationID).First(&parent).Error; err != nil {
@@ -339,6 +341,11 @@ func (s *PostgresStore) createConversationWithID(ctx context.Context, userID str
 			}
 			anchorOwnerDepth = ownerDepth
 		}
+		if err := s.hydrateConversationLineage(ctx, &parent); err != nil {
+			return nil, err
+		}
+		logicalStartedByConversationID = parent.StartedByConversationID
+		logicalStartedByEntryID = parent.StartedByEntryID
 		actualGroupID = parent.ConversationGroupID
 	} else if startedByConversationID != nil {
 		var parentConv model.Conversation
@@ -497,8 +504,8 @@ func (s *PostgresStore) createConversationWithID(ctx context.Context, userID str
 			ConversationGroupID:     actualGroupID,
 			ForkedAtConversationID:  forkedAtConversationID,
 			ForkedAtEntryID:         forkedAtEntryID,
-			StartedByConversationID: startedByConversationID,
-			StartedByEntryID:        startedByEntryID,
+			StartedByConversationID: logicalStartedByConversationID,
+			StartedByEntryID:        logicalStartedByEntryID,
 			CreatedAt:               now,
 			UpdatedAt:               now,
 			AccessLevel:             model.AccessLevelOwner,
@@ -577,10 +584,10 @@ func (s *PostgresStore) ListConversations(ctx context.Context, userID string, qu
 
 	switch ancestry {
 	case model.ConversationAncestryChildren:
-		base = base.Where("c.started_by_conversation_id IS NOT NULL")
+		base = base.Where("EXISTS (SELECT 1 FROM conversations lineage WHERE lineage.conversation_group_id = c.conversation_group_id AND lineage.started_by_conversation_id IS NOT NULL)")
 	case model.ConversationAncestryAll:
 	default:
-		base = base.Where("c.started_by_conversation_id IS NULL")
+		base = base.Where("NOT EXISTS (SELECT 1 FROM conversations lineage WHERE lineage.conversation_group_id = c.conversation_group_id AND lineage.started_by_conversation_id IS NOT NULL)")
 	}
 
 	for _, p := range metadataFilters {
@@ -2497,10 +2504,10 @@ func (s *PostgresStore) AdminListConversations(ctx context.Context, query regist
 	}
 	switch query.Ancestry {
 	case model.ConversationAncestryChildren:
-		base = base.Where("c.started_by_conversation_id IS NOT NULL")
+		base = base.Where("EXISTS (SELECT 1 FROM conversations lineage WHERE lineage.conversation_group_id = c.conversation_group_id AND lineage.started_by_conversation_id IS NOT NULL)")
 	case model.ConversationAncestryAll:
 	default:
-		base = base.Where("c.started_by_conversation_id IS NULL")
+		base = base.Where("NOT EXISTS (SELECT 1 FROM conversations lineage WHERE lineage.conversation_group_id = c.conversation_group_id AND lineage.started_by_conversation_id IS NOT NULL)")
 	}
 	var anchorCreatedAt *time.Time
 	var anchorID *string
@@ -3316,7 +3323,7 @@ func valueOrEmpty(ptr *string) string {
 	return *ptr
 }
 
-const conversationSelectColumns = "c.id, c.title, c.owner_user_id, c.client_id, c.agent_id, c.metadata, c.conversation_group_id, ca_direct.forked_at_entry_id, ca_direct.ancestor_conversation_id AS forked_at_conversation_id, c.started_by_conversation_id, c.started_by_entry_id, c.created_at, c.updated_at, c.archived_at"
+const conversationSelectColumns = "c.id, c.title, c.owner_user_id, c.client_id, c.agent_id, c.metadata, c.conversation_group_id, ca_direct.forked_at_entry_id, ca_direct.ancestor_conversation_id AS forked_at_conversation_id, (SELECT lineage.started_by_conversation_id FROM conversations lineage WHERE lineage.conversation_group_id = c.conversation_group_id AND lineage.started_by_conversation_id IS NOT NULL LIMIT 1) AS started_by_conversation_id, (SELECT lineage.started_by_entry_id FROM conversations lineage WHERE lineage.conversation_group_id = c.conversation_group_id AND lineage.started_by_conversation_id IS NOT NULL LIMIT 1) AS started_by_entry_id, c.created_at, c.updated_at, c.archived_at"
 
 func joinDirectConversationAncestry(tx *gorm.DB) *gorm.DB {
 	return tx.Joins("LEFT JOIN conversation_ancestry ca_direct ON ca_direct.conversation_group_id = c.conversation_group_id AND ca_direct.descendant_conversation_id = c.id AND ca_direct.depth = 1")
@@ -3378,11 +3385,31 @@ func (s *PostgresStore) hydrateConversationFork(ctx context.Context, conv *model
 	if result.RowsAffected == 0 {
 		conv.ForkedAtConversationID = nil
 		conv.ForkedAtEntryID = nil
+	} else {
+		parentID := direct.AncestorConversationID
+		conv.ForkedAtConversationID = &parentID
+		conv.ForkedAtEntryID = direct.ForkedAtEntryID
+	}
+	return s.hydrateConversationLineage(ctx, conv)
+}
+
+func (s *PostgresStore) hydrateConversationLineage(ctx context.Context, conv *model.Conversation) error {
+	if conv.StartedByConversationID != nil {
 		return nil
 	}
-	parentID := direct.AncestorConversationID
-	conv.ForkedAtConversationID = &parentID
-	conv.ForkedAtEntryID = direct.ForkedAtEntryID
+	var lineage model.Conversation
+	result := s.dbFor(ctx).
+		Select("started_by_conversation_id, started_by_entry_id").
+		Where("conversation_group_id = ? AND started_by_conversation_id IS NOT NULL", conv.ConversationGroupID).
+		Limit(1).
+		Find(&lineage)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected > 0 {
+		conv.StartedByConversationID = lineage.StartedByConversationID
+		conv.StartedByEntryID = lineage.StartedByEntryID
+	}
 	return nil
 }
 

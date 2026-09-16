@@ -113,7 +113,13 @@ export type ConversationSummary = {
   updatedAt?: string;
   lastMessagePreview?: string;
   accessLevel?: AccessLevel;
+  /**
+   * Parent conversation that started this logical conversation tree. Fork branches inherit this value.
+   */
   startedByConversationId?: string;
+  /**
+   * Parent entry that started this logical conversation tree. Fork branches inherit this value.
+   */
   startedByEntryId?: string;
   /**
    * Synthetic archive flag derived from the internal archived timestamp.
@@ -138,6 +144,13 @@ export type ChildConversationSummary = {
   updatedAt?: string;
   lastMessagePreview?: string;
   accessLevel?: AccessLevel;
+  /**
+   * Parent conversation that started this logical child conversation tree.
+   */
+  startedByConversationId?: string;
+  /**
+   * Parent entry that started this logical child conversation tree.
+   */
   startedByEntryId?: string;
   /**
    * Synthetic archive flag derived from the internal archived timestamp.
@@ -159,11 +172,11 @@ export type Conversation = ConversationSummary & {
    */
   forkedAtConversationId?: string;
   /**
-   * Parent conversation that started this child conversation.
+   * Parent conversation that started this logical conversation tree. Fork branches inherit this value.
    */
   startedByConversationId?: string;
   /**
-   * Parent entry that started this child conversation.
+   * Parent entry that started this logical conversation tree. Fork branches inherit this value.
    */
   startedByEntryId?: string;
 };
@@ -916,7 +929,7 @@ export type ListConversationsData = {
     /**
      * Started-conversation ancestry filter.
      * - `roots`: include only top-level conversations not started from another conversation.
-     * - `children`: include only conversations started from another conversation.
+     * - `children`: include every branch of conversation trees started from another conversation.
      * - `all`: include both root and child conversations.
      */
     ancestry?: "all" | "roots" | "children";

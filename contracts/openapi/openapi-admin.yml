@@ -750,6 +750,9 @@ paths:
         - name: ancestry
           in: query
           required: false
+          description: |-
+            Started-conversation ancestry filter. `children` includes every fork branch
+            whose logical conversation tree was started from another conversation.
           schema:
             type: string
             enum: [all, roots, children]
@@ -1168,6 +1171,9 @@ paths:
     get:
       tags: [Admin]
       summary: List direct child conversations
+      description: |-
+        Lists each logical child conversation tree once, using the original child
+        conversation as its representative. Fork branches retain the same started-by relationship.
       operationId: adminListChildConversations
       parameters:
         - name: id
@@ -2503,10 +2509,12 @@ components:
         startedByConversationId:
           type: string
           nullable: true
+          description: Parent conversation that started this logical conversation tree. Fork branches inherit this value.
         startedByEntryId:
           type: string
           format: uuid
           nullable: true
+          description: Parent entry that started this logical conversation tree. Fork branches inherit this value.
     AdminChildConversationSummary:
       type: object
       properties:
@@ -2532,10 +2540,15 @@ components:
           nullable: true
         accessLevel:
           $ref: '#/components/schemas/AccessLevel'
+        startedByConversationId:
+          type: string
+          nullable: true
+          description: Parent conversation that started this logical child conversation tree.
         startedByEntryId:
           type: string
           format: uuid
           nullable: true
+          description: Parent entry that started this logical child conversation tree.
     AdminConversation:
       allOf:
         - $ref: '#/components/schemas/AdminConversationSummary'
@@ -2554,10 +2567,12 @@ components:
             startedByConversationId:
               type: string
               nullable: true
+              description: Parent conversation that started this logical conversation tree. Fork branches inherit this value.
             startedByEntryId:
               type: string
               format: uuid
               nullable: true
+              description: Parent entry that started this logical conversation tree. Fork branches inherit this value.
     AdminActionRequest:
       type: object
       properties:

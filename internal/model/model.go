@@ -77,22 +77,24 @@ func (ConversationGroup) TableName() string { return "conversation_groups" }
 
 // Conversation represents a single conversation within a group.
 type Conversation struct {
-	ID                      string                 `json:"id"                                gorm:"primaryKey;type:text"`
-	Title                   []byte                 `json:"-"                                 gorm:"type:bytea"` // encrypted
-	OwnerUserID             string                 `json:"ownerUserId"                       gorm:"not null"`
-	ClientID                string                 `json:"-"                                 gorm:"not null"`
-	AgentID                 *string                `json:"agentId,omitempty"`
-	Metadata                map[string]interface{} `json:"metadata"                          gorm:"type:jsonb;serializer:json;not null;default:'{}'"` // JSONB
-	ConversationGroupID     uuid.UUID              `json:"-"                                 gorm:"not null;type:uuid"`
-	ConversationGroup       *ConversationGroup     `json:"-"                                 gorm:"foreignKey:ConversationGroupID"`
-	ForkedAtEntryID         *uuid.UUID             `json:"forkedAtEntryId,omitempty"         gorm:"-"`
-	ForkedAtConversationID  *string                `json:"forkedAtConversationId,omitempty"  gorm:"-"`
-	StartedByConversationID *string                `json:"startedByConversationId,omitempty" gorm:"type:text"`
-	StartedByEntryID        *uuid.UUID             `json:"startedByEntryId,omitempty"        gorm:"type:uuid"`
-	CreatedAt               time.Time              `json:"createdAt"                         gorm:"not null;default:now()"`
-	UpdatedAt               time.Time              `json:"updatedAt"                         gorm:"not null;default:now()"`
-	VectorizedAt            *time.Time             `json:"vectorizedAt,omitempty"`
-	ArchivedAt              *time.Time             `json:"archivedAt,omitempty"`
+	ID                     string                 `json:"id"                               gorm:"primaryKey;type:text"`
+	Title                  []byte                 `json:"-"                                gorm:"type:bytea"` // encrypted
+	OwnerUserID            string                 `json:"ownerUserId"                      gorm:"not null"`
+	ClientID               string                 `json:"-"                                gorm:"not null"`
+	AgentID                *string                `json:"agentId,omitempty"`
+	Metadata               map[string]interface{} `json:"metadata"                         gorm:"type:jsonb;serializer:json;not null;default:'{}'"` // JSONB
+	ConversationGroupID    uuid.UUID              `json:"-"                                gorm:"not null;type:uuid"`
+	ConversationGroup      *ConversationGroup     `json:"-"                                gorm:"foreignKey:ConversationGroupID"`
+	ForkedAtEntryID        *uuid.UUID             `json:"forkedAtEntryId,omitempty"        gorm:"-"`
+	ForkedAtConversationID *string                `json:"forkedAtConversationId,omitempty" gorm:"-"`
+	// Started-by lineage is stored on the original conversation in the fork group
+	// and projected onto every branch in API and store response models.
+	StartedByConversationID *string    `json:"startedByConversationId,omitempty" gorm:"type:text"`
+	StartedByEntryID        *uuid.UUID `json:"startedByEntryId,omitempty"        gorm:"type:uuid"`
+	CreatedAt               time.Time  `json:"createdAt"                         gorm:"not null;default:now()"`
+	UpdatedAt               time.Time  `json:"updatedAt"                         gorm:"not null;default:now()"`
+	VectorizedAt            *time.Time `json:"vectorizedAt,omitempty"`
+	ArchivedAt              *time.Time `json:"archivedAt,omitempty"`
 }
 
 func (Conversation) TableName() string { return "conversations" }

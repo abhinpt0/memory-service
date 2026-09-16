@@ -499,6 +499,10 @@ export class ConversationsService {
 
   /**
    * List direct child conversations
+   *
+   * Lists each logical child conversation tree once, using the original child
+   * conversation as its representative. Fork branches retain the same started-by
+   * relationship and are available through conversation listing and fork navigation.
    */
   public static listConversationChildren<ThrowOnError extends boolean = true>(
     parameters: {

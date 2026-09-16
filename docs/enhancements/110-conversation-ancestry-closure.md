@@ -198,7 +198,7 @@ MongoDB reads hydrate them from `conversation_ancestry.parent_conversation_id` a
 
 The request fields used to create a fork also remain unchanged.
 
-`started_by_conversation_id` and `started_by_entry_id` remain on `conversations`. Started-by lineage represents cross-group agent orchestration provenance, not same-group fork ancestry, and does not participate in entry visibility.
+`started_by_conversation_id` and `started_by_entry_id` remain on `conversations`, stored on the original conversation in each fork group. Reads project those values onto every branch because started-by lineage describes the logical conversation tree. It represents cross-group agent orchestration provenance, not same-group fork ancestry, and does not participate in entry visibility.
 
 ### Ancestry Construction
 
@@ -360,11 +360,11 @@ Queries that currently inspect direct fork columns are expressed through ancestr
 
 Conversation list and fork-summary queries should join only the depth-1 row needed for public fork metadata. They must not load the complete closure unless ancestry is required.
 
-The public `ancestry=roots|children|all` conversation-list parameter describes `started_by_conversation_id`, not fork ancestry, and remains unchanged. `mode=latest-fork` continues to select the most recently updated conversation in each group; it is not equivalent to selecting a leaf in the fork closure.
+The public `ancestry=roots|children|all` conversation-list parameter describes logical started-by lineage, not fork ancestry. All branches in a started conversation group are children for this filter. `mode=latest-fork` continues to select the most recently updated conversation in each group; it is not equivalent to selecting a leaf in the fork closure. The dedicated children API returns the original conversation once per child group, while `ancestry=children&mode=all` returns its branches explicitly.
 
 ### Delete Semantics
 
-The service only hard-deletes conversation groups; it does not delete individual fork nodes. `conversation_ancestry.conversation_group_id` therefore references `conversation_groups(id) ON DELETE CASCADE`, making ancestry cleanup follow the supported lifecycle directly. Deleting a group cascades to conversations, entries, memberships, and ancestry rows. Consequently, removing the direct-parent foreign key does not change supported deletion behavior.
+The service archives, unarchives, and hard-deletes whole conversation groups; it does not apply those operations to individual fork nodes. `conversation_ancestry.conversation_group_id` therefore references `conversation_groups(id) ON DELETE CASCADE`, so deletion removes the selected group's conversations, entries, memberships, and ancestry rows. Started-by fields are cross-group soft references. A parent-group lifecycle operation does not change its started child groups, and those groups keep their raw started-by IDs after parent eviction.
 
 Individual conversation hard deletion remains unsupported. If it is introduced later, it must define whether descendants are deleted, reparented, or rejected; closure-row foreign keys alone are not a substitute for that policy.
 
