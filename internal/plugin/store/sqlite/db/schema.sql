@@ -24,7 +24,10 @@ CREATE TABLE IF NOT EXISTS conversations (
     agent_id TEXT,
     metadata TEXT NOT NULL DEFAULT '{}',
     conversation_group_id TEXT NOT NULL REFERENCES conversation_groups(id) ON DELETE CASCADE,
-    started_by_conversation_id TEXT REFERENCES conversations(id) ON DELETE CASCADE,
+    -- Canonical logical lineage lives on the original conversation in a fork group.
+    -- Reads project it onto every branch without copying these columns to fork rows.
+    -- Soft reference: the starting conversation may be hard-evicted independently.
+    started_by_conversation_id TEXT,
     started_by_entry_id TEXT,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -316,4 +319,3 @@ CREATE TABLE IF NOT EXISTS memory_vectors (
 
 CREATE INDEX IF NOT EXISTS idx_memory_vectors_namespace
     ON memory_vectors(namespace);
-

@@ -299,7 +299,13 @@ export type AdminConversationSummary = {
   metadata?: {
     [key: string]: unknown;
   };
+  /**
+   * Parent conversation that started this logical conversation tree. Fork branches inherit this value.
+   */
   startedByConversationId?: string;
+  /**
+   * Parent entry that started this logical conversation tree. Fork branches inherit this value.
+   */
   startedByEntryId?: string;
 };
 
@@ -318,6 +324,13 @@ export type AdminChildConversationSummary = {
   archived?: boolean;
   lastMessagePreview?: string;
   accessLevel?: AccessLevel;
+  /**
+   * Parent conversation that started this logical child conversation tree.
+   */
+  startedByConversationId?: string;
+  /**
+   * Parent entry that started this logical child conversation tree.
+   */
   startedByEntryId?: string;
 };
 
@@ -330,7 +343,13 @@ export type AdminConversation = AdminConversationSummary & {
    * Conversation ID from which this conversation was forked.
    */
   forkedAtConversationId?: string;
+  /**
+   * Parent conversation that started this logical conversation tree. Fork branches inherit this value.
+   */
   startedByConversationId?: string;
+  /**
+   * Parent entry that started this logical conversation tree. Fork branches inherit this value.
+   */
   startedByEntryId?: string;
 };
 
@@ -1392,6 +1411,10 @@ export type AdminListConversationsData = {
      * This is useful for showing a single representative conversation from each tree.
      */
     mode?: "all" | "roots" | "latest-fork";
+    /**
+     * Started-conversation ancestry filter. `children` includes every fork branch
+     * whose logical conversation tree was started from another conversation.
+     */
     ancestry?: "all" | "roots" | "children";
     /**
      * Filter conversations owned by this user.

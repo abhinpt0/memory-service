@@ -35,13 +35,20 @@ CREATE TABLE IF NOT EXISTS conversations (
     agent_id        TEXT,
     metadata        JSONB NOT NULL DEFAULT '{}'::JSONB,
     conversation_group_id UUID NOT NULL REFERENCES conversation_groups (id) ON DELETE CASCADE,
-    started_by_conversation_id TEXT REFERENCES conversations (id) ON DELETE CASCADE,
+    -- Canonical logical lineage lives on the original conversation in a fork group.
+    -- Reads project it onto every branch without copying these columns to fork rows.
+    -- Soft reference: the starting conversation may be hard-evicted independently.
+    started_by_conversation_id TEXT,
     started_by_entry_id UUID,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     vectorized_at   TIMESTAMPTZ,
     archived_at     TIMESTAMPTZ
 );
+
+-- Reconcile databases created before started-by lineage became a soft reference.
+ALTER TABLE conversations
+    DROP CONSTRAINT IF EXISTS conversations_started_by_conversation_id_fkey;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_group_id_id
     ON conversations (conversation_group_id, id);

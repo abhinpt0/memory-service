@@ -648,13 +648,35 @@ func (s *MongoStore) hydrateConversationFork(ctx context.Context, doc *convDoc) 
 	if errors.Is(err, mongo.ErrNoDocuments) {
 		doc.ForkedAtConversationID = nil
 		doc.ForkedAtEntryID = nil
+	} else if err != nil {
+		return fmt.Errorf("failed to load conversation ancestry: %w", err)
+	} else {
+		doc.ForkedAtConversationID = ptrStrToConversationID(ancestry.ParentConversationID)
+		doc.ForkedAtEntryID = ptrStrToUUID(ancestry.ForkedAtEntryID)
+	}
+	return s.hydrateConversationLineage(ctx, doc)
+}
+
+func (s *MongoStore) hydrateConversationLineage(ctx context.Context, doc *convDoc) error {
+	if doc.StartedByConversationID != nil {
+		return nil
+	}
+	var lineage convDoc
+	err := s.conversations().FindOne(ctx, bson.M{
+		"conversation_group_id":      doc.ConversationGroupID,
+		"started_by_conversation_id": bson.M{"$exists": true},
+	}, options.FindOne().SetProjection(bson.M{
+		"started_by_conversation_id": 1,
+		"started_by_entry_id":        1,
+	})).Decode(&lineage)
+	if errors.Is(err, mongo.ErrNoDocuments) {
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("failed to load conversation ancestry: %w", err)
+		return fmt.Errorf("failed to load conversation lineage: %w", err)
 	}
-	doc.ForkedAtConversationID = ptrStrToConversationID(ancestry.ParentConversationID)
-	doc.ForkedAtEntryID = ptrStrToUUID(ancestry.ForkedAtEntryID)
+	doc.StartedByConversationID = lineage.StartedByConversationID
+	doc.StartedByEntryID = lineage.StartedByEntryID
 	return nil
 }
 
@@ -945,6 +967,8 @@ func (s *MongoStore) createConversation(ctx context.Context, userID string, clie
 	var membershipsToCopy []memberDoc
 	var sourceConv *convDoc
 	var anchorOwnerDepth *int
+	logicalStartedByConversationID := startedByConversationID
+	logicalStartedByEntryID := startedByEntryID
 	if forkedAtConversationID != nil {
 		var parent convDoc
 		err := s.conversations().FindOne(ctx, bson.M{
@@ -985,6 +1009,11 @@ func (s *MongoStore) createConversation(ctx context.Context, userID string, clie
 			}
 			anchorOwnerDepth = ownerDepth
 		}
+		if err := s.hydrateConversationLineage(ctx, &parent); err != nil {
+			return nil, err
+		}
+		logicalStartedByConversationID = ptrStrToConversationID(parent.StartedByConversationID)
+		logicalStartedByEntryID = ptrStrToUUID(parent.StartedByEntryID)
 		actualGroupID = parent.ConversationGroupID
 	} else if startedByConversationID != nil {
 		var parentConv convDoc
@@ -1102,7 +1131,6 @@ func (s *MongoStore) createConversation(ctx context.Context, userID string, clie
 			}
 		}
 	}
-
 	return &registrystore.ConversationDetail{
 		ConversationSummary: registrystore.ConversationSummary{
 			ID:                      convID,
@@ -1114,8 +1142,8 @@ func (s *MongoStore) createConversation(ctx context.Context, userID string, clie
 			ConversationGroupID:     strToUUID(actualGroupID),
 			ForkedAtConversationID:  forkedAtConversationID,
 			ForkedAtEntryID:         forkedAtEntryID,
-			StartedByConversationID: startedByConversationID,
-			StartedByEntryID:        startedByEntryID,
+			StartedByConversationID: logicalStartedByConversationID,
+			StartedByEntryID:        logicalStartedByEntryID,
 			CreatedAt:               now,
 			UpdatedAt:               now,
 			AccessLevel:             model.AccessLevelOwner,
@@ -1196,6 +1224,42 @@ func buildConversationAggregateOptions(metadataFilters []registrystore.Conversat
 	return opts
 }
 
+func appendLogicalConversationLineage(pipeline mongo.Pipeline, ancestry model.ConversationAncestryFilter) mongo.Pipeline {
+	pipeline = append(pipeline, bson.D{{Key: "$lookup", Value: bson.M{
+		"from": "conversations",
+		"let":  bson.M{"group_id": "$conversation_group_id"},
+		"pipeline": mongo.Pipeline{
+			bson.D{{Key: "$match", Value: bson.M{
+				"$expr":                      bson.M{"$eq": bson.A{"$conversation_group_id", "$$group_id"}},
+				"started_by_conversation_id": bson.M{"$exists": true},
+			}}},
+			bson.D{{Key: "$project", Value: bson.M{
+				"_id":                        0,
+				"started_by_conversation_id": 1,
+				"started_by_entry_id":        1,
+			}}},
+			bson.D{{Key: "$limit", Value: 1}},
+		},
+		"as": "logical_lineage",
+	}}})
+	switch ancestry {
+	case model.ConversationAncestryChildren:
+		pipeline = append(pipeline, bson.D{{Key: "$match", Value: bson.M{"logical_lineage.0": bson.M{"$exists": true}}}})
+	case model.ConversationAncestryAll:
+	default:
+		pipeline = append(pipeline, bson.D{{Key: "$match", Value: bson.M{"logical_lineage.0": bson.M{"$exists": false}}}})
+	}
+	pipeline = append(pipeline,
+		bson.D{{Key: "$unwind", Value: bson.M{"path": "$logical_lineage", "preserveNullAndEmptyArrays": true}}},
+		bson.D{{Key: "$set", Value: bson.M{
+			"started_by_conversation_id": "$logical_lineage.started_by_conversation_id",
+			"started_by_entry_id":        "$logical_lineage.started_by_entry_id",
+		}}},
+		bson.D{{Key: "$project", Value: bson.M{"logical_lineage": 0}}},
+	)
+	return pipeline
+}
+
 func buildPublicConversationListPipeline(userID string, anchorCreatedAt *time.Time, anchorID *string, limit int, mode model.ConversationListMode, ancestry model.ConversationAncestryFilter, archived registrystore.ArchiveFilter, metadataFilters []registrystore.ConversationMetadataPredicate) mongo.Pipeline {
 	// Build the conversation-side filter before joining from the authenticated
 	// user's memberships. This keeps the authorization work proportional to the
@@ -1209,14 +1273,6 @@ func buildPublicConversationListPipeline(userID string, anchorCreatedAt *time.Ti
 	default:
 		baseMatch["archived_at"] = bson.M{"$exists": false}
 	}
-	switch ancestry {
-	case model.ConversationAncestryChildren:
-		baseMatch["started_by_conversation_id"] = bson.M{"$exists": true}
-	case model.ConversationAncestryAll:
-	default:
-		baseMatch["started_by_conversation_id"] = bson.M{"$exists": false}
-	}
-
 	metaMatch := buildMongoMetadataFilterMatch(metadataFilters)
 	if metaMatch != nil {
 		if andList, ok := metaMatch["$and"].(bson.A); ok && len(andList) > 0 {
@@ -1246,6 +1302,7 @@ func buildPublicConversationListPipeline(userID string, anchorCreatedAt *time.Ti
 			bson.M{"access_level": "$access_level"},
 		}},
 	}}})
+	pipeline = appendLogicalConversationLineage(pipeline, ancestry)
 
 	// 2. For mode=roots, lookup conversation_ancestry and retain documents without parent
 	if mode == model.ListModeRoots {
@@ -1316,13 +1373,6 @@ func buildAdminConversationListPipeline(query registrystore.AdminConversationQue
 	if query.UserID != nil {
 		baseMatch["owner_user_id"] = *query.UserID
 	}
-	switch query.Ancestry {
-	case model.ConversationAncestryChildren:
-		baseMatch["started_by_conversation_id"] = bson.M{"$exists": true}
-	case model.ConversationAncestryAll:
-	default:
-		baseMatch["started_by_conversation_id"] = bson.M{"$exists": false}
-	}
 	if query.ArchivedAfter != nil {
 		if existing, ok := baseMatch["archived_at"]; ok {
 			if m, ok := existing.(bson.M); ok {
@@ -1352,6 +1402,7 @@ func buildAdminConversationListPipeline(query registrystore.AdminConversationQue
 	if len(baseMatch) > 0 {
 		pipeline = append(pipeline, bson.D{{Key: "$match", Value: baseMatch}})
 	}
+	pipeline = appendLogicalConversationLineage(pipeline, query.Ancestry)
 
 	// 2. For mode=roots, lookup conversation_ancestry and retain documents without parent
 	if query.Mode == model.ListModeRoots {
@@ -3997,12 +4048,26 @@ func (s *MongoStore) HardDeleteConversationGroups(ctx context.Context, groupIDs 
 
 	filter := bson.M{"conversation_group_id": bson.M{"$in": strIDs}}
 
-	// Delete in order: entries → conversations → memberships → transfers → groups
-	s.entries().DeleteMany(ctx, filter)
-	s.conversations().DeleteMany(ctx, filter)
-	s.memberships().DeleteMany(ctx, filter)
-	s.transfers().DeleteMany(ctx, filter)
-	s.groups().DeleteMany(ctx, bson.M{"_id": bson.M{"$in": strIDs}})
+	// Delete ancestry claims before conversations so an interrupted cleanup cannot
+	// leave an evicted conversation ID permanently reserved.
+	if _, err := s.entries().DeleteMany(ctx, filter); err != nil {
+		return fmt.Errorf("delete conversation entries: %w", err)
+	}
+	if _, err := s.conversationAncestry().DeleteMany(ctx, filter); err != nil {
+		return fmt.Errorf("delete conversation ancestry: %w", err)
+	}
+	if _, err := s.conversations().DeleteMany(ctx, filter); err != nil {
+		return fmt.Errorf("delete conversations: %w", err)
+	}
+	if _, err := s.memberships().DeleteMany(ctx, filter); err != nil {
+		return fmt.Errorf("delete conversation memberships: %w", err)
+	}
+	if _, err := s.transfers().DeleteMany(ctx, filter); err != nil {
+		return fmt.Errorf("delete conversation ownership transfers: %w", err)
+	}
+	if _, err := s.groups().DeleteMany(ctx, bson.M{"_id": bson.M{"$in": strIDs}}); err != nil {
+		return fmt.Errorf("delete conversation groups: %w", err)
+	}
 	return nil
 }
 

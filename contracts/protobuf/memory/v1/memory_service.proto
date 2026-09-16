@@ -94,7 +94,9 @@ message ConversationSummary {
   string updated_at = 5;
   string last_message_preview = 6;
   AccessLevel access_level = 7;
+  // Parent conversation that started this logical conversation tree. Fork branches inherit it.
   string started_by_conversation_id = 8;
+  // Parent entry that started this logical conversation tree. Fork branches inherit it.
   bytes started_by_entry_id = 9;
   bool archived = 10;
   optional string agent_id = 11;
@@ -112,8 +114,10 @@ message ChildConversationSummary {
   string updated_at = 5;
   string last_message_preview = 6;
   AccessLevel access_level = 7;
+  // Parent entry that started this logical child conversation tree.
   bytes started_by_entry_id = 8;
   bool archived = 9;
+  // Parent conversation that started this logical child conversation tree.
   string started_by_conversation_id = 10;
 }
 
@@ -133,7 +137,9 @@ message Conversation {
   bytes forked_at_entry_id = 9;
   // Conversation ID from which this was forked (empty if root)
   string forked_at_conversation_id = 10;
+  // Parent conversation that started this logical conversation tree. Fork branches inherit it.
   string started_by_conversation_id = 11;
+  // Parent entry that started this logical conversation tree. Fork branches inherit it.
   bytes started_by_entry_id = 12;
   string agent_id = 13;
   bool archived = 14;
@@ -246,6 +252,8 @@ message ConversationForkOption {
 }
 
 message ListChildConversationsRequest {
+  // Parent conversation identifier. The response contains one original
+  // conversation per logical child fork tree.
   string conversation_id = 1;
   PageRequest page = 2;
 }
@@ -503,7 +511,9 @@ message AdminConversationSummary {
   string updated_at = 5;
   string last_message_preview = 6;
   AccessLevel access_level = 7;
+  // Parent conversation that started this logical conversation tree. Fork branches inherit it.
   string started_by_conversation_id = 8;
+  // Parent entry that started this logical conversation tree. Fork branches inherit it.
   bytes started_by_entry_id = 9;
   bool archived = 10;
   string client_id = 11;

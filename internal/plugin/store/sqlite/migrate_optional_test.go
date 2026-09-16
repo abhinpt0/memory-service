@@ -126,6 +126,62 @@ func TestSQLiteMigratorBackfillsEntryCreatedAtUnixMS(t *testing.T) {
 	require.Equal(t, unixMS, unixMSAfterSecondMigration)
 }
 
+func TestSQLiteMigratorMakesStartedByConversationASoftReference(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "memory.db")
+	legacy, err := sql.Open("sqlite3", dbPath)
+	require.NoError(t, err)
+	legacy.SetMaxOpenConns(1)
+	legacySchema := strings.Replace(
+		schemaSQL,
+		"started_by_conversation_id TEXT,",
+		"started_by_conversation_id TEXT REFERENCES conversations(id) ON DELETE CASCADE,",
+		1,
+	)
+	require.NotEqual(t, schemaSQL, legacySchema)
+	_, err = legacy.Exec(legacySchema)
+	require.NoError(t, err)
+	_, err = legacy.Exec(`
+		INSERT INTO conversation_groups (id) VALUES ('parent-group'), ('child-group');
+		INSERT INTO conversations (
+			id, owner_user_id, client_id, conversation_group_id
+		) VALUES ('parent-conversation', 'alice', 'test-client', 'parent-group');
+		INSERT INTO conversations (
+			id, owner_user_id, client_id, conversation_group_id, started_by_conversation_id
+		) VALUES ('child-conversation', 'alice', 'test-client', 'child-group', 'parent-conversation');
+	`)
+	require.NoError(t, err)
+	require.NoError(t, legacy.Close())
+
+	cfg := &config.Config{
+		DatastoreType:           "sqlite",
+		DBURL:                   dbPath,
+		DatastoreMigrateAtStart: true,
+	}
+	ctx := config.WithContext(context.Background(), cfg)
+	require.NoError(t, (&sqliteMigrator{}).Migrate(ctx))
+
+	db, _, err := SharedDB(ctx)
+	require.NoError(t, err)
+	require.NoError(t, db.Exec("DELETE FROM conversation_groups WHERE id = ?", "parent-group").Error)
+
+	var childCount int64
+	require.NoError(t, db.Raw(
+		"SELECT COUNT(*) FROM conversations WHERE id = ? AND started_by_conversation_id = ?",
+		"child-conversation", "parent-conversation",
+	).Scan(&childCount).Error)
+	require.Equal(t, int64(1), childCount)
+
+	var startedByForeignKeys int64
+	require.NoError(t, db.Raw(`
+		SELECT COUNT(*)
+		FROM pragma_foreign_key_list('conversations')
+		WHERE "from" = 'started_by_conversation_id'
+	`).Scan(&startedByForeignKeys).Error)
+	require.Zero(t, startedByForeignKeys)
+}
+
 func TestSQLiteMigratorDropsObsoleteMemoryKindDefaults(t *testing.T) {
 	t.Parallel()
 
