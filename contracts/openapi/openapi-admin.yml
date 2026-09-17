@@ -757,6 +757,24 @@ paths:
             type: string
             enum: [all, roots, children]
             default: roots
+        - name: sort
+          in: query
+          required: false
+          description: Timestamp field used to order conversations.
+          schema:
+            type: string
+            enum: [createdAt, updatedAt]
+            x-enum-varnames: [ConversationSortCreatedAt, ConversationSortUpdatedAt]
+            default: createdAt
+        - name: direction
+          in: query
+          required: false
+          description: Sort direction. Conversation ID is used as a deterministic tie-breaker in the same direction.
+          schema:
+            type: string
+            enum: [asc, desc]
+            x-enum-varnames: [ConversationSortDirectionAsc, ConversationSortDirectionDesc]
+            default: desc
         - name: userId
           in: query
           required: false
@@ -788,7 +806,9 @@ paths:
         - name: afterCursor
           in: query
           required: false
-          description: Cursor for pagination (UUID format).
+          description: |-
+            Cursor for pagination. Treat this value as opaque and repeat the same sort and direction
+            on subsequent requests. Legacy unsorted requests continue to use conversation IDs.
           schema:
             type: string
         - name: upToEntryId

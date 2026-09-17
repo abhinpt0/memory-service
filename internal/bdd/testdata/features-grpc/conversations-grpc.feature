@@ -170,6 +170,59 @@ Feature: Conversations gRPC API
     Then the gRPC response should not have an error
     And the gRPC response field "conversations" should not be null
 
+  Scenario: Sort and paginate conversations by updatedAt via gRPC
+    Given I have a conversation with title "gRPC Conversation A"
+    And set "grpcConversationAId" to "${conversationId}"
+    And I set conversation "${grpcConversationAId}" timestamps to createdAt "2026-01-01T10:00:00Z" and updatedAt "2026-01-04T10:00:00Z"
+    And I have a conversation with title "gRPC Conversation B"
+    And set "grpcConversationBId" to "${conversationId}"
+    And I set conversation "${grpcConversationBId}" timestamps to createdAt "2026-01-02T10:00:00Z" and updatedAt "2026-01-03T10:00:00Z"
+    When I send gRPC request "ConversationsService/ListConversations" with body:
+    """
+    sort {
+      field: UPDATED_AT
+      direction: DESC
+    }
+    page { page_size: 1 }
+    """
+    Then the gRPC response should not have an error
+    And the gRPC response field "conversations[0].id" should be "${grpcConversationAId}"
+    And set "grpcSortedConversationCursor" to the gRPC response field "pageInfo.nextPageToken"
+    When I send gRPC request "ConversationsService/ListConversations" with body:
+    """
+    sort {
+      field: UPDATED_AT
+      direction: DESC
+    }
+    page {
+      page_token: "${grpcSortedConversationCursor}"
+      page_size: 1
+    }
+    """
+    Then the gRPC response should not have an error
+    And the gRPC response field "conversations[0].id" should be "${grpcConversationBId}"
+
+  Scenario: Admin sorts conversations by updatedAt via gRPC
+    Given I have a conversation with title "Admin gRPC Conversation A"
+    And set "adminGrpcConversationAId" to "${conversationId}"
+    And I set conversation "${adminGrpcConversationAId}" timestamps to createdAt "2026-01-01T10:00:00Z" and updatedAt "2026-01-04T10:00:00Z"
+    And I have a conversation with title "Admin gRPC Conversation B"
+    And set "adminGrpcConversationBId" to "${conversationId}"
+    And I set conversation "${adminGrpcConversationBId}" timestamps to createdAt "2026-01-02T10:00:00Z" and updatedAt "2026-01-03T10:00:00Z"
+    Given I am authenticated as admin user "alice"
+    When I send gRPC request "AdminConversationsService/ListConversations" with body:
+    """
+    owner_user_id: "alice"
+    sort {
+      field: UPDATED_AT
+      direction: DESC
+    }
+    page { page_size: 10 }
+    """
+    Then the gRPC response should not have an error
+    And the gRPC response field "conversations[0].id" should be "${adminGrpcConversationAId}"
+    And the gRPC response field "conversations[1].id" should be "${adminGrpcConversationBId}"
+
   Scenario: List conversations with query filter via gRPC
     Given I have a conversation with title "Project Alpha Discussion"
     And I have a conversation with title "Project Beta Discussion"

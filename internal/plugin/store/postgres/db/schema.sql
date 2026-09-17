@@ -52,6 +52,10 @@ ALTER TABLE conversations
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_group_id_id
     ON conversations (conversation_group_id, id);
+CREATE INDEX IF NOT EXISTS idx_conversations_created_at_id
+    ON conversations (created_at, id);
+CREATE INDEX IF NOT EXISTS idx_conversations_updated_at_id
+    ON conversations (updated_at, id);
 
 -- GIN index on metadata JSONB enables efficient containment filter lookups (metadata @> object).
 CREATE INDEX IF NOT EXISTS idx_conversations_metadata ON conversations USING GIN (metadata jsonb_path_ops);

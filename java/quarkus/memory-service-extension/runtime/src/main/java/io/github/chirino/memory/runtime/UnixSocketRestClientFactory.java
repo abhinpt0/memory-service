@@ -135,11 +135,13 @@ final class UnixSocketRestClientFactory {
                                 query(
                                         "mode", args[0],
                                         "ancestry", args[1],
-                                        "afterCursor", args[2],
-                                        "limit", args[3],
-                                        "query", args[4],
-                                        "archived", args[5],
-                                        "metadata", args[6]),
+                                        "sort", args[2],
+                                        "direction", args[3],
+                                        "afterCursor", args[4],
+                                        "limit", args[5],
+                                        "query", args[6],
+                                        "archived", args[7],
+                                        "metadata", args[8]),
                                 null,
                                 method);
                 case "syncConversationContext" ->

@@ -44,9 +44,9 @@ func (m *metricsStore) CreateConversationWithID(ctx context.Context, userID stri
 	return m.inner.CreateConversationWithID(ctx, userID, clientID, convID, title, metadata, agentID, forkedAtConversationID, forkedAtEntryID)
 }
 
-func (m *metricsStore) ListConversations(ctx context.Context, userID string, query *string, afterCursor *string, limit int, mode model.ConversationListMode, ancestry model.ConversationAncestryFilter, archived store.ArchiveFilter, metadataFilters []store.ConversationMetadataPredicate) ([]store.ConversationSummary, *string, error) {
+func (m *metricsStore) ListConversations(ctx context.Context, userID string, query *string, afterCursor *string, limit int, mode model.ConversationListMode, ancestry model.ConversationAncestryFilter, archived store.ArchiveFilter, metadataFilters []store.ConversationMetadataPredicate, sort ...store.ConversationSort) ([]store.ConversationSummary, *string, error) {
 	defer observe("list_conversations", time.Now())
-	return m.inner.ListConversations(ctx, userID, query, afterCursor, limit, mode, ancestry, archived, metadataFilters)
+	return m.inner.ListConversations(ctx, userID, query, afterCursor, limit, mode, ancestry, archived, metadataFilters, sort...)
 }
 
 func (m *metricsStore) GetConversation(ctx context.Context, userID string, conversationID string) (*store.ConversationDetail, error) {

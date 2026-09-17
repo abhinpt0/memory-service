@@ -108,6 +108,8 @@ func (m *mongoMigrator) Migrate(ctx context.Context) error {
 			{Keys: bson.D{{Key: "conversation_group_id", Value: 1}}},
 			{Keys: bson.D{{Key: "owner_user_id", Value: 1}}},
 			{Keys: bson.D{{Key: "archived_at", Value: 1}}},
+			{Keys: bson.D{{Key: "created_at", Value: 1}, {Key: "_id", Value: 1}}},
+			{Keys: bson.D{{Key: "updated_at", Value: 1}, {Key: "_id", Value: 1}}},
 			{Keys: bson.D{{Key: "conversation_group_id", Value: 1}, {Key: "created_at", Value: 1}}},
 			// Wildcard index on metadata fields enables efficient key-value filter lookups (metadata.key = value).
 			{
@@ -1260,7 +1262,26 @@ func appendLogicalConversationLineage(pipeline mongo.Pipeline, ancestry model.Co
 	return pipeline
 }
 
-func buildPublicConversationListPipeline(userID string, anchorCreatedAt *time.Time, anchorID *string, limit int, mode model.ConversationListMode, ancestry model.ConversationAncestryFilter, archived registrystore.ArchiveFilter, metadataFilters []registrystore.ConversationMetadataPredicate) mongo.Pipeline {
+func mongoConversationSort(sort registrystore.ConversationSort) (field string, direction int, comparison string) {
+	sort = registrystore.NormalizeConversationSort(sort)
+	field = "created_at"
+	if sort.Field == registrystore.ConversationSortUpdatedAt {
+		field = "updated_at"
+	}
+	direction = -1
+	comparison = "$lt"
+	if sort.Direction == registrystore.SortDirectionAscending {
+		direction = 1
+		comparison = "$gt"
+	}
+	return
+}
+
+func buildPublicConversationListPipeline(userID string, anchorValue *time.Time, anchorID *string, limit int, mode model.ConversationListMode, ancestry model.ConversationAncestryFilter, archived registrystore.ArchiveFilter, metadataFilters []registrystore.ConversationMetadataPredicate, sortOptions ...registrystore.ConversationSort) mongo.Pipeline {
+	sort := registrystore.DefaultConversationSort()
+	if len(sortOptions) > 0 {
+		sort = registrystore.NormalizeConversationSort(sortOptions[0])
+	}
 	// Build the conversation-side filter before joining from the authenticated
 	// user's memberships. This keeps the authorization work proportional to the
 	// groups the caller can access instead of all conversations in the service.
@@ -1333,14 +1354,16 @@ func buildPublicConversationListPipeline(userID string, anchorCreatedAt *time.Ti
 		pipeline = append(pipeline, bson.D{{Key: "$replaceRoot", Value: bson.M{"newRoot": "$doc"}}})
 	}
 
+	sortField, sortDirection, comparison := mongoConversationSort(sort)
+
 	// 4. Cursor filter
-	if anchorCreatedAt != nil && anchorID != nil {
+	if anchorValue != nil && anchorID != nil {
 		pipeline = append(pipeline, bson.D{{Key: "$match", Value: bson.M{
 			"$or": bson.A{
-				bson.M{"created_at": bson.M{"$lt": *anchorCreatedAt}},
+				bson.M{sortField: bson.M{comparison: *anchorValue}},
 				bson.M{
-					"created_at": *anchorCreatedAt,
-					"_id":        bson.M{"$lt": *anchorID},
+					sortField: *anchorValue,
+					"_id":     bson.M{comparison: *anchorID},
 				},
 			},
 		}}})
@@ -1348,8 +1371,8 @@ func buildPublicConversationListPipeline(userID string, anchorCreatedAt *time.Ti
 
 	// 5. Final sort
 	pipeline = append(pipeline, bson.D{{Key: "$sort", Value: bson.D{
-		{Key: "created_at", Value: -1},
-		{Key: "_id", Value: -1},
+		{Key: sortField, Value: sortDirection},
+		{Key: "_id", Value: sortDirection},
 	}}})
 
 	// 6. Limit + 1
@@ -1357,7 +1380,7 @@ func buildPublicConversationListPipeline(userID string, anchorCreatedAt *time.Ti
 	return pipeline
 }
 
-func buildAdminConversationListPipeline(query registrystore.AdminConversationQuery, anchorCreatedAt *time.Time, anchorID *string) mongo.Pipeline {
+func buildAdminConversationListPipeline(query registrystore.AdminConversationQuery, anchorValue *time.Time, anchorID *string) mongo.Pipeline {
 	pipeline := mongo.Pipeline{}
 
 	// 1. Initial base match
@@ -1433,14 +1456,16 @@ func buildAdminConversationListPipeline(query registrystore.AdminConversationQue
 		pipeline = append(pipeline, bson.D{{Key: "$replaceRoot", Value: bson.M{"newRoot": "$doc"}}})
 	}
 
+	sortField, sortDirection, comparison := mongoConversationSort(query.Sort)
+
 	// 4. Cursor filter
-	if anchorCreatedAt != nil && anchorID != nil {
+	if anchorValue != nil && anchorID != nil {
 		pipeline = append(pipeline, bson.D{{Key: "$match", Value: bson.M{
 			"$or": bson.A{
-				bson.M{"created_at": bson.M{"$lt": *anchorCreatedAt}},
+				bson.M{sortField: bson.M{comparison: *anchorValue}},
 				bson.M{
-					"created_at": *anchorCreatedAt,
-					"_id":        bson.M{"$lt": *anchorID},
+					sortField: *anchorValue,
+					"_id":     bson.M{comparison: *anchorID},
 				},
 			},
 		}}})
@@ -1448,8 +1473,8 @@ func buildAdminConversationListPipeline(query registrystore.AdminConversationQue
 
 	// 5. Final sort
 	pipeline = append(pipeline, bson.D{{Key: "$sort", Value: bson.D{
-		{Key: "created_at", Value: -1},
-		{Key: "_id", Value: -1},
+		{Key: sortField, Value: sortDirection},
+		{Key: "_id", Value: sortDirection},
 	}}})
 
 	// 6. Limit + 1
@@ -1457,33 +1482,46 @@ func buildAdminConversationListPipeline(query registrystore.AdminConversationQue
 	return pipeline
 }
 
-func (s *MongoStore) ListConversations(ctx context.Context, userID string, query *string, afterCursor *string, limit int, mode model.ConversationListMode, ancestry model.ConversationAncestryFilter, archived registrystore.ArchiveFilter, metadataFilters []registrystore.ConversationMetadataPredicate) ([]registrystore.ConversationSummary, *string, error) {
+func (s *MongoStore) ListConversations(ctx context.Context, userID string, query *string, afterCursor *string, limit int, mode model.ConversationListMode, ancestry model.ConversationAncestryFilter, archived registrystore.ArchiveFilter, metadataFilters []registrystore.ConversationMetadataPredicate, sortOptions ...registrystore.ConversationSort) ([]registrystore.ConversationSummary, *string, error) {
 	if err := registrystore.ValidateConversationMetadataPredicates(metadataFilters); err != nil {
 		return nil, nil, &registrystore.BadRequestError{Message: err.Error()}
 	}
 
-	var anchorCreatedAt *time.Time
+	sort := registrystore.DefaultConversationSort()
+	if len(sortOptions) > 0 {
+		sort = registrystore.NormalizeConversationSort(sortOptions[0])
+	}
+	var anchorValue *time.Time
 	var anchorID *string
 	if afterCursor != nil {
-		var member memberDoc
-		var cursorDoc convDoc
-		if err := s.conversations().FindOne(ctx, bson.M{"_id": *afterCursor}).Decode(&cursorDoc); err != nil {
-			if errors.Is(err, mongo.ErrNoDocuments) {
-				return nil, nil, &registrystore.BadRequestError{Message: fmt.Sprintf("invalid afterCursor %q", *afterCursor)}
-			}
-			return nil, nil, fmt.Errorf("failed to lookup cursor conversation: %w", err)
+		parsed, legacy, err := registrystore.ParseConversationCursor(*afterCursor, sort)
+		if err != nil {
+			return nil, nil, &registrystore.BadRequestError{Message: err.Error()}
 		}
-		if err := s.memberships().FindOne(ctx, bson.M{"conversation_group_id": cursorDoc.ConversationGroupID, "user_id": userID}).Decode(&member); err != nil {
-			if errors.Is(err, mongo.ErrNoDocuments) {
-				return nil, nil, &registrystore.BadRequestError{Message: fmt.Sprintf("invalid afterCursor %q", *afterCursor)}
+		if legacy {
+			var member memberDoc
+			var cursorDoc convDoc
+			if err := s.conversations().FindOne(ctx, bson.M{"_id": *afterCursor}).Decode(&cursorDoc); err != nil {
+				if errors.Is(err, mongo.ErrNoDocuments) {
+					return nil, nil, &registrystore.BadRequestError{Message: fmt.Sprintf("invalid afterCursor %q", *afterCursor)}
+				}
+				return nil, nil, fmt.Errorf("failed to lookup cursor conversation: %w", err)
 			}
-			return nil, nil, fmt.Errorf("failed to lookup cursor membership: %w", err)
+			if err := s.memberships().FindOne(ctx, bson.M{"conversation_group_id": cursorDoc.ConversationGroupID, "user_id": userID}).Decode(&member); err != nil {
+				if errors.Is(err, mongo.ErrNoDocuments) {
+					return nil, nil, &registrystore.BadRequestError{Message: fmt.Sprintf("invalid afterCursor %q", *afterCursor)}
+				}
+				return nil, nil, fmt.Errorf("failed to lookup cursor membership: %w", err)
+			}
+			anchorValue = &cursorDoc.CreatedAt
+			anchorID = &cursorDoc.ID
+		} else {
+			anchorValue = &parsed.Value
+			anchorID = &parsed.ID
 		}
-		anchorCreatedAt = &cursorDoc.CreatedAt
-		anchorID = &cursorDoc.ID
 	}
 
-	pipeline := buildPublicConversationListPipeline(userID, anchorCreatedAt, anchorID, limit, mode, ancestry, archived, metadataFilters)
+	pipeline := buildPublicConversationListPipeline(userID, anchorValue, anchorID, limit, mode, ancestry, archived, metadataFilters, sort)
 	opts := buildConversationAggregateOptions(metadataFilters)
 
 	cur, err := s.memberships().Aggregate(ctx, pipeline, opts)
@@ -1513,7 +1551,10 @@ func (s *MongoStore) ListConversations(ctx context.Context, userID string, query
 
 	var nextCursor *string
 	if hasMore && len(summaries) > 0 {
-		c := string(summaries[len(summaries)-1].ID)
+		c, err := registrystore.EncodeConversationCursor(summaries[len(summaries)-1], sort)
+		if err != nil {
+			return nil, nil, err
+		}
 		nextCursor = &c
 	}
 	return summaries, nextCursor, nil
@@ -3228,21 +3269,31 @@ func (s *MongoStore) AdminListConversations(ctx context.Context, query registrys
 		return nil, nil, &registrystore.BadRequestError{Message: err.Error()}
 	}
 
-	var anchorCreatedAt *time.Time
+	query.Sort = registrystore.NormalizeConversationSort(query.Sort)
+	var anchorValue *time.Time
 	var anchorID *string
 	if query.AfterCursor != nil {
-		var cursorDoc convDoc
-		if err := s.conversations().FindOne(ctx, bson.M{"_id": *query.AfterCursor}).Decode(&cursorDoc); err != nil {
-			if errors.Is(err, mongo.ErrNoDocuments) {
-				return nil, nil, &registrystore.BadRequestError{Message: fmt.Sprintf("invalid afterCursor %q", *query.AfterCursor)}
-			}
-			return nil, nil, fmt.Errorf("failed to lookup cursor conversation: %w", err)
+		parsed, legacy, err := registrystore.ParseConversationCursor(*query.AfterCursor, query.Sort)
+		if err != nil {
+			return nil, nil, &registrystore.BadRequestError{Message: err.Error()}
 		}
-		anchorCreatedAt = &cursorDoc.CreatedAt
-		anchorID = &cursorDoc.ID
+		if legacy {
+			var cursorDoc convDoc
+			if err := s.conversations().FindOne(ctx, bson.M{"_id": *query.AfterCursor}).Decode(&cursorDoc); err != nil {
+				if errors.Is(err, mongo.ErrNoDocuments) {
+					return nil, nil, &registrystore.BadRequestError{Message: fmt.Sprintf("invalid afterCursor %q", *query.AfterCursor)}
+				}
+				return nil, nil, fmt.Errorf("failed to lookup cursor conversation: %w", err)
+			}
+			anchorValue = &cursorDoc.CreatedAt
+			anchorID = &cursorDoc.ID
+		} else {
+			anchorValue = &parsed.Value
+			anchorID = &parsed.ID
+		}
 	}
 
-	pipeline := buildAdminConversationListPipeline(query, anchorCreatedAt, anchorID)
+	pipeline := buildAdminConversationListPipeline(query, anchorValue, anchorID)
 	opts := buildConversationAggregateOptions(query.MetadataFilters)
 
 	cur, err := s.conversations().Aggregate(ctx, pipeline, opts)
@@ -3272,7 +3323,10 @@ func (s *MongoStore) AdminListConversations(ctx context.Context, query registrys
 
 	var nextCursor *string
 	if hasMore && len(summaries) > 0 {
-		c := string(summaries[len(summaries)-1].ID)
+		c, err := registrystore.EncodeConversationCursor(summaries[len(summaries)-1], query.Sort)
+		if err != nil {
+			return nil, nil, err
+		}
 		nextCursor = &c
 	}
 	return summaries, nextCursor, nil

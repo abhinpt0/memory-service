@@ -117,6 +117,19 @@ func (s *SQLiteTestDB) SetEntryCreatedAt(ctx context.Context, entryID string, cr
 	return nil
 }
 
+func (s *SQLiteTestDB) SetConversationTimestamps(ctx context.Context, conversationID string, createdAt, updatedAt time.Time) error {
+	db, err := s.conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	if _, err := db.ExecContext(ctx, `UPDATE conversations SET created_at = ?, updated_at = ? WHERE id = ?`, createdAt, updatedAt, conversationID); err != nil {
+		return fmt.Errorf("failed to set conversation timestamps for %s: %w", conversationID, err)
+	}
+	return nil
+}
+
 func (s *SQLiteTestDB) ExecSQL(ctx context.Context, query string) ([]map[string]interface{}, error) {
 	db, err := s.conn(ctx)
 	if err != nil {

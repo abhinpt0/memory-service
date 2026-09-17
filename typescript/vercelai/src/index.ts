@@ -261,6 +261,8 @@ export function createMemoryServiceProxy(options: MemoryServiceProxyOptions) {
     },
     listConversations(query: {
       mode?: string | null;
+      sort?: "createdAt" | "updatedAt" | null;
+      direction?: "asc" | "desc" | null;
       afterCursor?: string | null;
       limit?: number | null;
       query?: string | null;

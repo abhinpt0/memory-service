@@ -185,6 +185,7 @@ type AdminConversationQuery struct {
 	MetadataFilters []ConversationMetadataPredicate
 	AfterCursor     *string
 	Limit           int
+	Sort            ConversationSort
 }
 
 // CreatedAtFilter constrains entries by their createdAt timestamp.
@@ -361,7 +362,7 @@ type MemoryStore interface {
 	CreateConversation(ctx context.Context, userID string, clientID string, title string, metadata map[string]interface{}, agentID *string, forkedAtConversationID *string, forkedAtEntryID *uuid.UUID) (*ConversationDetail, error)
 	// CreateConversationWithID creates a conversation with the given ID. Used by gRPC AppendEntry for fork-on-append.
 	CreateConversationWithID(ctx context.Context, userID string, clientID string, convID string, title string, metadata map[string]interface{}, agentID *string, forkedAtConversationID *string, forkedAtEntryID *uuid.UUID) (*ConversationDetail, error)
-	ListConversations(ctx context.Context, userID string, query *string, afterCursor *string, limit int, mode model.ConversationListMode, ancestry model.ConversationAncestryFilter, archived ArchiveFilter, metadataFilters []ConversationMetadataPredicate) ([]ConversationSummary, *string, error)
+	ListConversations(ctx context.Context, userID string, query *string, afterCursor *string, limit int, mode model.ConversationListMode, ancestry model.ConversationAncestryFilter, archived ArchiveFilter, metadataFilters []ConversationMetadataPredicate, sort ...ConversationSort) ([]ConversationSummary, *string, error)
 	GetConversation(ctx context.Context, userID string, conversationID string) (*ConversationDetail, error)
 	UpdateConversation(ctx context.Context, userID string, conversationID string, title *string, metadataPatch MetadataPatch) (*ConversationDetail, error)
 	ArchiveConversation(ctx context.Context, userID string, conversationID string) error

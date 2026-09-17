@@ -76,6 +76,48 @@ Feature: Conversations REST API
     Then the response status should be 200
     And the response should contain at least 1 conversation
 
+  Scenario: Sort conversations by creation or update time in either direction
+    Given I have a conversation with title "Conversation A"
+    And set "conversationAId" to "${conversationId}"
+    And I set conversation "${conversationAId}" timestamps to createdAt "2026-01-01T10:00:00Z" and updatedAt "2026-01-04T10:00:00Z"
+    And I have a conversation with title "Conversation B"
+    And set "conversationBId" to "${conversationId}"
+    And I set conversation "${conversationBId}" timestamps to createdAt "2026-01-02T10:00:00Z" and updatedAt "2026-01-03T10:00:00Z"
+
+    When I call GET "/v1/conversations?sort=createdAt&direction=asc"
+    Then the response status should be 200
+    And the response body "data[0].id" should be "${conversationAId}"
+    And the response body "data[1].id" should be "${conversationBId}"
+
+    When I call GET "/v1/conversations?sort=createdAt&direction=desc"
+    Then the response status should be 200
+    And the response body "data[0].id" should be "${conversationBId}"
+    And the response body "data[1].id" should be "${conversationAId}"
+
+    When I call GET "/v1/conversations?sort=updatedAt&direction=asc"
+    Then the response status should be 200
+    And the response body "data[0].id" should be "${conversationBId}"
+    And the response body "data[1].id" should be "${conversationAId}"
+
+    When I call GET "/v1/conversations?sort=updatedAt&direction=desc&limit=1"
+    Then the response status should be 200
+    And the response body "data[0].id" should be "${conversationAId}"
+    And set "sortedConversationCursor" to the json response field "afterCursor"
+    When I call GET "/v1/conversations?sort=updatedAt&direction=desc&limit=1&afterCursor=${sortedConversationCursor}"
+    Then the response status should be 200
+    And the response body "data[0].id" should be "${conversationBId}"
+    When I call GET "/v1/conversations?sort=updatedAt&direction=asc&limit=1&afterCursor=${sortedConversationCursor}"
+    Then the response status should be 400
+
+  Scenario Outline: Reject invalid conversation sorting options
+    When I call GET "/v1/conversations?<query>"
+    Then the response status should be 400
+
+    Examples:
+      | query                         |
+      | sort=title                    |
+      | sort=createdAt&direction=side |
+
   Scenario: List conversations with query filter
     Given I have a conversation with title "Project Alpha Discussion"
     And I have a conversation with title "Project Beta Discussion"

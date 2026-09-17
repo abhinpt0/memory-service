@@ -424,6 +424,31 @@ func protoArchiveFilterToEpisodic(filter pb.ArchiveFilter) registryepisodic.Arch
 	}
 }
 
+func parseGRPCConversationSort(raw *pb.ConversationSort) (registrystore.ConversationSort, error) {
+	sort := registrystore.DefaultConversationSort()
+	if raw == nil {
+		return sort, nil
+	}
+	sort.Explicit = true
+	switch raw.GetField() {
+	case pb.ConversationSort_FIELD_UNSPECIFIED, pb.ConversationSort_CREATED_AT:
+		sort.Field = registrystore.ConversationSortCreatedAt
+	case pb.ConversationSort_UPDATED_AT:
+		sort.Field = registrystore.ConversationSortUpdatedAt
+	default:
+		return registrystore.ConversationSort{}, fmt.Errorf("invalid conversation sort field %d", raw.GetField())
+	}
+	switch raw.GetDirection() {
+	case pb.ConversationSort_DIRECTION_UNSPECIFIED, pb.ConversationSort_DESC:
+		sort.Direction = registrystore.SortDirectionDescending
+	case pb.ConversationSort_ASC:
+		sort.Direction = registrystore.SortDirectionAscending
+	default:
+		return registrystore.ConversationSort{}, fmt.Errorf("invalid conversation sort direction %d", raw.GetDirection())
+	}
+	return sort, nil
+}
+
 func (s *ConversationsServer) ListConversations(ctx context.Context, req *pb.ListConversationsRequest) (*pb.ListConversationsResponse, error) {
 	userID := getUserID(ctx)
 	if userID == "" {
@@ -476,6 +501,10 @@ func (s *ConversationsServer) ListConversations(ctx context.Context, req *pb.Lis
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+	sort, err := parseGRPCConversationSort(req.GetSort())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
 
 	summaries, cursor, err := func() ([]registrystore.ConversationSummary, *string, error) {
 		type result struct {
@@ -483,7 +512,7 @@ func (s *ConversationsServer) ListConversations(ctx context.Context, req *pb.Lis
 			cursor    *string
 		}
 		out, err := withMemoryRead(ctx, s.Store, func(txCtx context.Context) (result, error) {
-			summaries, cursor, err := s.Store.ListConversations(txCtx, userID, query, afterCursor, limit, mode, ancestry, archived, metadataFilters)
+			summaries, cursor, err := s.Store.ListConversations(txCtx, userID, query, afterCursor, limit, mode, ancestry, archived, metadataFilters, sort)
 			return result{summaries: summaries, cursor: cursor}, err
 		})
 		return out.summaries, out.cursor, err
@@ -1443,6 +1472,10 @@ func (s *AdminConversationsServer) ListConversations(ctx context.Context, req *p
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+	sort, err := parseGRPCConversationSort(req.GetSort())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
 
 	query := registrystore.AdminConversationQuery{
 		Mode:            mode,
@@ -1454,6 +1487,7 @@ func (s *AdminConversationsServer) ListConversations(ctx context.Context, req *p
 		MetadataFilters: metadataFilters,
 		AfterCursor:     afterCursor,
 		Limit:           limit,
+		Sort:            sort,
 	}
 
 	summaries, cursor, err := func() ([]registrystore.ConversationSummary, *string, error) {

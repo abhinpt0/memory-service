@@ -95,6 +95,8 @@ type TestDB interface {
 	SetConversationEntriesCreatedAt(ctx context.Context, conversationID string, createdAt time.Time) error
 	// SetEntryCreatedAt sets the created_at timestamp for a specific entry identified by ID.
 	SetEntryCreatedAt(ctx context.Context, entryID string, createdAt time.Time) error
+	// SetConversationTimestamps sets the created_at and updated_at timestamps for a conversation.
+	SetConversationTimestamps(ctx context.Context, conversationID string, createdAt, updatedAt time.Time) error
 	// ExecSQL runs a raw SQL query and returns rows as maps. Non-SQL backends return (nil, nil) to skip assertions.
 	ExecSQL(ctx context.Context, query string) ([]map[string]interface{}, error)
 	// ExecMongoQuery runs a MongoDB query spec (JSON payload) and returns rows as maps.
