@@ -56,6 +56,31 @@ curl "http://localhost:8080/v1/conversations?limit=20" \
 
 Each summary in the list response includes the `metadata` map so agents can read conversation state without an extra fetch.
 
+#### Sorting conversations
+
+Use `sort` and `direction` to order a conversation list. The default is `createdAt` descending, which preserves the original listing behavior.
+
+| Parameter   | Values                   | Default     |
+| ----------- | ------------------------ | ----------- |
+| `sort`      | `createdAt`, `updatedAt` | `createdAt` |
+| `direction` | `asc`, `desc`            | `desc`      |
+
+```bash
+# Show the most recently active conversations first
+curl "http://localhost:8080/v1/conversations?sort=updatedAt&direction=desc&limit=20" \
+  -H "Authorization: Bearer <token>"
+
+# Scan conversations from oldest to newest
+curl "http://localhost:8080/v1/conversations?sort=createdAt&direction=asc&limit=20" \
+  -H "Authorization: Bearer <token>"
+```
+
+Conversation IDs break timestamp ties in the selected direction. The same parameters are available on `GET /v1/admin/conversations`. In gRPC, set `ConversationSort` on `ListConversationsRequest` or `AdminListConversationsRequest`.
+
+Sorting is applied after `mode` selects the conversations to return. In particular, `mode=latest-fork` still selects the most recently updated conversation in each fork tree before applying the requested list order.
+
+Treat `afterCursor` as opaque and repeat the same `sort` and `direction` values on every page request. Sorting by `updatedAt` reads live data, so a concurrent update can move a conversation between pages. Use `createdAt` when an exhaustive scan requires an immutable ordering key.
+
 ### Updating a Conversation
 
 `PATCH /v1/conversations/{id}` updates a conversation's `title`, `metadata`, and `archived` state.

@@ -934,7 +934,16 @@ export type ListConversationsData = {
      */
     ancestry?: "all" | "roots" | "children";
     /**
-     * Cursor for pagination; returns items after this conversation id.
+     * Timestamp field used to order conversations.
+     */
+    sort?: "createdAt" | "updatedAt";
+    /**
+     * Sort direction. Conversation ID is used as a deterministic tie-breaker in the same direction.
+     */
+    direction?: "asc" | "desc";
+    /**
+     * Cursor for pagination. Treat this value as opaque and repeat the same sort and direction
+     * on subsequent requests. Legacy unsorted requests continue to use conversation IDs.
      */
     afterCursor?: string;
     /**

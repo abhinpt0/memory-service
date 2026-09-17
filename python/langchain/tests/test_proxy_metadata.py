@@ -38,6 +38,8 @@ class TestProxyMetadataEncoding(unittest.TestCase):
         with patch.object(proxy, "_request", side_effect=mock_request):
             asyncio.run(
                 proxy.list_conversations(
+                    sort="updatedAt",
+                    direction="asc",
                     metadata=["status=waiting", "agent-id=worker-1"]
                 )
             )
@@ -47,6 +49,8 @@ class TestProxyMetadataEncoding(unittest.TestCase):
             captured[0].url.params.get_list("metadata"),
             ["status=waiting", "agent-id=worker-1"],
         )
+        self.assertEqual(captured[0].url.params["sort"], "updatedAt")
+        self.assertEqual(captured[0].url.params["direction"], "asc")
 
 
 if __name__ == "__main__":

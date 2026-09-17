@@ -165,10 +165,30 @@ public class MemoryServiceProxy {
             String query,
             String archived,
             List<String> metadata) {
+        return listConversations(mode, null, null, afterCursor, limit, query, archived, metadata);
+    }
+
+    public ResponseEntity<?> listConversations(
+            String mode,
+            String sort,
+            String direction,
+            String afterCursor,
+            Integer limit,
+            String query,
+            String archived,
+            List<String> metadata) {
         return execute(
                 api ->
                         api.listConversationsWithHttpInfo(
-                                mode, "all", afterCursor, limit, query, archived, metadata),
+                                mode,
+                                "all",
+                                sort,
+                                direction,
+                                afterCursor,
+                                limit,
+                                query,
+                                archived,
+                                metadata),
                 HttpStatus.OK);
     }
 

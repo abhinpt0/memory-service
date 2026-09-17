@@ -306,6 +306,42 @@ func (e ListConversationsParamsAncestry) Valid() bool {
 	}
 }
 
+// Defines values for ListConversationsParamsSort.
+const (
+	ConversationSortCreatedAt ListConversationsParamsSort = "createdAt"
+	ConversationSortUpdatedAt ListConversationsParamsSort = "updatedAt"
+)
+
+// Valid indicates whether the value is a known member of the ListConversationsParamsSort enum.
+func (e ListConversationsParamsSort) Valid() bool {
+	switch e {
+	case ConversationSortCreatedAt:
+		return true
+	case ConversationSortUpdatedAt:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ListConversationsParamsDirection.
+const (
+	ConversationSortDirectionAsc  ListConversationsParamsDirection = "asc"
+	ConversationSortDirectionDesc ListConversationsParamsDirection = "desc"
+)
+
+// Valid indicates whether the value is a known member of the ListConversationsParamsDirection enum.
+func (e ListConversationsParamsDirection) Valid() bool {
+	switch e {
+	case ConversationSortDirectionAsc:
+		return true
+	case ConversationSortDirectionDesc:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for ListConversationsParamsArchived.
 const (
 	ListConversationsParamsArchivedExclude ListConversationsParamsArchived = "exclude"
@@ -1337,7 +1373,14 @@ type ListConversationsParams struct {
 	// - `all`: include both root and child conversations.
 	Ancestry *ListConversationsParamsAncestry `form:"ancestry,omitempty" json:"ancestry,omitempty"`
 
-	// AfterCursor Cursor for pagination; returns items after this conversation id.
+	// Sort Timestamp field used to order conversations.
+	Sort *ListConversationsParamsSort `form:"sort,omitempty" json:"sort,omitempty"`
+
+	// Direction Sort direction. Conversation ID is used as a deterministic tie-breaker in the same direction.
+	Direction *ListConversationsParamsDirection `form:"direction,omitempty" json:"direction,omitempty"`
+
+	// AfterCursor Cursor for pagination. Treat this value as opaque and repeat the same sort and direction
+	// on subsequent requests. Legacy unsorted requests continue to use conversation IDs.
 	AfterCursor *string `form:"afterCursor,omitempty" json:"afterCursor,omitempty"`
 
 	// Limit Maximum number of conversations to return.
@@ -1363,6 +1406,12 @@ type ListConversationsParamsMode string
 
 // ListConversationsParamsAncestry defines parameters for ListConversations.
 type ListConversationsParamsAncestry string
+
+// ListConversationsParamsSort defines parameters for ListConversations.
+type ListConversationsParamsSort string
+
+// ListConversationsParamsDirection defines parameters for ListConversations.
+type ListConversationsParamsDirection string
 
 // ListConversationsParamsArchived defines parameters for ListConversations.
 type ListConversationsParamsArchived string
@@ -3857,6 +3906,30 @@ func NewListConversationsRequest(server string, params *ListConversationsParams)
 		if params.Ancestry != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "ancestry", *params.Ancestry, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.Sort != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "sort", *params.Sort, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.Direction != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "direction", *params.Direction, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
 				return nil, err
 			} else {
 				for _, qp := range strings.Split(queryFrag, "&") {

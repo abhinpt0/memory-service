@@ -193,6 +193,25 @@ message ConversationMetadataFilter {
   string value = 3;
 }
 
+message ConversationSort {
+  enum Field {
+    FIELD_UNSPECIFIED = 0;
+    CREATED_AT = 1;
+    UPDATED_AT = 2;
+  }
+
+  enum Direction {
+    DIRECTION_UNSPECIFIED = 0;
+    ASC = 1;
+    DESC = 2;
+  }
+
+  // Defaults to CREATED_AT when unspecified.
+  Field field = 1;
+  // Defaults to DESC when unspecified.
+  Direction direction = 2;
+}
+
 message ListConversationsRequest {
   // Controls which conversations are returned from each fork tree.
   // See ConversationListMode for details on each mode.
@@ -207,6 +226,8 @@ message ListConversationsRequest {
   optional string metadata_filter_value = 7 [deprecated = true];
   // At most five predicates. The service combines them with AND.
   repeated ConversationMetadataFilter metadata_filters = 8;
+  // Optional ordering. Omit for created_at descending.
+  optional ConversationSort sort = 9;
 }
 
 message ListConversationsResponse {
@@ -448,6 +469,8 @@ message AdminListConversationsRequest {
   optional string metadata_filter_value = 12 [deprecated = true];
   // At most five predicates. The service combines them with AND.
   repeated ConversationMetadataFilter metadata_filters = 13;
+  // Optional ordering. Omit for created_at descending.
+  optional ConversationSort sort = 14;
 }
 
 message AdminListConversationsResponse {

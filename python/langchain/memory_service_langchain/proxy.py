@@ -115,6 +115,8 @@ class MemoryServiceProxy:
         self,
         *,
         mode: str | None = None,
+        sort: str | None = None,
+        direction: str | None = None,
         after_cursor: str | None = None,
         limit: int | None = None,
         query: str | None = None,
@@ -124,6 +126,8 @@ class MemoryServiceProxy:
         params: dict[str, Any] = self._compact_params(
             {
                 "mode": mode,
+                "sort": sort,
+                "direction": direction,
                 "afterCursor": after_cursor,
                 "limit": limit,
                 "query": query,

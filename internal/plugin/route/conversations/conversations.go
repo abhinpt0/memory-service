@@ -65,6 +65,13 @@ func listConversations(c *gin.Context, store registrystore.MemoryStore) {
 	afterCursor := queryPtr(c, "afterCursor")
 	limit := queryInt(c, "limit", 20)
 	query := queryPtr(c, "query")
+	sortField, sortFieldSet := c.GetQuery("sort")
+	sortDirection, sortDirectionSet := c.GetQuery("direction")
+	sort, err := registrystore.ParseConversationSort(optionalQueryValue(sortField, sortFieldSet), optionalQueryValue(sortDirection, sortDirectionSet))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 	archived, err := registrystore.ParseArchiveFilter(c.DefaultQuery("archived", string(registrystore.ArchiveFilterExclude)))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -77,7 +84,7 @@ func listConversations(c *gin.Context, store registrystore.MemoryStore) {
 	}
 
 	if err := routetx.MemoryRead(c, store, func(ctx context.Context) error {
-		summaries, cursor, err := store.ListConversations(ctx, userID, query, afterCursor, limit, mode, ancestry, archived, metadataFilters)
+		summaries, cursor, err := store.ListConversations(ctx, userID, query, afterCursor, limit, mode, ancestry, archived, metadataFilters, sort)
 		if err != nil {
 			return err
 		}
@@ -86,6 +93,13 @@ func listConversations(c *gin.Context, store registrystore.MemoryStore) {
 	}); err != nil {
 		handleError(c, err)
 	}
+}
+
+func optionalQueryValue(value string, present bool) *string {
+	if !present {
+		return nil
+	}
+	return &value
 }
 
 func createConversation(c *gin.Context, store registrystore.MemoryStore, eventBus registryeventbus.EventBus) {
@@ -534,6 +548,7 @@ func handleError(c *gin.Context, err error) {
 	var validation *registrystore.ValidationError
 	var conflict *registrystore.ConflictError
 	var forbidden *registrystore.ForbiddenError
+	var badRequest *registrystore.BadRequestError
 
 	switch {
 	case errors.As(err, &notFound):
@@ -548,6 +563,8 @@ func handleError(c *gin.Context, err error) {
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 	case errors.As(err, &forbidden):
 		c.JSON(http.StatusForbidden, gin.H{"code": "forbidden", "error": err.Error()})
+	case errors.As(err, &badRequest):
+		c.JSON(http.StatusBadRequest, gin.H{"code": "bad_request", "error": err.Error()})
 	default:
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
 	}

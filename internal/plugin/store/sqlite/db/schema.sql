@@ -36,6 +36,8 @@ CREATE TABLE IF NOT EXISTS conversations (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_group_id_id ON conversations(conversation_group_id, id);
+CREATE INDEX IF NOT EXISTS idx_conversations_created_at_id ON conversations(created_at, id);
+CREATE INDEX IF NOT EXISTS idx_conversations_updated_at_id ON conversations(updated_at, id);
 CREATE INDEX IF NOT EXISTS idx_conversations_group ON conversations(conversation_group_id);
 CREATE INDEX IF NOT EXISTS idx_conversations_not_archived ON conversations(archived_at) WHERE archived_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_conversations_started_by_conversation ON conversations(started_by_conversation_id, created_at, id);

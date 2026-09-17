@@ -3,6 +3,7 @@ package bdd
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/chirino/memory-service/internal/testutil/cucumber"
 	"github.com/cucumber/godog"
@@ -22,6 +23,7 @@ func init() {
 		ctx.Step(`^I list conversations with limit (\d+) and afterCursor "([^"]*)"$`, c.iListConversationsWithLimitAndAfterCursor)
 		ctx.Step(`^I list conversations with query "([^"]*)"$`, c.iListConversationsWithQuery)
 		ctx.Step(`^I list conversations with mode "([^"]*)"$`, c.iListConversationsWithMode)
+		ctx.Step(`^I set conversation "([^"]*)" timestamps to createdAt "([^"]*)" and updatedAt "([^"]*)"$`, c.iSetConversationTimestamps)
 		ctx.Step(`^I get the conversation$`, c.iGetTheConversation)
 		ctx.Step(`^I get conversation "([^"]*)"$`, c.iGetConversation)
 		ctx.Step(`^I get that conversation$`, c.iGetTheConversation)
@@ -42,6 +44,22 @@ func init() {
 		ctx.Step(`^the conversation has (\d+) child conversations$`, c.theConversationHasChildConversations)
 		ctx.Step(`^I resolve the conversation group ID for conversation "([^"]*)" into "([^"]*)"$`, c.iResolveConversationGroupID)
 	})
+}
+
+func (c *conversationSteps) iSetConversationTimestamps(conversationID, createdAtRaw, updatedAtRaw string) error {
+	conversationID, err := c.s.Expand(conversationID)
+	if err != nil {
+		return err
+	}
+	createdAt, err := time.Parse(time.RFC3339Nano, createdAtRaw)
+	if err != nil {
+		return fmt.Errorf("parse createdAt: %w", err)
+	}
+	updatedAt, err := time.Parse(time.RFC3339Nano, updatedAtRaw)
+	if err != nil {
+		return fmt.Errorf("parse updatedAt: %w", err)
+	}
+	return c.s.TestDB().SetConversationTimestamps(context.Background(), conversationID, createdAt, updatedAt)
 }
 
 type conversationSteps struct {

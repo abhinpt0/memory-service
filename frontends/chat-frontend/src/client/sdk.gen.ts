@@ -146,6 +146,8 @@ export class ConversationsService {
     parameters?: {
       mode?: "all" | "roots" | "latest-fork";
       ancestry?: "all" | "roots" | "children";
+      sort?: "createdAt" | "updatedAt";
+      direction?: "asc" | "desc";
       afterCursor?: string;
       limit?: number;
       query?: string;
@@ -161,6 +163,8 @@ export class ConversationsService {
           args: [
             { in: "query", key: "mode" },
             { in: "query", key: "ancestry" },
+            { in: "query", key: "sort" },
+            { in: "query", key: "direction" },
             { in: "query", key: "afterCursor" },
             { in: "query", key: "limit" },
             { in: "query", key: "query" },

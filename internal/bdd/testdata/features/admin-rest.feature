@@ -16,6 +16,15 @@ Feature: Admin REST API
     Then the response status should be 200
     And the response should contain at least 2 conversations
 
+  # Serial today only because this feature shares the serial admin runner; the scenario uses only scenario-local conversations.
+  Scenario: Admin can sort conversations by updatedAt
+    Given I set conversation "${bobConversationId}" timestamps to createdAt "2026-01-01T10:00:00Z" and updatedAt "2026-01-04T10:00:00Z"
+    And I set conversation "${aliceConversationId}" timestamps to createdAt "2026-01-02T10:00:00Z" and updatedAt "2026-01-03T10:00:00Z"
+    When I call GET "/v1/admin/conversations?sort=updatedAt&direction=desc"
+    Then the response status should be 200
+    And the response body "data[0].id" should be "${bobConversationId}"
+    And the response body "data[1].id" should be "${aliceConversationId}"
+
   # Serial today only because this feature shares the serial admin runner; this scenario scopes the query to the scenario-local user ID and appears parallel-safe.
   Scenario: Admin can filter conversations by userId
     When I call GET "/v1/admin/conversations?userId=bob"

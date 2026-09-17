@@ -232,12 +232,20 @@ func adminListConversations(c *gin.Context, store registrystore.MemoryStore) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	sortField, sortFieldSet := c.GetQuery("sort")
+	sortDirection, sortDirectionSet := c.GetQuery("direction")
+	sort, err := registrystore.ParseConversationSort(adminOptionalQueryValue(sortField, sortFieldSet), adminOptionalQueryValue(sortDirection, sortDirectionSet))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 	query := registrystore.AdminConversationQuery{
 		Mode:        model.ConversationListMode(c.DefaultQuery("mode", "latest-fork")),
 		Ancestry:    model.ConversationAncestryFilter(c.DefaultQuery("ancestry", "roots")),
 		Archived:    archived,
 		Limit:       queryInt(c, "limit", 20),
 		AfterCursor: queryPtr(c, "afterCursor"),
+		Sort:        sort,
 	}
 	if uid := c.Query("userId"); uid != "" {
 		query.UserID = &uid
@@ -269,6 +277,13 @@ func adminListConversations(c *gin.Context, store registrystore.MemoryStore) {
 	}); err != nil {
 		handleError(c, err)
 	}
+}
+
+func adminOptionalQueryValue(value string, present bool) *string {
+	if !present {
+		return nil
+	}
+	return &value
 }
 
 func adminGetConversation(c *gin.Context, store registrystore.MemoryStore) {

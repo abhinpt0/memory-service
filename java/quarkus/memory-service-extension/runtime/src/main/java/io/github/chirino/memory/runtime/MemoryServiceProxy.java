@@ -106,12 +106,28 @@ public class MemoryServiceProxy {
             String query,
             String archived,
             List<String> metadata) {
+        return listConversations(
+                mode, ancestry, null, null, afterCursor, limit, query, archived, metadata);
+    }
+
+    public Response listConversations(
+            String mode,
+            String ancestry,
+            String sort,
+            String direction,
+            String afterCursor,
+            Integer limit,
+            String query,
+            String archived,
+            List<String> metadata) {
         return execute(
                 () ->
                         conversationsApi()
                                 .listConversations(
                                         mode,
                                         ancestry,
+                                        sort,
+                                        direction,
                                         afterCursor,
                                         limit,
                                         query,
