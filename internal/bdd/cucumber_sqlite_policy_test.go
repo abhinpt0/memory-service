@@ -93,7 +93,7 @@ func newSQLitePolicyScenarioSetup(t *testing.T, baseCfg config.Config, policyDir
 		cfg := baseCfg
 		cfg.DBURL = filepath.Join(tempDir, "memory.db")
 		cfg.PrometheusURL = prom.Server.URL
-		cfg.PolicyImportDir = absPolicyDir
+		cfg.PolicyImportPath = absPolicyDir
 
 		cleanup, err := startScenarioServer(s, &cfg, &SQLiteTestDB{DBURL: cfg.DBURL}, map[string]interface{}{
 			"mockPrometheus": prom,

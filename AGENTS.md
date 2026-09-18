@@ -45,6 +45,7 @@ When you discover something meaningful about this project during your work—arc
 - `memory-service-mcp/` - Standalone MCP binary wrapper (build with `cd memory-service-mcp && go build -o mcp-server .`; `.mcp.json` uses `${PWD}` for portable paths)
 - Current Go MCP implementation is HTTP/OpenAPI-based through `internal/generated/apiclient`; it does not use gRPC today, so embedded MCP designs only need an in-process HTTP path unless they explicitly add new gRPC consumers.
 - MCP CLI split: main binary now uses explicit `./memory-service mcp remote` and `./memory-service mcp embedded` subcommands, while `memory-service-mcp` remains a single-command remote wrapper.
+- Policy import compatibility: use `MEMORY_SERVICE_POLICY_IMPORT_PATH` or `--policy-import-path` in runnable examples and user documentation. `MEMORY_SERVICE_POLICY_IMPORT_DIR` and `--policy-import-dir` are hidden compatibility inputs only.
 
 **API gotchas**:
 - Conversation search endpoint is `/v1/conversations/search` (not `/v1/search`).
@@ -102,6 +103,7 @@ When you discover something meaningful about this project during your work—arc
 
 **Security**: Don't commit secrets; pass them with env vars
 **Commits**: Conventional Commits (`feat:`, `fix:`, `docs:`). Include test commands and config changes.
+**Compatibility markers**: Mark every backward-compatibility-only code section with the exact searchable comment `// BACKWARD COMPATIBILITY: remove in a future breaking release.`. Use `# BACKWARD COMPATIBILITY: remove in a future breaking release.` in Dockerfiles and shell files. Add a nearby feature-specific comment when the marker alone does not explain the shim.
 
 ## Notes for AI Assistants
 

@@ -317,7 +317,9 @@ type Config struct {
 	OutboxReplayBatchSize    int
 
 	// Policy imports
-	PolicyImportDir string // Directory containing startup-imported policy definitions
+	PolicyImportPath string // Comma-separated files and directories containing startup-imported policy definitions
+	// BACKWARD COMPATIBILITY: remove in a future breaking release.
+	PolicyImportDir string // Deprecated compatibility setting for PolicyImportPath
 
 	// Episodic memory settings
 	EpisodicMaxDepth           int           // Maximum namespace depth (default 5)

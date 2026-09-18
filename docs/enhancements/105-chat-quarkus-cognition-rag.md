@@ -285,7 +285,7 @@ The config should live in `chat-quarkus` first. The base profile should leave `c
 
 ### Safe Attribute Policy
 
-The current built-in memory kind projects only namespace guard attributes such as `namespace` and `sub`. To support type-aware cognition retrieval, add a deployable cognition memory-kind document and `projection.rego` under `deploy/episodic-policies/cognition/`. Do not add these cognition-specific fields to the built-in kind. The distributed image packages this cognition bundle and selects it through its default `MEMORY_SERVICE_POLICY_IMPORT_DIR`; the policy loader retains the built-in `authz.rego` and `filter.rego` programs because the bundle does not override them.
+The current built-in memory kind projects only namespace guard attributes such as `namespace` and `sub`. To support type-aware cognition retrieval, add a deployable cognition memory-kind document and `projection.rego` under `deploy/episodic-policies/cognition/`. Do not add these cognition-specific fields to the built-in kind. The distributed image packages this cognition bundle and sets `/etc/memory-service/policies/` as the default import path. The policy loader retains the built-in `authz.rego` and `filter.rego` programs because the bundle does not override them.
 
 | Attribute         | Source                                                        |
 | ----------------- | ------------------------------------------------------------- |
@@ -558,7 +558,7 @@ Add a `@QuarkusTest` that replaces the chat model with `TestChatModel` and asser
 - [x] Add `CognitionMemoryContentInjector` with compact advisory framing.
 - [x] Wire `Agent` with `retrievalAugmentor = CognitionMemoryRetrievalAugmentor.class`.
 - [x] Update the `Agent` system message with durable-memory usage guidance.
-- [x] Add a deployable cognition memory-kind manifest and safe `projection.rego`, and document `MEMORY_SERVICE_POLICY_IMPORT_DIR`.
+- [x] Add a deployable cognition memory-kind manifest and safe `projection.rego`, and document `MEMORY_SERVICE_POLICY_IMPORT_PATH`.
 - [ ] Add focused unit tests for first-turn profile context, every-turn ad hoc search, close-match gating, request construction, formatting, and failure behavior.
 - [ ] Add an AI-service integration test that verifies retrieved memory reaches the model request.
 - [ ] Verify whether retrieved content is persisted by `MemoryServiceChatMemoryStore`; add a guard if needed.

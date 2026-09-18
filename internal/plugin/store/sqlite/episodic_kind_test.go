@@ -79,6 +79,50 @@ func TestMemoryKindFileImportIgnoresOtherYAMLDocumentsAndJSON(t *testing.T) {
 	}))
 }
 
+func TestMemoryKindImportPathSupportsFilesAndDirectories(t *testing.T) {
+	store, ctx := newTestSQLiteEpisodicStore(t)
+	dir := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(dir, "nested"), 0o700))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, "nested", "directory-kind.yaml"),
+		[]byte("kind: memory-kind\nname: directory-kind/v1\nattributes: {}\n"),
+		0o600,
+	))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, "ignored-extension.json"),
+		[]byte(`{"kind":"memory-kind","name":"ignored-extension/v1","attributes":{}}`),
+		0o600,
+	))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, "ignored-kind.yml"),
+		[]byte("kind: another-policy-type\nname: ignored-kind/v1\n"),
+		0o600,
+	))
+
+	explicitFile := filepath.Join(t.TempDir(), "explicit,kind.policy")
+	require.NoError(t, os.WriteFile(
+		explicitFile,
+		[]byte("kind: memory-kind\nname: explicit-kind/v1\nattributes: {}\n"),
+		0o600,
+	))
+	quotedExplicitFile := fmt.Sprintf("%q", explicitFile)
+	require.NoError(t, coreepisodic.ImportKindVersions(ctx, store, dir+","+quotedExplicitFile))
+
+	require.NoError(t, store.InReadTx(ctx, func(txCtx context.Context) error {
+		for _, name := range []string{"directory-kind/v1", "explicit-kind/v1"} {
+			version, err := store.GetMemoryKindVersion(txCtx, name)
+			require.NoError(t, err)
+			require.NotNil(t, version, name)
+		}
+		for _, name := range []string{"ignored-extension/v1", "ignored-kind/v1"} {
+			version, err := store.GetMemoryKindVersion(txCtx, name)
+			require.NoError(t, err)
+			require.Nil(t, version, name)
+		}
+		return nil
+	}))
+}
+
 func TestMemoryKindFileImportStrictlyDecodesMatchingYAML(t *testing.T) {
 	store, ctx := newTestSQLiteEpisodicStore(t)
 	dir := t.TempDir()

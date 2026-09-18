@@ -3,6 +3,7 @@ package episodic
 import (
 	"context"
 	_ "embed"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -143,65 +144,52 @@ var defaultAuthzRego string
 //go:embed default-v1/filter.rego
 var defaultFilterInjectRego string
 
-// NewPolicyEngine creates a PolicyEngine. A policy import directory may contain
-// both authz.rego and filter.rego at its root to replace the built-in global
-// policies. When neither file is present, the built-in policies are used. Other
-// Rego files are assets for manifest-based policy types and are not loaded here.
-func NewPolicyEngine(ctx context.Context, policyImportDir string) (*PolicyEngine, error) {
+// NewPolicyEngine creates a PolicyEngine. A directory in the policy import path
+// may contain authz.rego and filter.rego at its root. The two files may also be
+// listed explicitly. When neither file is present, the built-in policies are
+// used. Other Rego files are assets for manifest-based policy types and are not
+// loaded here.
+func NewPolicyEngine(ctx context.Context, policyImportPath string) (*PolicyEngine, error) {
 	e := &PolicyEngine{}
-	if err := e.load(ctx, policyImportDir); err != nil {
+	if err := e.load(ctx, policyImportPath); err != nil {
 		return nil, err
 	}
 	return e, nil
 }
 
-func regoSource(policyImportDir, filename string) (string, error) {
-	data, err := os.ReadFile(filepath.Join(policyImportDir, filename))
+func regoSource(path, filename string) (string, error) {
+	data, err := os.ReadFile(path)
 	if err != nil {
-		return "", fmt.Errorf("policy import directory requires %s: %w", filename, err)
+		return "", fmt.Errorf("policy import path requires %s: %w", filename, err)
 	}
 	return string(data), nil
 }
 
-func (e *PolicyEngine) load(ctx context.Context, policyImportDir string) error {
-	policyImportDir = strings.TrimSpace(policyImportDir)
+func (e *PolicyEngine) load(ctx context.Context, policyImportPath string) error {
 	authzSrc, filterSrc := defaultAuthzRego, defaultFilterInjectRego
-	if policyImportDir != "" {
-		entries, err := os.ReadDir(policyImportDir)
+	globalFiles, err := globalPolicyFiles(policyImportPath)
+	if err != nil {
+		return err
+	}
+	if len(globalFiles) != 0 {
+		authzPath, hasAuthz := globalFiles["authz.rego"]
+		filterPath, hasFilter := globalFiles["filter.rego"]
+		if !hasAuthz {
+			return fmt.Errorf("policy import path requires authz.rego when filter.rego is present")
+		}
+		if !hasFilter {
+			return fmt.Errorf("policy import path requires filter.rego when authz.rego is present")
+		}
+		authzSrc, err = regoSource(authzPath, "authz.rego")
 		if err != nil {
-			return fmt.Errorf("read policy import directory: %w", err)
+			return err
 		}
-		hasAuthz, hasFilter := false, false
-		for _, entry := range entries {
-			if entry.IsDir() || filepath.Ext(entry.Name()) != ".rego" {
-				continue
-			}
-			switch entry.Name() {
-			case "authz.rego":
-				hasAuthz = true
-			case "filter.rego":
-				hasFilter = true
-			}
-		}
-		if hasAuthz || hasFilter {
-			if !hasAuthz {
-				return fmt.Errorf("policy import directory requires authz.rego when filter.rego is present")
-			}
-			if !hasFilter {
-				return fmt.Errorf("policy import directory requires filter.rego when authz.rego is present")
-			}
-			authzSrc, err = regoSource(policyImportDir, "authz.rego")
-			if err != nil {
-				return err
-			}
-			filterSrc, err = regoSource(policyImportDir, "filter.rego")
-			if err != nil {
-				return err
-			}
+		filterSrc, err = regoSource(filterPath, "filter.rego")
+		if err != nil {
+			return err
 		}
 	}
 
-	var err error
 	e.authz, err = prepareQuery(ctx, authzSrc, "data.memories.authz.decision")
 	if err != nil {
 		return fmt.Errorf("episodic: load authz policy: %w", err)
@@ -212,6 +200,58 @@ func (e *PolicyEngine) load(ctx context.Context, policyImportDir string) error {
 	}
 	e.authzSrc = authzSrc
 	e.filterSrc = filterSrc
+	return nil
+}
+
+func globalPolicyFiles(policyImportPath string) (map[string]string, error) {
+	files := make(map[string]string)
+	paths, err := parsePolicyImportPath(policyImportPath)
+	if err != nil {
+		return nil, err
+	}
+	for _, path := range paths {
+		info, err := os.Stat(path)
+		if err != nil {
+			return nil, fmt.Errorf("read policy import path %s: %w", path, err)
+		}
+		if info.IsDir() {
+			for _, filename := range []string{"authz.rego", "filter.rego"} {
+				candidate := filepath.Join(path, filename)
+				candidateInfo, statErr := os.Stat(candidate)
+				if errors.Is(statErr, os.ErrNotExist) {
+					continue
+				}
+				if statErr != nil {
+					return nil, fmt.Errorf("read policy import path %s: %w", candidate, statErr)
+				}
+				if !candidateInfo.IsDir() {
+					if err := addGlobalPolicyFile(files, filename, candidate); err != nil {
+						return nil, err
+					}
+				}
+			}
+			continue
+		}
+		filename := filepath.Base(path)
+		if filename == "authz.rego" || filename == "filter.rego" {
+			if err := addGlobalPolicyFile(files, filename, path); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return files, nil
+}
+
+func addGlobalPolicyFile(files map[string]string, filename, path string) error {
+	if existing, ok := files[filename]; ok {
+		existingAbs, existingErr := filepath.Abs(existing)
+		pathAbs, pathErr := filepath.Abs(path)
+		if existingErr == nil && pathErr == nil && existingAbs == pathAbs {
+			return nil
+		}
+		return fmt.Errorf("policy import path contains multiple %s files: %s and %s", filename, existing, path)
+	}
+	files[filename] = path
 	return nil
 }
 

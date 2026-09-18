@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -300,6 +301,154 @@ func TestMaxPageSizeFlagAndEnvironment(t *testing.T) {
 				},
 			}
 			require.NoError(t, cmd.Run(context.Background(), tc.args))
+		})
+	}
+}
+
+func TestPolicyImportPathFlagCompatibility(t *testing.T) {
+	for _, name := range []string{"MEMORY_SERVICE_POLICY_IMPORT_PATH", "MEMORY_SERVICE_POLICY_IMPORT_DIR"} {
+		value, wasSet := os.LookupEnv(name)
+		require.NoError(t, os.Unsetenv(name))
+		t.Cleanup(func() {
+			if wasSet {
+				require.NoError(t, os.Setenv(name, value))
+			} else {
+				require.NoError(t, os.Unsetenv(name))
+			}
+		})
+	}
+
+	cases := []struct {
+		name   string
+		args   []string
+		newEnv string
+		oldEnv string
+		want   string
+	}{
+		{name: "new flag", args: []string{"test", "--policy-import-path", "new-a,new-b"}, want: "new-a,new-b"},
+		{name: "repeated new flag", args: []string{"test", "--policy-import-path", "new-a", "--policy-import-path", "new-b"}, want: "new-a,new-b"},
+		{name: "new environment", args: []string{"test"}, newEnv: "new-env", want: "new-env"},
+		{name: "old hidden flag", args: []string{"test", "--policy-import-dir", "old-flag"}, want: "old-flag"},
+		{name: "old environment", args: []string{"test"}, oldEnv: "old-env", want: "old-env"},
+		{name: "new flag wins", args: []string{"test", "--policy-import-path", "new", "--policy-import-dir", "old"}, want: "new"},
+		{name: "new flag wins over old environment", args: []string{"test", "--policy-import-path", "new-flag"}, oldEnv: "old-env", want: "new-flag"},
+		{name: "old flag wins over new environment", args: []string{"test", "--policy-import-dir", "old-flag"}, newEnv: "new-env", want: "old-flag"},
+		{name: "old environment wins over new environment", args: []string{"test"}, newEnv: "new-env", oldEnv: "old-env", want: "old-env"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.newEnv != "" {
+				t.Setenv("MEMORY_SERVICE_POLICY_IMPORT_PATH", tc.newEnv)
+			}
+			if tc.oldEnv != "" {
+				t.Setenv("MEMORY_SERVICE_POLICY_IMPORT_DIR", tc.oldEnv)
+			}
+			cfg := config.DefaultConfig()
+			state := NewFlagState(&cfg)
+			flags := episodicFlags(&cfg, state)
+			cmd := &cli.Command{
+				Name:  "test",
+				Flags: flags,
+				Action: func(_ context.Context, cmd *cli.Command) error {
+					applyPolicyImportFlags(&cfg, cmd, state)
+					require.Equal(t, tc.want, cfg.PolicyImportPath)
+					return nil
+				},
+			}
+			require.NoError(t, cmd.Run(context.Background(), tc.args))
+		})
+	}
+
+	cfg := config.DefaultConfig()
+	for _, flag := range episodicFlags(&cfg, NewFlagState(&cfg)) {
+		if slices.Contains(flag.Names(), "policy-import-dir") {
+			legacy, ok := flag.(*cli.StringFlag)
+			require.True(t, ok)
+			require.True(t, legacy.Hidden)
+			return
+		}
+	}
+	t.Fatal("policy-import-dir compatibility flag not found")
+}
+
+func TestPolicyImportContainerDefaultCompatibility(t *testing.T) {
+	data, err := os.ReadFile("../../../Dockerfile")
+	require.NoError(t, err)
+
+	var imageDefaultName, imageDefaultValue string
+	for line := range strings.Lines(string(data)) {
+		name, value, found := strings.Cut(strings.TrimSpace(line), "=")
+		if found && strings.HasPrefix(name, "ENV MEMORY_SERVICE_POLICY_IMPORT_") {
+			imageDefaultName = strings.TrimPrefix(name, "ENV ")
+			imageDefaultValue = value
+			break
+		}
+	}
+	require.NotEmpty(t, imageDefaultName, "Dockerfile must configure the container policy import default")
+	require.Equal(t, "/etc/memory-service/policies/", imageDefaultValue)
+
+	for _, name := range []string{"MEMORY_SERVICE_POLICY_IMPORT_PATH", "MEMORY_SERVICE_POLICY_IMPORT_DIR"} {
+		value, wasSet := os.LookupEnv(name)
+		require.NoError(t, os.Unsetenv(name))
+		t.Cleanup(func() {
+			if wasSet {
+				require.NoError(t, os.Setenv(name, value))
+			} else {
+				require.NoError(t, os.Unsetenv(name))
+			}
+		})
+	}
+
+	cases := []struct {
+		name     string
+		args     []string
+		override map[string]string
+		want     string
+	}{
+		{
+			name:     "legacy environment overrides image default",
+			override: map[string]string{"MEMORY_SERVICE_POLICY_IMPORT_DIR": "/custom/legacy-env"},
+			want:     "/custom/legacy-env",
+		},
+		{
+			name: "legacy flag overrides image default",
+			args: []string{"test", "--policy-import-dir", "/custom/legacy-flag"},
+			want: "/custom/legacy-flag",
+		},
+		{
+			name:     "new environment overrides image default",
+			override: map[string]string{"MEMORY_SERVICE_POLICY_IMPORT_PATH": "/custom/new-env"},
+			want:     "/custom/new-env",
+		},
+		{
+			name: "new flag overrides image default",
+			args: []string{"test", "--policy-import-path", "/custom/new-flag"},
+			want: "/custom/new-flag",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(imageDefaultName, imageDefaultValue)
+			for name, value := range tc.override {
+				t.Setenv(name, value)
+			}
+
+			cfg := config.DefaultConfig()
+			state := NewFlagState(&cfg)
+			cmd := &cli.Command{
+				Name:  "test",
+				Flags: episodicFlags(&cfg, state),
+				Action: func(_ context.Context, cmd *cli.Command) error {
+					applyPolicyImportFlags(&cfg, cmd, state)
+					require.Equal(t, tc.want, cfg.PolicyImportPath)
+					return nil
+				},
+			}
+			args := tc.args
+			if args == nil {
+				args = []string{"test"}
+			}
+			require.NoError(t, cmd.Run(context.Background(), args))
 		})
 	}
 }
