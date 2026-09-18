@@ -754,11 +754,11 @@ func initEpisodic(ctx context.Context, cfg *config.Config) (registryepisodic.Epi
 		return nil, nil, nil
 	}
 
-	policy, err := episodic.NewPolicyEngine(ctx, cfg.PolicyImportDir)
+	policy, err := episodic.NewPolicyEngine(ctx, cfg.PolicyImportPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to initialize episodic OPA policy engine: %w", err)
 	}
-	if err := episodic.ImportKindVersions(ctx, eStore, cfg.PolicyImportDir); err != nil {
+	if err := episodic.ImportKindVersions(ctx, eStore, cfg.PolicyImportPath); err != nil {
 		return nil, nil, fmt.Errorf("failed to import episodic memory kinds: %w", err)
 	}
 	return eStore, policy, nil

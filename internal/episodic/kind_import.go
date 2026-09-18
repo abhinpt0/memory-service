@@ -3,6 +3,7 @@ package episodic
 import (
 	"bytes"
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -35,55 +36,109 @@ type policyDocumentHeader struct {
 	Kind string `json:"kind"`
 }
 
-// ImportKindVersions recursively examines every *.yaml and *.yml document in a
-// policy import directory and imports only documents whose kind is
-// "memory-kind". Existing identical versions are idempotent. Conflicting
-// content is logged and never overwrites the immutable database record. A
-// directory with no memory-kind documents is valid because it may contain
-// other policy types.
-func ImportKindVersions(ctx context.Context, store registryepisodic.EpisodicStore, dir string) error {
-	dir = strings.TrimSpace(dir)
-	if dir == "" || store == nil {
+// ImportKindVersions examines the files and directories in policyImportPath and
+// imports only documents whose kind is "memory-kind". Directory entries are
+// searched recursively for *.yaml and *.yml files. Explicit file entries are
+// examined regardless of their extension. Existing identical versions are
+// idempotent. Conflicting content is logged and never overwrites the immutable
+// database record.
+func ImportKindVersions(ctx context.Context, store registryepisodic.EpisodicStore, policyImportPath string) error {
+	if strings.TrimSpace(policyImportPath) == "" || store == nil {
 		return nil
 	}
-	var documents []string
-	err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if entry.IsDir() {
-			return nil
-		}
-		extension := strings.ToLower(filepath.Ext(entry.Name()))
-		if extension != ".yaml" && extension != ".yml" {
-			return nil
-		}
-		relative, err := filepath.Rel(dir, path)
-		if err != nil {
-			return err
-		}
-		documents = append(documents, relative)
-		return nil
-	})
+	documents, err := kindImportDocuments(policyImportPath)
 	if err != nil {
-		return fmt.Errorf("read policy import directory for memory kinds: %w", err)
+		return err
 	}
-	sort.Strings(documents)
-	for _, name := range documents {
-		if err := importKindVersion(ctx, store, dir, name); err != nil {
+	for _, filename := range documents {
+		if err := importKindVersion(ctx, store, filename); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func importKindVersion(ctx context.Context, store registryepisodic.EpisodicStore, dir, filename string) error {
-	manifestPath := filepath.Join(dir, filename)
+func kindImportDocuments(policyImportPath string) ([]string, error) {
+	paths, err := parsePolicyImportPath(policyImportPath)
+	if err != nil {
+		return nil, err
+	}
+	documents := make([]string, 0, len(paths))
+	seen := make(map[string]struct{})
+	for _, path := range paths {
+		info, err := os.Stat(path)
+		if err != nil {
+			return nil, fmt.Errorf("read policy import path %s: %w", path, err)
+		}
+		if !info.IsDir() {
+			if strings.EqualFold(filepath.Ext(path), ".rego") {
+				continue
+			}
+			documents = appendUniquePath(documents, seen, path)
+			continue
+		}
+
+		var directoryDocuments []string
+		err = filepath.WalkDir(path, func(filename string, entry fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if entry.IsDir() {
+				return nil
+			}
+			extension := strings.ToLower(filepath.Ext(entry.Name()))
+			if extension == ".yaml" || extension == ".yml" {
+				directoryDocuments = append(directoryDocuments, filename)
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, fmt.Errorf("read policy import directory %s for memory kinds: %w", path, err)
+		}
+		sort.Strings(directoryDocuments)
+		for _, filename := range directoryDocuments {
+			documents = appendUniquePath(documents, seen, filename)
+		}
+	}
+	return documents, nil
+}
+
+func appendUniquePath(paths []string, seen map[string]struct{}, path string) []string {
+	key, err := filepath.Abs(path)
+	if err != nil {
+		key = filepath.Clean(path)
+	}
+	if _, ok := seen[key]; ok {
+		return paths
+	}
+	seen[key] = struct{}{}
+	return append(paths, path)
+}
+
+func parsePolicyImportPath(policyImportPath string) ([]string, error) {
+	reader := csv.NewReader(strings.NewReader(policyImportPath))
+	reader.TrimLeadingSpace = true
+	records, err := reader.ReadAll()
+	if err != nil {
+		return nil, fmt.Errorf("parse policy import path: %w", err)
+	}
+	var paths []string
+	for _, record := range records {
+		for _, path := range record {
+			if path = strings.TrimSpace(path); path != "" {
+				paths = append(paths, path)
+			}
+		}
+	}
+	return paths, nil
+}
+
+func importKindVersion(ctx context.Context, store registryepisodic.EpisodicStore, manifestPath string) error {
 	raw, err := os.ReadFile(manifestPath)
 	if err != nil {
-		return fmt.Errorf("read memory-kind manifest %s: %w", filename, err)
+		return fmt.Errorf("read memory-kind manifest %s: %w", manifestPath, err)
 	}
-	manifest, isMemoryKind, err := decodeKindImportManifest(raw, filename)
+	manifest, isMemoryKind, err := decodeKindImportManifest(raw, manifestPath)
 	if err != nil {
 		return err
 	}
@@ -91,29 +146,29 @@ func importKindVersion(ctx context.Context, store registryepisodic.EpisodicStore
 		return nil
 	}
 	if _, _, err := ParseCanonicalKindName(manifest.Name); err != nil {
-		return fmt.Errorf("memory-kind manifest %s: %w", filename, err)
+		return fmt.Errorf("memory-kind manifest %s: %w", manifestPath, err)
 	}
 	if err := ValidateKindAttributeTypes(manifest.Attributes); err != nil {
-		return fmt.Errorf("memory-kind manifest %s: %w", filename, err)
+		return fmt.Errorf("memory-kind manifest %s: %w", manifestPath, err)
 	}
 	if manifest.ProjectionRego != "" && manifest.ProjectionRegoFile != "" {
-		return fmt.Errorf("memory-kind manifest %s must set only one of projectionRego or projectionRegoFile", filename)
+		return fmt.Errorf("memory-kind manifest %s must set only one of projectionRego or projectionRegoFile", manifestPath)
 	}
 	regoSource := manifest.ProjectionRego
 	if manifest.ProjectionRegoFile != "" {
 		regoPath, err := safeImportPath(filepath.Dir(manifestPath), manifest.ProjectionRegoFile)
 		if err != nil {
-			return fmt.Errorf("memory-kind manifest %s: %w", filename, err)
+			return fmt.Errorf("memory-kind manifest %s: %w", manifestPath, err)
 		}
 		regoBytes, err := os.ReadFile(regoPath)
 		if err != nil {
-			return fmt.Errorf("read projection for memory-kind manifest %s: %w", filename, err)
+			return fmt.Errorf("read projection for memory-kind manifest %s: %w", manifestPath, err)
 		}
 		regoSource = string(regoBytes)
 	}
 	if regoSource != "" {
 		if _, err := CompileKindProjection(ctx, regoSource); err != nil {
-			return fmt.Errorf("memory-kind manifest %s: %w", filename, err)
+			return fmt.Errorf("memory-kind manifest %s: %w", manifestPath, err)
 		}
 	}
 	writable := true
@@ -138,21 +193,21 @@ func importKindVersion(ctx context.Context, store registryepisodic.EpisodicStore
 	}
 	if existing != nil {
 		if !kindVersionsEqual(*existing, version) {
-			log.Error("Memory-kind import conflict; stored immutable version was not changed", "name", manifest.Name, "manifest", filename)
+			log.Error("Memory-kind import conflict; stored immutable version was not changed", "name", manifest.Name, "manifest", manifestPath)
 			return nil // do not apply manifest defaults when its immutable content conflicts
 		}
-		log.Info("Memory-kind import already present", "name", manifest.Name, "manifest", filename)
+		log.Info("Memory-kind import already present", "name", manifest.Name, "manifest", manifestPath)
 	} else if err := store.InWriteTx(ctx, func(txCtx context.Context) error {
 		_, createErr := store.CreateMemoryKindVersion(txCtx, version)
 		return createErr
 	}); err != nil {
 		if errors.Is(err, registryepisodic.ErrMemoryKindVersionConflict) {
-			log.Error("Memory-kind import conflict; stored immutable version was not changed", "name", manifest.Name, "manifest", filename)
+			log.Error("Memory-kind import conflict; stored immutable version was not changed", "name", manifest.Name, "manifest", manifestPath)
 			return nil
 		}
 		return fmt.Errorf("import memory kind %s: %w", manifest.Name, err)
 	} else {
-		log.Info("Imported immutable memory kind", "name", manifest.Name, "manifest", filename)
+		log.Info("Imported immutable memory kind", "name", manifest.Name, "manifest", manifestPath)
 	}
 
 	return nil

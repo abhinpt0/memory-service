@@ -468,23 +468,31 @@ A background goroutine expires memories on a configurable interval (default: 60 
 
 ## Access Control
 
-Memory access is enforced by embedded **OPA/Rego policies** evaluated on every memory API call. The service loads policy definitions from the shared `--policy-import-dir` or `MEMORY_SERVICE_POLICY_IMPORT_DIR` root.
+Memory access is enforced by embedded **OPA/Rego policies** evaluated on every memory API call. The service loads policy definitions from the comma-separated `--policy-import-path` or `MEMORY_SERVICE_POLICY_IMPORT_PATH` setting.
 
-The directory may contain this optional pair of global policy overrides:
+A configured directory may contain this optional pair of global policy overrides:
 
 - `authz.rego` — read/write/delete authorization
 - `filter.rego` — search/list namespace and filter injection
 
-The two global files are optional as a pair: when neither is present, the service uses its built-in authorization and scoping programs. Other Rego files are available as assets for manifest-based policy types and are not loaded as global programs. Attribute projection is defined through stored `MemoryKindVersion` resources (see [Memory Kind Versions](#memory-kind-versions) above). The same import root is searched recursively for every `.yaml` and `.yml` file. Documents without `kind: memory-kind` are ignored; matching documents are decoded strictly and may reference a projection file relative to their own directory. JSON manifests are not scanned. Imports insert only absent versions; identical versions are logged, and same-name differences are logged without overwriting the database. The built-in `default/v1` kind handles namespace/sub projection for memories written without an explicit kind.
+The two global files are optional as a pair. When neither is present, the service uses its built-in authorization and scoping programs. Each configured directory contributes only root-level global files. You can also list either global file explicitly. The complete import path must resolve at most one file of each name and must provide both files or neither file. Other Rego files are available as assets for manifest-based policy types and are not loaded as global programs.
 
-If no directory is set, the service uses its built-in authorization and scoping programs and imports no deployment-provided memory kinds. The distributed container image copies the policy tree to `/etc/memory-service/policies/`, including the cognition bundle under `cognition/`, and sets the parent directory as its default import root.
+Each configured directory is searched recursively for `.yaml` and `.yml` files. Explicit file entries are examined regardless of their extension. Documents without `kind: memory-kind` are ignored. Matching documents are decoded strictly and may reference a projection file relative to their own directory. Imports insert only absent versions. Identical versions are logged, and same-name differences are logged without overwriting the database. The built-in `default/v1` kind handles namespace/sub projection for memories written without an explicit kind.
 
-### Policy Import Directory Configuration
+If no path is set, the service uses its built-in authorization and scoping programs and imports no deployment-provided memory kinds. The distributed container image copies the policy tree to `/etc/memory-service/policies/`, including the cognition bundle under `cognition/`, and sets the parent directory as its default import path.
 
-The policy import directory can contain global Rego overrides and any number of manifest-based policy bundles:
+### Policy import path configuration
+
+The policy import path accepts a comma-separated list of files and directories. You can also repeat `--policy-import-path`; each occurrence appends to the list.
 
 ```text
-<policy-import-dir>/
+/etc/memory-service/policies/,/opt/acme/customer-profile.yaml
+```
+
+A directory can contain global Rego overrides and any number of manifest-based policy bundles:
+
+```text
+<policy-directory>/
 ├── authz.rego                 # optional global override
 ├── filter.rego                # optional global override
 └── cognition/
@@ -494,12 +502,12 @@ The policy import directory can contain global Rego overrides and any number of 
 
 The global overrides use filename-based discovery:
 
-- `authz.rego` and `filter.rego` are exact, case-sensitive filenames and must be located directly at the policy import root.
-- They must be provided together. When neither is present, the embedded global policies are used.
+- `authz.rego` and `filter.rego` are exact, case-sensitive filenames. They can be located directly in a configured directory or listed as explicit file entries.
+- The import path must provide both files or neither file. It cannot resolve more than one file of either name.
 - `authz.rego` must expose `data.memories.authz.decision`; `filter.rego` must expose `data.memories.filter`.
 - Global Rego discovery is not recursive. Other `.rego` files are not loaded as global programs.
 
-Manifest-based policy documents use discriminator-based discovery. Every `.yaml` and `.yml` file below the import root is examined recursively. Documents without `kind: memory-kind`, including documents for future policy types, are ignored by the memory-kind importer. JSON files are not examined.
+Manifest-based policy documents use discriminator-based discovery. Every `.yaml` and `.yml` file below a configured directory is examined recursively. Files with other extensions in that directory are ignored. An explicit file entry is examined regardless of its extension. Documents without `kind: memory-kind`, including documents for future policy types, are ignored by the memory-kind importer.
 
 A memory-kind manifest can embed its projection in `projectionRego` or reference a Rego file relative to the manifest with `projectionRegoFile`:
 

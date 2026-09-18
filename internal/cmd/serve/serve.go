@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"os/user"
 	"strconv"
 	"strings"
@@ -42,7 +43,33 @@ type FlagState struct {
 	CacheLocalMaxBytes    string
 	CacheLocalNumCounters int
 	CacheLocalBufferItems int
+	PolicyImportPaths     []string
+	// BACKWARD COMPATIBILITY: remove in a future breaking release.
+	PolicyImportPathFromEnv bool
 }
+
+// BACKWARD COMPATIBILITY: remove in a future breaking release.
+// trackedEnvVarSource distinguishes the image's new-name environment default
+// from an explicitly supplied new CLI flag while the legacy input is supported.
+type trackedEnvVarSource struct {
+	key  string
+	used *bool
+}
+
+func (s *trackedEnvVarSource) Lookup() (string, bool) {
+	value, found := os.LookupEnv(s.key)
+	if found {
+		*s.used = true
+	}
+	return value, found
+}
+
+func (s *trackedEnvVarSource) String() string { return fmt.Sprintf("environment variable %q", s.key) }
+func (s *trackedEnvVarSource) GoString() string {
+	return fmt.Sprintf("&trackedEnvVarSource{key:%q}", s.key)
+}
+func (s *trackedEnvVarSource) IsFromEnv() bool { return true }
+func (s *trackedEnvVarSource) Key() string     { return s.key }
 
 func NewFlagState(cfg *config.Config) *FlagState {
 	return &FlagState{
@@ -168,7 +195,7 @@ func flagsFor(cfg *config.Config, state *FlagState, opts flagSetOptions) []cli.F
 		flags = append(flags, authorizationFlags(cfg)...)
 	}
 	if opts.includeEpisodic {
-		flags = append(flags, episodicFlags(cfg)...)
+		flags = append(flags, episodicFlags(cfg, state)...)
 	}
 	if opts.includeClustering {
 		flags = append(flags, clusteringFlags(cfg)...)
@@ -831,7 +858,7 @@ func authorizationFlags(cfg *config.Config) []cli.Flag {
 	return flags
 }
 
-func episodicFlags(cfg *config.Config) []cli.Flag {
+func episodicFlags(cfg *config.Config, state *FlagState) []cli.Flag {
 	return []cli.Flag{
 		&cli.IntFlag{
 			Name:        "episodic-max-depth",
@@ -841,12 +868,22 @@ func episodicFlags(cfg *config.Config) []cli.Flag {
 			Value:       cfg.EpisodicMaxDepth,
 			Usage:       "Maximum namespace depth for episodic memory",
 		},
+		&cli.StringSliceFlag{
+			Name:     "policy-import-path",
+			Category: "Policy Imports:",
+			Sources: cli.NewValueSourceChain(&trackedEnvVarSource{
+				key:  "MEMORY_SERVICE_POLICY_IMPORT_PATH",
+				used: &state.PolicyImportPathFromEnv,
+			}),
+			Destination: &state.PolicyImportPaths,
+			Usage:       "Policy definition file or directory imported at startup; repeat the flag or use comma-separated values",
+		},
+		// BACKWARD COMPATIBILITY: remove in a future breaking release.
 		&cli.StringFlag{
 			Name:        "policy-import-dir",
-			Category:    "Policy Imports:",
 			Sources:     cli.EnvVars("MEMORY_SERVICE_POLICY_IMPORT_DIR"),
 			Destination: &cfg.PolicyImportDir,
-			Usage:       "Directory containing policy definitions imported at startup, including optional authz.rego, filter.rego, and memory-kind manifests",
+			Hidden:      true,
 		},
 		&cli.IntFlag{
 			Name:        "episodic-indexing-batch-size",
@@ -1002,6 +1039,7 @@ func ApplyParsedFlags(cfg *config.Config, cmd *cli.Command, state *FlagState, va
 	registryattach.ApplyAll(cfg, cmd)
 	registryeventbus.ApplyAll(cfg, cmd)
 	encrypt.ApplyAll(cfg, cmd)
+	applyPolicyImportFlags(cfg, cmd, state)
 	if strings.TrimSpace(state.CacheLocalMaxBytes) != "" {
 		size, err := config.ParseMemorySize(state.CacheLocalMaxBytes)
 		if err != nil {
@@ -1047,6 +1085,17 @@ func ApplyParsedFlags(cfg *config.Config, cmd *cli.Command, state *FlagState, va
 	}
 	cfg.ManagementListenerEnabled = selections.mgmtPortExplicit || selections.mgmtUnixSocketExplicit
 	return nil
+}
+
+func applyPolicyImportFlags(cfg *config.Config, cmd *cli.Command, state *FlagState) {
+	if cmd.IsSet("policy-import-path") && !state.PolicyImportPathFromEnv {
+		cfg.PolicyImportPath = strings.Join(state.PolicyImportPaths, ",")
+	} else if cmd.IsSet("policy-import-dir") {
+		// BACKWARD COMPATIBILITY: remove in a future breaking release.
+		cfg.PolicyImportPath = cfg.PolicyImportDir
+	} else if cmd.IsSet("policy-import-path") {
+		cfg.PolicyImportPath = strings.Join(state.PolicyImportPaths, ",")
+	}
 }
 
 var currentOSUser = user.Current

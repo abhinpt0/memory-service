@@ -176,7 +176,7 @@ func TestDefaultPoliciesRegoAssertions(t *testing.T) {
 	}
 }
 
-func TestPolicyImportDirectoryAllowsMemoryKindProjectionSubdirectories(t *testing.T) {
+func TestPolicyImportPathAllowsMemoryKindProjectionSubdirectories(t *testing.T) {
 	policyImportDir := filepath.Join("..", "..", "deploy", "episodic-policies", "cognition")
 	if _, err := NewPolicyEngine(context.Background(), policyImportDir); err != nil {
 		t.Fatalf("memory-kind projection in policy import directory should be accepted: %v", err)
@@ -219,6 +219,21 @@ func TestConfiguredPolicyDirectoryAllowsManifestRegoAssets(t *testing.T) {
 	}
 	if _, err := NewPolicyEngine(context.Background(), dir); err != nil {
 		t.Fatalf("non-global Rego assets should be left for manifest-based importers: %v", err)
+	}
+}
+
+func TestConfiguredPolicyPathAcceptsExplicitGlobalPolicyFiles(t *testing.T) {
+	dir := t.TempDir()
+	authzPath := filepath.Join(dir, "authz.rego")
+	filterPath := filepath.Join(dir, "filter.rego")
+	if err := os.WriteFile(authzPath, []byte(defaultAuthzRego), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filterPath, []byte(defaultFilterInjectRego), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewPolicyEngine(context.Background(), authzPath+","+filterPath); err != nil {
+		t.Fatalf("explicit global policy files should be accepted: %v", err)
 	}
 }
 
