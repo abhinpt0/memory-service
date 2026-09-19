@@ -4047,6 +4047,41 @@ func (s *MongoStore) LoadDeletedConversationGroups(ctx context.Context, groupIDs
 		return nil, nil
 	}
 
+	groupIDs, err := registrystore.ExpandConversationGroupDeletion(groupIDs, func(frontier []uuid.UUID) ([]uuid.UUID, error) {
+		ids := make([]string, len(frontier))
+		for i, id := range frontier {
+			ids[i] = uuidToStr(id)
+		}
+		cur, err := s.conversations().Find(ctx, bson.M{"conversation_group_id": bson.M{"$in": ids}}, options.Find().SetProjection(bson.M{"_id": 1}))
+		if err != nil {
+			return nil, err
+		}
+		var parents []convDoc
+		if err := cur.All(ctx, &parents); err != nil {
+			return nil, err
+		}
+		parentIDs := make([]string, 0, len(parents))
+		for _, parent := range parents {
+			parentIDs = append(parentIDs, string(parent.ID))
+		}
+		cur, err = s.conversations().Find(ctx, bson.M{"started_by_conversation_id": bson.M{"$in": parentIDs}}, options.Find().SetProjection(bson.M{"conversation_group_id": 1}))
+		if err != nil {
+			return nil, err
+		}
+		var children []convDoc
+		if err := cur.All(ctx, &children); err != nil {
+			return nil, err
+		}
+		result := make([]uuid.UUID, 0, len(children))
+		for _, child := range children {
+			result = append(result, strToUUID(child.ConversationGroupID))
+		}
+		return result, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
 	strIDs := make([]string, len(groupIDs))
 	for i, id := range groupIDs {
 		strIDs[i] = uuidToStr(id)
@@ -4138,7 +4173,6 @@ func (s *MongoStore) CreateTask(ctx context.Context, taskType string, taskBody m
 
 	doc := bson.M{
 		"_id":           uuidToStr(uuid.New()),
-		"task_name":     taskName,
 		"task_type":     taskType,
 		"task_body":     taskBody,
 		"created_at":    time.Now(),
@@ -4147,6 +4181,7 @@ func (s *MongoStore) CreateTask(ctx context.Context, taskType string, taskBody m
 		"retry_count":   0,
 	}
 	if taskName != nil {
+		doc["task_name"] = *taskName
 		res, err := s.db.Collection("tasks").UpdateOne(
 			ctx,
 			bson.M{"task_name": *taskName},

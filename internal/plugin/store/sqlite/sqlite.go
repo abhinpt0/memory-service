@@ -3210,6 +3210,17 @@ func (s *SQLiteStore) LoadDeletedConversationGroups(ctx context.Context, groupID
 		return nil, nil
 	}
 
+	db := s.writeDBFor(ctx, "prepare conversation deletion")
+	groupIDs, err := registrystore.ExpandConversationGroupDeletion(groupIDs, func(frontier []uuid.UUID) ([]uuid.UUID, error) {
+		parents := db.Model(&model.Conversation{}).Select("id").Where("conversation_group_id IN ?", frontier)
+		var children []uuid.UUID
+		err := db.Model(&model.Conversation{}).Distinct("conversation_group_id").Where("started_by_conversation_id IN (?)", parents).Pluck("conversation_group_id", &children).Error
+		return children, err
+	})
+	if err != nil {
+		return nil, err
+	}
+
 	type conversationRow struct {
 		ConversationGroupID uuid.UUID `gorm:"column:conversation_group_id"`
 		ID                  string    `gorm:"column:id"`

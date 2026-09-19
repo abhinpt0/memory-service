@@ -23,6 +23,7 @@ import (
 	registrymigrate "github.com/chirino/memory-service/internal/registry/migrate"
 	registrystore "github.com/chirino/memory-service/internal/registry/store"
 	"github.com/chirino/memory-service/internal/security"
+	"github.com/chirino/memory-service/internal/txscope"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/driver/postgres"
@@ -285,6 +286,19 @@ func (s *PostgresStore) CreateConversationWithID(ctx context.Context, userID str
 }
 
 func (s *PostgresStore) createConversationWithID(ctx context.Context, userID string, clientID string, convID string, title string, metadata map[string]interface{}, agentID *string, forkedAtConversationID *string, forkedAtEntryID *uuid.UUID, startedByConversationID *string, startedByEntryID *uuid.UUID) (*registrystore.ConversationDetail, error) {
+	// Started-by references have no foreign key. Hold the explicit parent lock
+	// through child creation even when the caller has not opened a write scope.
+	if startedByConversationID != nil {
+		if scoped, ok := scopeFromContext(ctx); !ok || scoped == nil {
+			var result *registrystore.ConversationDetail
+			err := s.InWriteTx(ctx, func(txCtx context.Context) error {
+				var err error
+				result, err = s.createConversationWithID(txCtx, userID, clientID, convID, title, metadata, agentID, forkedAtConversationID, forkedAtEntryID, startedByConversationID, startedByEntryID)
+				return err
+			})
+			return result, err
+		}
+	}
 	db, err := s.writeDBFor(ctx, "create conversation")
 	if err != nil {
 		return nil, err
@@ -349,7 +363,9 @@ func (s *PostgresStore) createConversationWithID(ctx context.Context, userID str
 		actualGroupID = parent.ConversationGroupID
 	} else if startedByConversationID != nil {
 		var parentConv model.Conversation
-		findResult := db.Where("id = ? AND archived_at IS NULL", *startedByConversationID).Limit(1).Find(&parentConv)
+		// Eviction takes FOR UPDATE before discovering children. This lock keeps
+		// the parent present until our child is visible to that discovery query.
+		findResult := db.Clauses(clause.Locking{Strength: "KEY SHARE"}).Where("id = ? AND archived_at IS NULL", *startedByConversationID).Limit(1).Find(&parentConv)
 		if findResult.Error != nil {
 			return nil, findResult.Error
 		}
@@ -3176,7 +3192,7 @@ func (s *PostgresStore) AdminDeleteAttachment(ctx context.Context, attachmentID 
 
 func (s *PostgresStore) FindEvictableGroupIDs(ctx context.Context, cutoff time.Time, limit int) ([]uuid.UUID, error) {
 	var ids []uuid.UUID
-	err := s.db.WithContext(ctx).
+	err := s.dbFor(ctx).
 		Model(&model.ConversationGroup{}).
 		Where("archived_at IS NOT NULL AND archived_at < ?", cutoff).
 		Limit(limit).
@@ -3186,7 +3202,7 @@ func (s *PostgresStore) FindEvictableGroupIDs(ctx context.Context, cutoff time.T
 
 func (s *PostgresStore) CountEvictableGroups(ctx context.Context, cutoff time.Time) (int64, error) {
 	var count int64
-	err := s.db.WithContext(ctx).
+	err := s.dbFor(ctx).
 		Model(&model.ConversationGroup{}).
 		Where("archived_at IS NOT NULL AND archived_at < ?", cutoff).
 		Count(&count).Error
@@ -3198,12 +3214,41 @@ func (s *PostgresStore) LoadDeletedConversationGroups(ctx context.Context, group
 		return nil, nil
 	}
 
+	// Lock groups before conversations. Group locks prevent new forks; the
+	// conversation locks coordinate with explicit parent locks in child creation.
+	// Discover children after acquiring the locks, using a fresh READ COMMITTED
+	// snapshot so children committed while we waited are included.
+	if scoped, ok := scopeFromContext(ctx); !ok || scoped == nil || scoped.intent != txscope.IntentWrite {
+		return nil, fmt.Errorf("postgres: preparing conversation deletion requires write scope")
+	}
+	db := s.dbFor(ctx)
+	groupIDs, err := registrystore.ExpandConversationGroupDeletion(groupIDs, func(frontier []uuid.UUID) ([]uuid.UUID, error) {
+		var groups []model.ConversationGroup
+		if err := db.Select("id").Where("id IN ?", frontier).Order("id").Clauses(clause.Locking{Strength: "UPDATE"}).Find(&groups).Error; err != nil {
+			return nil, err
+		}
+		var conversations []model.Conversation
+		if err := db.Select("id").Where("conversation_group_id IN ?", frontier).Order("id").Clauses(clause.Locking{Strength: "UPDATE"}).Find(&conversations).Error; err != nil {
+			return nil, err
+		}
+		ids := make([]string, 0, len(conversations))
+		for _, conversation := range conversations {
+			ids = append(ids, conversation.ID)
+		}
+		var children []uuid.UUID
+		err := db.Model(&model.Conversation{}).Distinct("conversation_group_id").Where("started_by_conversation_id IN ?", ids).Pluck("conversation_group_id", &children).Error
+		return children, err
+	})
+	if err != nil {
+		return nil, err
+	}
+
 	type conversationRow struct {
 		ConversationGroupID uuid.UUID `gorm:"column:conversation_group_id"`
 		ID                  string    `gorm:"column:id"`
 	}
 	var conversations []conversationRow
-	if err := s.db.WithContext(ctx).
+	if err := s.dbFor(ctx).
 		Model(&model.Conversation{}).
 		Select("conversation_group_id, id").
 		Where("conversation_group_id IN ?", groupIDs).
@@ -3213,7 +3258,7 @@ func (s *PostgresStore) LoadDeletedConversationGroups(ctx context.Context, group
 	}
 
 	var memberships []model.ConversationMembership
-	if err := s.db.WithContext(ctx).
+	if err := s.dbFor(ctx).
 		Where("conversation_group_id IN ?", groupIDs).
 		Order("created_at ASC, user_id ASC").
 		Find(&memberships).Error; err != nil {
@@ -3242,7 +3287,7 @@ func (s *PostgresStore) LoadDeletedConversationGroups(ctx context.Context, group
 
 func (s *PostgresStore) HardDeleteConversationGroups(ctx context.Context, groupIDs []uuid.UUID) error {
 	// ON DELETE CASCADE handles entries and conversations
-	return s.db.WithContext(ctx).Where("id IN ?", groupIDs).Delete(&model.ConversationGroup{}).Error
+	return s.dbFor(ctx).Where("id IN ?", groupIDs).Delete(&model.ConversationGroup{}).Error
 }
 
 func (s *PostgresStore) CreateTask(ctx context.Context, taskType string, taskBody map[string]interface{}) error {
@@ -3262,16 +3307,12 @@ func (s *PostgresStore) CreateTask(ctx context.Context, taskType string, taskBod
 		TaskType: taskType,
 		TaskBody: taskBody,
 	}
-	err := s.db.WithContext(ctx).Create(&task).Error
-	if err == nil {
-		return nil
+	db := s.dbFor(ctx)
+	if taskName != nil {
+		// Avoid aborting the surrounding transaction on an idempotent retry.
+		db = db.Clauses(clause.OnConflict{DoNothing: true})
 	}
-	var pgErr *pgconn.PgError
-	if taskName != nil && errors.As(err, &pgErr) && pgErr.Code == "23505" {
-		// Singleton task already exists; idempotent no-op.
-		return nil
-	}
-	return err
+	return db.Create(&task).Error
 }
 
 func (s *PostgresStore) ClaimReadyTasks(ctx context.Context, limit int) ([]model.Task, error) {
