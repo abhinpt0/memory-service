@@ -35,6 +35,11 @@ func TestSiteDocs(t *testing.T) {
 	globalScenarioUUIDRegistry.Reset()
 	globalCheckpointPathRegistry.Reset()
 	t.Cleanup(func() {
+		// Cancel the wave coordinator first so any goroutines waiting in
+		// Enter or WaitForCurlPhase unblock immediately. This prevents a
+		// deadlock when the test suite exits early (timeout, -run filter,
+		// or scenario failure that skips ctx.After cleanup).
+		globalScenarioWaveCoordinator.Cancel()
 		killAllActiveCheckpoints("suite cleanup")
 	})
 
