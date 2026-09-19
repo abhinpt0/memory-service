@@ -30,6 +30,7 @@ func TestFeaturesSQLiteOutbox(t *testing.T) {
 	cfg.Listener.EnableTLS = false
 
 	featureFiles := []string{
+		filepath.Join("testdata", "features", "eviction-events-rest.feature"),
 		filepath.Join("testdata", "features", "sse-events-rest.feature"),
 		filepath.Join("testdata", "features", "sse-events-replay-rest.feature"),
 	}

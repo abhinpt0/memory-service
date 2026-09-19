@@ -67,4 +67,5 @@ func TestFeaturesPgOutbox(t *testing.T) {
 		"mockPrometheus": prom,
 		"grpcAddr":       grpcAddr,
 	})
+	runBDDFeaturesWithConcurrency(t, "pg-outbox-eviction", []string{filepath.Join("testdata", "features", "eviction-events-rest.feature")}, apiURL, grpcAddr, &cfg, &PostgresTestDB{DBURL: dbURL}, nil, 1)
 }

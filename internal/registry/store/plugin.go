@@ -436,6 +436,9 @@ type MemoryStore interface {
 	// Eviction
 	FindEvictableGroupIDs(ctx context.Context, cutoff time.Time, limit int) ([]uuid.UUID, error)
 	CountEvictableGroups(ctx context.Context, cutoff time.Time) (int64, error)
+	// LoadDeletedConversationGroups requires a write scope and expands started-child
+	// descendants to whole fork groups, capturing their conversations and recipients.
+	// Delete exactly the returned groups in the same scope.
 	LoadDeletedConversationGroups(ctx context.Context, groupIDs []uuid.UUID) ([]DeletedConversationGroup, error)
 	HardDeleteConversationGroups(ctx context.Context, groupIDs []uuid.UUID) error
 
