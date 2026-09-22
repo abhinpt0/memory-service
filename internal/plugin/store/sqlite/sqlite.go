@@ -1959,21 +1959,27 @@ func (s *SQLiteStore) appendEntries(ctx context.Context, userID string, conversa
 		if err != nil {
 			// Concurrent writers can race to auto-create the same root conversation.
 			// If another request won the insert, load the conversation and continue.
-			sqliteErr, ok := sqliteUniqueViolation(err)
-			if !ok {
+			// createConversationWithID now handles the raw PK violation internally and
+			// returns ConversationIDConflictError when fields differ. In the auto-create
+			// path that simply means the conversation already exists — load it and go on.
+			sqliteErr, isSQLiteViolation := sqliteUniqueViolation(err)
+			var convIDConflict *registrystore.ConversationIDConflictError
+			if !isSQLiteViolation && !errors.As(err, &convIDConflict) {
 				return nil, err
 			}
-			log.Warn("append auto-create race detected",
-				"userID", userID,
-				"conversationID", string(conversationID),
-				"sqliteCode", sqliteErr.Code,
-				"sqliteExtendedCode", sqliteErr.ExtendedCode,
-				"detail", sqliteErr.Error(),
-				"forkedAtConversationID", conversationIDPtrString(forkedAtConvID),
-				"forkedAtEntryID", uuidPtrString(forkedAtEntryID),
-				"startedByConversationID", conversationIDPtrString(startedByConversationID),
-				"startedByEntryID", uuidPtrString(startedByEntryID),
-			)
+			if isSQLiteViolation {
+				log.Warn("append auto-create race detected",
+					"userID", userID,
+					"conversationID", string(conversationID),
+					"sqliteCode", sqliteErr.Code,
+					"sqliteExtendedCode", sqliteErr.ExtendedCode,
+					"detail", sqliteErr.Error(),
+					"forkedAtConversationID", conversationIDPtrString(forkedAtConvID),
+					"forkedAtEntryID", uuidPtrString(forkedAtEntryID),
+					"startedByConversationID", conversationIDPtrString(startedByConversationID),
+					"startedByEntryID", uuidPtrString(startedByEntryID),
+				)
+			}
 			loaded := false
 			for attempt := 0; attempt < 10; attempt++ {
 				convResult = db.

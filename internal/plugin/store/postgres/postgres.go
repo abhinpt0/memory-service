@@ -1876,19 +1876,25 @@ func (s *PostgresStore) appendEntries(ctx context.Context, userID string, conver
 		if err != nil {
 			// Concurrent writers can race to auto-create the same root conversation.
 			// If another request won the insert, load the conversation and continue.
-			pgErr, ok := pgUniqueViolation(err)
-			if !ok {
+			// createConversationWithID now handles the raw PK violation internally and
+			// returns ConversationIDConflictError when fields differ. In the auto-create
+			// path that simply means the conversation already exists — load it and go on.
+			pgErr, isPgViolation := pgUniqueViolation(err)
+			var convIDConflict *registrystore.ConversationIDConflictError
+			if !isPgViolation && !errors.As(err, &convIDConflict) {
 				return nil, err
 			}
-			log.Warn("append auto-create race detected",
-				"userID", userID,
-				"conversationID", string(conversationID),
-				"constraint", pgErr.ConstraintName,
-				"table", pgErr.TableName,
-				"detail", pgErr.Detail,
-				"forkedAtConversationID", conversationIDPtrString(forkedAtConvID),
-				"forkedAtEntryID", uuidPtrString(forkedAtEntryID),
-			)
+			if isPgViolation {
+				log.Warn("append auto-create race detected",
+					"userID", userID,
+					"conversationID", string(conversationID),
+					"constraint", pgErr.ConstraintName,
+					"table", pgErr.TableName,
+					"detail", pgErr.Detail,
+					"forkedAtConversationID", conversationIDPtrString(forkedAtConvID),
+					"forkedAtEntryID", uuidPtrString(forkedAtEntryID),
+				)
+			}
 			loaded := false
 			for attempt := 0; attempt < 10; attempt++ {
 				convResult = db.

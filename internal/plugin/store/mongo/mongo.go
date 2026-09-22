@@ -2703,12 +2703,27 @@ func (s *MongoStore) appendEntries(ctx context.Context, userID string, conversat
 		}
 		detail, createErr := s.createConversation(ctx, userID, resolvedClientID, agentID, conversationID, "", nil, forkedAtConvID, forkedAtEntryID, startedByConversationID, startedByEntryID)
 		if createErr != nil {
-			return nil, createErr
-		}
-		conv = convDoc{
-			ID:                  string(detail.Conversation.ID),
-			ConversationGroupID: uuidToStr(detail.Conversation.ConversationGroupID),
-			OwnerUserID:         detail.Conversation.OwnerUserID,
+			// createConversation handles the raw PK violation internally and returns
+			// ConversationIDConflictError when fields differ. In the auto-create path
+			// that means the conversation already exists — load it and continue.
+			var convIDConflict *registrystore.ConversationIDConflictError
+			if !errors.As(createErr, &convIDConflict) {
+				return nil, createErr
+			}
+			// Load the existing conversation by ID and continue with the append.
+			var existingDoc convDoc
+			if findErr := s.conversations().FindOne(ctx,
+				bson.M{"_id": string(conversationID)},
+			).Decode(&existingDoc); findErr != nil {
+				return nil, createErr
+			}
+			conv = existingDoc
+		} else {
+			conv = convDoc{
+				ID:                  string(detail.Conversation.ID),
+				ConversationGroupID: uuidToStr(detail.Conversation.ConversationGroupID),
+				OwnerUserID:         detail.Conversation.OwnerUserID,
+			}
 		}
 	}
 	// Block appending to archived conversations. Use explicit unarchive via conversationPatch.archived=false first.
