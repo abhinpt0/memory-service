@@ -201,9 +201,11 @@ class ConversationsServiceServicer(object):
         this operation is idempotent. If the exact same conversation already exists
         (same ID, title, metadata, and ownership), the operation returns the existing
         conversation without error. If a conversation with the same ID exists but has
-        different properties, the operation returns ALREADY_EXISTS status with error
-        code 'conversation_already_exists'. If the conversation exists but is archived
-        or belongs to a different user, the operation returns NOT_FOUND status.
+        different properties, the operation returns ABORTED status with error
+        code 'conversation_already_exists' (indicating the retry was aborted due to
+        conflicting parameters, not that resource creation itself failed). If the
+        conversation exists but is archived or belongs to a different user, the
+        operation returns NOT_FOUND status.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')

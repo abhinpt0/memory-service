@@ -6859,6 +6859,10 @@ type CreateConversationResp struct {
 	JSON200 *Conversation
 	// JSON201 the response for an HTTP 201 `application/json` response
 	JSON201 *Conversation
+	// JSON404 the response for an HTTP 404 `application/json` response
+	JSON404 *ErrorResponse
+	// JSON409 the response for an HTTP 409 `application/json` response
+	JSON409 *ErrorResponse
 	// JSONDefault the response for an HTTP default `application/json` response
 	JSONDefault *Error
 }
@@ -6871,6 +6875,16 @@ func (r CreateConversationResp) GetJSON200() *Conversation {
 // GetJSON201 returns the response for an HTTP 201 `application/json` response
 func (r CreateConversationResp) GetJSON201() *Conversation {
 	return r.JSON201
+}
+
+// GetJSON404 returns the response for an HTTP 404 `application/json` response
+func (r CreateConversationResp) GetJSON404() *ErrorResponse {
+	return r.JSON404
+}
+
+// GetJSON409 returns the response for an HTTP 409 `application/json` response
+func (r CreateConversationResp) GetJSON409() *ErrorResponse {
+	return r.JSON409
 }
 
 // GetJSONDefault returns the response for an HTTP default `application/json` response
@@ -9709,11 +9723,19 @@ func ParseCreateConversationResp(rsp *http.Response) (*CreateConversationResp, e
 		}
 		response.JSON201 = &dest
 
-	case rsp.StatusCode == 404:
-		break // No content-type
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON404 = &dest
 
-	case rsp.StatusCode == 409:
-		break // No content-type
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON409 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest Error

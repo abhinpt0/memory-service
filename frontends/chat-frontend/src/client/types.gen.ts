@@ -1005,13 +1005,13 @@ export type CreateConversationErrors = {
    * A conversation with the provided ID exists but is archived or belongs
    * to a different user.
    */
-  404: unknown;
+  404: ErrorResponse;
   /**
    * A conversation with the provided ID already exists but has different
    * properties (title, metadata, or ownership). Error code will be
    * `conversation_already_exists`.
    */
-  409: unknown;
+  409: ErrorResponse;
   /**
    * Error response
    */
