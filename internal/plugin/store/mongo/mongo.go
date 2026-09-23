@@ -1115,6 +1115,50 @@ func (s *MongoStore) createConversation(ctx context.Context, userID string, clie
 		return nil, err
 	}
 	if existingDetail != nil {
+		// Ancestry exists - load and validate the existing conversation before declaring exact retry
+		var existing convDoc
+		findErr := s.conversations().FindOne(ctx, bson.M{"_id": string(convID)}).Decode(&existing)
+		if findErr != nil {
+			// Clean up provisional ancestry claim
+			_, _ = s.conversationAncestry().DeleteOne(ctx, bson.M{"_id": string(convID)})
+			return nil, fmt.Errorf("ancestry exists but conversation not found: %s", convID)
+		}
+
+		// 1. Archived conversation - treat as unavailable
+		if existing.ArchivedAt != nil {
+			_, _ = s.conversationAncestry().DeleteOne(ctx, bson.M{"_id": string(convID)})
+			return nil, &registrystore.NotFoundError{Resource: "conversation", ID: convID}
+		}
+
+		// 2. User isolation - another user owns this ID
+		if existing.OwnerUserID != userID {
+			_, _ = s.conversationAncestry().DeleteOne(ctx, bson.M{"_id": string(convID)})
+			return nil, &registrystore.NotFoundError{Resource: "conversation", ID: convID}
+		}
+
+		// Decrypt title for comparison
+		decryptedTitle, err := s.decryptConversationTitle(existing.ID, existing.Title)
+		if err != nil {
+			_, _ = s.conversationAncestry().DeleteOne(ctx, bson.M{"_id": string(convID)})
+			return nil, fmt.Errorf("failed to decrypt conversation title: %w", err)
+		}
+
+		// Hydrate fork lineage before comparison (fork fields are populated from ancestry collection)
+		if err := s.hydrateConversationLineage(ctx, &existing); err != nil {
+			_, _ = s.conversationAncestry().DeleteOne(ctx, bson.M{"_id": string(convID)})
+			return nil, err
+		}
+
+		// 3. Compare complete creation request
+		existingModel := existing.toModel()
+		if !registrystore.ConversationsMatch(&existingModel, userID, clientID, title, decryptedTitle, metadata, agentID,
+			forkedAtConversationID, forkedAtEntryID, startedByConversationID, startedByEntryID) {
+			// Conflicting retry - clean up provisional ancestry
+			_, _ = s.conversationAncestry().DeleteOne(ctx, bson.M{"_id": string(convID)})
+			return nil, registrystore.NewConversationIDConflictError(convID)
+		}
+
+		// Exact retry - return validated existing conversation
 		return &registrystore.CreateConversationResult{
 			Conversation: existingDetail,
 			ExactRetry:   true,

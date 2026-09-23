@@ -236,11 +236,25 @@ paths:
           description: |-
             A conversation with the provided ID exists but is archived or belongs
             to a different user.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '409':
           description: |-
             A conversation with the provided ID already exists but has different
             properties (title, metadata, or ownership). Error code will be
             `conversation_already_exists`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: "conversation_already_exists"
+                error: "conversation with id 550e8400-e29b-41d4-a716-446655440000 exists but the request differs"
+                requestId: "req_abc123"
+                details:
+                  conversationId: "550e8400-e29b-41d4-a716-446655440000"
         default:
           $ref: '#/components/responses/Error'
       security:

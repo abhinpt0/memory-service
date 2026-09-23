@@ -628,6 +628,11 @@ func (s *SQLiteStore) createConversationWithID(ctx context.Context, userID strin
 				return nil, fmt.Errorf("failed to decrypt conversation title: %w", err)
 			}
 
+			// Hydrate fork lineage before comparison (fork fields are populated from ancestry table)
+			if err := s.hydrateConversationFork(ctx, &existing); err != nil {
+				return nil, err
+			}
+
 			// 3. Compare complete creation request
 			if !registrystore.ConversationsMatch(&existing, userID, clientID, title, decryptedTitle, metadata, agentID,
 				forkedAtConversationID, forkedAtEntryID, startedByConversationID, startedByEntryID) {
@@ -635,10 +640,7 @@ func (s *SQLiteStore) createConversationWithID(ctx context.Context, userID strin
 				return nil, registrystore.NewConversationIDConflictError(convID)
 			}
 
-			// Exact retry - hydrate and return existing conversation
-			if err := s.hydrateConversationFork(ctx, &existing); err != nil {
-				return nil, err
-			}
+			// Exact retry - return existing conversation
 
 			return &registrystore.CreateConversationResult{
 				Conversation: &registrystore.ConversationDetail{

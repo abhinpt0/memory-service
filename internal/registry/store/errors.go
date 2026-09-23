@@ -59,6 +59,10 @@ type ConversationIDConflictError struct {
 	ConversationID string
 }
 
+func (e *ConversationIDConflictError) Unwrap() error {
+	return e.ConflictError
+}
+
 func NewConversationIDConflictError(conversationID string) error {
 	return &ConversationIDConflictError{
 		ConflictError: &ConflictError{
