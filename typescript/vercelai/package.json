@@ -39,7 +39,7 @@
   "devDependencies": {
     "@types/node": "^22.13.0",
     "ai": "5.0.255",
-    "prettier": "3.9.6",
+    "prettier": "3.9.8",
     "typescript": "^5.8.2"
   }
 }
