@@ -79,6 +79,10 @@ func OpenSink(ctx context.Context, cfg Config) (*ClickHouseSink, error) {
 		_ = conn.Close()
 		return nil, err
 	}
+	if err := sink.configureInsertDeduplication(ctx, cfg.SchemaMode); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
 	if err := sink.configureRetention(ctx, cfg.SchemaMode); err != nil {
 		_ = sink.Close()
 		return nil, err
@@ -581,7 +585,7 @@ func resourceTableForKind(kind string) string {
 }
 
 func insertContext(ctx context.Context, token string) context.Context {
-	return ch.Context(ctx, ch.WithSettings(ch.Settings{"async_insert": 0, "insert_deduplication_token": token}))
+	return ch.Context(ctx, ch.WithSettings(ch.Settings{"async_insert": 0, "insert_deduplicate": 1, "insert_deduplication_token": token}))
 }
 
 func boolByte(value bool) uint8 {

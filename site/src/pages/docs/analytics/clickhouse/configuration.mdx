@@ -103,6 +103,19 @@ Tail-only mode deliberately omits retained history and current-state backfill. U
 | <Cfg p="--allow-insecure-clickhouse" e="MEMORY_SERVICE_CLICKHOUSE_ALLOW_INSECURE" /> | `false`          | Permit a non-loopback plaintext connection for development.                              |
 | <Cfg p="--schema-mode" e="MEMORY_SERVICE_CLICKHOUSE_SCHEMA_MODE" />                  | `manage`         | `manage` creates expected objects. `validate` rejects schema drift without applying DDL. |
 
+Schema `manage` mode enables a 1,000-block insert deduplication window on exporter output
+and registered projection tables where deduplication is disabled. It preserves existing
+positive windows and stored data. `validate` mode rejects a zero window without applying DDL.
+Both modes need permission to read the server's default MergeTree settings. For the bundled
+analytics user, run this grant when upgrading an existing deployment:
+
+```sql
+GRANT SELECT ON system.merge_tree_settings TO memory_service_analytics;
+```
+
+Insert tokens protect retries within one processor run. After a restart, new batches have
+new tokens; use canonical views to deduplicate replayed events.
+
 Native TCP commonly uses port `9000` or TLS port `9440`. HTTP commonly uses port `8123` or HTTPS port `8443`. The repository's Docker Compose stack maps the ClickHouse native port to `localhost:9002` because MinIO uses host port `9000`. Containers in that stack continue to use `clickhouse:9000`.
 
 Configure either the direct password or the password file. The processor rejects configurations that set both.

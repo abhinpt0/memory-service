@@ -367,9 +367,15 @@ schema version.
 
 The processor must send the same rows in the same order when retrying a frozen batch in
 the same process run.
-Self-managed non-replicated deployments must configure a positive
-`non_replicated_deduplication_window`. The schema readiness check rejects a zero window
-unless the operator explicitly accepts weaker retry behavior.
+Schema `manage` mode sets `non_replicated_deduplication_window=1000` on exporter
+output tables and registered projection tables where the effective window is zero.
+Existing positive settings are preserved. This applies to existing tables without
+resetting their data or changing the schema checksum. Schema `validate` mode rejects
+a zero window without executing DDL. Token-bearing inserts set `insert_deduplicate=1`.
+The ingestion role needs `SELECT ON system.merge_tree_settings` to read the effective
+server default. Both bundled initialization scripts grant it; existing deployments must
+apply that grant during upgrade. These tokens protect retries within one process run; after a restart, batches get new
+IDs and canonical views still provide logical deduplication.
 
 Generic current-state tables use `ReplacingMergeTree(ingest_version)` and stable sorting
 keys. A canonical view selects the latest row by `(ingest_version, event_id)`, so

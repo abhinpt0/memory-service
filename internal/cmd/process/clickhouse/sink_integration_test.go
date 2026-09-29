@@ -916,3 +916,64 @@ func TestClickHouseHTTPSinkIntegration(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, sink.Close())
 }
+
+func TestClickHouseInsertDeduplicationReadiness(t *testing.T) {
+	if os.Getenv("MEMORY_SERVICE_TEST_CLICKHOUSE") != "true" {
+		t.Skip("set MEMORY_SERVICE_TEST_CLICKHOUSE=true")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	dir, manifest, projection := writeIntegrationProjection(t, ctx, "dedup_v1", "dedup/v1")
+	database, admin := createIntegrationDatabase(t, ctx)
+	cfg := integrationDatabaseConfig(database, "dedup", dir, manifest)
+	sink, err := OpenSink(ctx, cfg)
+	require.NoError(t, err)
+	now := time.Now().UTC()
+	seedID := strings.Repeat("s", 64)
+	seed := ResourceRow{Common: Common{ExporterID: cfg.ExporterID, BatchID: seedID, EventID: seedID, IngestVersion: 1, ObservedAt: now, SchemaVersion: schemaVersion}, ResourceID: "preexisting", ResourceType: "entry", CreatedAt: now, UpdatedAt: now, PayloadJSON: `{}`}
+	require.NoError(t, sink.writeResourceTable(ctx, Batch{ID: seedID}, "resources", []ResourceRow{seed}))
+	require.NoError(t, sink.Close())
+
+	// Simulate an existing deployment with deduplication disabled on one table.
+	for _, table := range []string{"resources", projection.TableName} {
+		t.Run(table, func(t *testing.T) {
+			qualified := quoteIdentifier(database) + "." + quoteIdentifier(table)
+			require.NoError(t, admin.Exec(ctx, "ALTER TABLE "+qualified+" MODIFY SETTING non_replicated_deduplication_window=0"))
+			before := readIntegrationSchemaDDL(t, ctx, admin, database)
+			validate := cfg
+			validate.SchemaMode = "validate"
+			_, err := OpenSink(ctx, validate)
+			require.ErrorContains(t, err, "disabled insert deduplication")
+			require.Equal(t, before, readIntegrationSchemaDDL(t, ctx, admin, database))
+			sink, err := OpenSink(ctx, cfg)
+			require.NoError(t, err)
+			require.NoError(t, sink.Close())
+			require.Contains(t, readIntegrationSchemaDDL(t, ctx, admin, database)[table], "non_replicated_deduplication_window = 1000")
+		})
+	}
+	// Preserve operator tuning, and validate historical projections without loading their manifest.
+	require.NoError(t, admin.Exec(ctx, "ALTER TABLE "+quoteIdentifier(database)+".resources MODIFY SETTING non_replicated_deduplication_window=23"))
+	sink, err = OpenSink(ctx, cfg)
+	require.NoError(t, err)
+	defer sink.Close()
+	require.Contains(t, readIntegrationSchemaDDL(t, ctx, admin, database)["resources"], "non_replicated_deduplication_window = 23")
+
+	batch := Batch{ID: strings.Repeat("d", 64)}
+	row := ResourceRow{Common: Common{ExporterID: cfg.ExporterID, BatchID: batch.ID, EventID: batch.ID, IngestVersion: 1, ObservedAt: now, SchemaVersion: schemaVersion}, ResourceID: "retained", ResourceType: "entry", CreatedAt: now, UpdatedAt: now, PayloadJSON: `{}`}
+	require.NoError(t, admin.Exec(ctx, "SYSTEM STOP MERGES "+quoteIdentifier(database)+".resources"))
+	for range 2 {
+		require.NoError(t, sink.writeResourceTable(ctx, batch, "resources", []ResourceRow{row}))
+	}
+	var count uint64
+	require.NoError(t, admin.QueryRow(ctx, "SELECT count() FROM "+quoteIdentifier(database)+".resources WHERE resource_id='retained'").Scan(&count))
+	require.Equal(t, uint64(1), count, "retries must deduplicate before background merges")
+	require.NoError(t, admin.Exec(ctx, "SYSTEM START MERGES "+quoteIdentifier(database)+".resources"))
+
+	sink.projections = nil
+	require.NoError(t, admin.Exec(ctx, "ALTER TABLE "+quoteIdentifier(database)+"."+quoteIdentifier(projection.TableName)+" MODIFY SETTING non_replicated_deduplication_window=0"))
+	require.ErrorContains(t, sink.configureInsertDeduplication(ctx, "validate"), "disabled insert deduplication")
+	require.NoError(t, sink.configureInsertDeduplication(ctx, "manage"))
+	require.NoError(t, admin.QueryRow(ctx, "SELECT count() FROM "+quoteIdentifier(database)+".resources").Scan(&count))
+	require.Equal(t, uint64(2), count, "settings upgrades preserve stored data")
+}
+
