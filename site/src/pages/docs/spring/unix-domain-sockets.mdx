@@ -64,7 +64,7 @@ And the response should contain "data:"
 
 ```bash
 curl -NsSfX POST http://localhost:9090/chat/0b8c8c2f-4304-45f7-9cb8-e1ff666a1c8c \
-  --max-time 0.2 \
+  --max-time 1 \
   -H "Content-Type: text/plain" \
   -H "Authorization: Bearer $(get-token)" \
   -d "Write a short story about a cat."
