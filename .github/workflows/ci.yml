@@ -181,6 +181,7 @@ jobs:
           export GODOG_REPORT_DIR=./reports
           export GODOG_REPORT_FORMAT=cucumber
           export SITE_TEST_SCENARIO_CONCURRENCY=2
+          export SITE_TEST_BUILD_OUTPUT=stream
           go run github.com/go-task/task/v3/cmd/task test:site
 
       - name: Upload test reports
