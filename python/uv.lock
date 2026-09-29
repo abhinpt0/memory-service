@@ -2,6 +2,9 @@ version = 1
 revision = 3
 requires-python = ">=3.10"
 
+[options]
+exclude-newer = "2026-09-22T00:00:00Z"
+
 [manifest]
 members = [
     "chat-langchain",

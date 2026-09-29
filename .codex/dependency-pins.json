@@ -1,6 +1,17 @@
 {
   "pins": [
     {
+      "ecosystem": "python",
+      "name": "uv exclude-newer",
+      "pinnedVersion": "2026-09-22T00:00:00Z",
+      "location": "python/uv.lock and python/examples/**/doc-checkpoints/**/uv.lock",
+      "class": "temporary cooldown",
+      "reason": "Keep the Python example lock refresh on packages published at least seven full days before 2026-09-29.",
+      "introducedBy": "dependency-update",
+      "introducedAt": "2026-09-29",
+      "reviewAfter": "next dependency update"
+    },
+    {
       "ecosystem": "maven",
       "name": "maven-compiler-plugin",
       "pinnedVersion": "3.14.1",

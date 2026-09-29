@@ -465,7 +465,8 @@ func (s *SiteScenario) buildCheckpoint(extraArgs ...string) error {
 		// Always reinstall local packages so any wheel rebuild is picked up.
 		args := []string{"sync", "--reinstall-package", "memory-service-langchain"}
 		if fileExists(filepath.Join(s.CheckpointPath, "uv.lock")) {
-			args = append(args, "--locked")
+			// Keep site runs on the versions checked in for the checkpoint.
+			args = append(args, "--frozen")
 		}
 		cmd = exec.Command("uv", args...)
 		cmd.Dir = s.CheckpointPath
