@@ -178,6 +178,7 @@ func (s *ClickHouseSink) WriteBatch(ctx context.Context, batch Batch) error {
 		if err != nil {
 			return fmt.Errorf("prepare lifecycle batch: %w", err)
 		}
+		defer insert.Close()
 		for _, row := range batch.Lifecycle {
 			c := row.Common
 			if err := insert.Append(c.ExporterID, c.BatchID, c.EventID, c.SourceCursor, c.IngestVersion, c.ObservedAt, c.SchemaVersion, row.OccurredAt, row.ResourceKind, row.AnalyticsResourceID, row.Action, row.Change, row.ConversationID, row.ConversationGroupID, row.ContentType, row.MemoryKind, boolByte(row.SnapshotAvailable), row.SummaryJSON); err != nil {
@@ -220,6 +221,7 @@ func (s *ClickHouseSink) WriteBatch(ctx context.Context, batch Batch) error {
 		if err != nil {
 			return fmt.Errorf("prepare purge batch: %w", err)
 		}
+		defer insert.Close()
 		for _, row := range batch.Purges {
 			if err := insert.Append(row.ExporterID, row.BatchID, row.PurgeID, row.EventID, row.ResourceKind, row.AnalyticsResourceID, row.RequestedAt, nil, "pending", "", uint64(1)); err != nil {
 				return err
@@ -237,6 +239,7 @@ func (s *ClickHouseSink) WriteBatch(ctx context.Context, batch Batch) error {
 		if err != nil {
 			return fmt.Errorf("prepare projection failure batch: %w", err)
 		}
+		defer insert.Close()
 		for _, row := range batch.ProjectionFailures {
 			if err := insert.Append(row.ExporterID, row.BatchID, row.EventID, row.AnalyticsResourceID, row.ConversationID, row.ConversationGroupID, row.ProjectionName, row.ErrorCode, row.AttemptCount, row.FirstSeenAt, row.LastSeenAt, row.Version); err != nil {
 				return err
@@ -260,6 +263,7 @@ func (s *ClickHouseSink) writeResourceTable(ctx context.Context, batch Batch, ta
 	if err != nil {
 		return fmt.Errorf("prepare %s batch: %w", table, err)
 	}
+	defer insert.Close()
 	for _, row := range rows {
 		c := row.Common
 		if err := insert.Append(c.ExporterID, c.BatchID, c.EventID, c.SourceCursor, c.IngestVersion, c.ObservedAt, c.SchemaVersion, row.ResourceID, row.ConversationID, row.ConversationGroupID, row.ResourceType, row.CreatedAt, row.UpdatedAt, boolByte(row.IsArchived), boolByte(row.IsDeleted), row.PayloadJSON); err != nil {
@@ -280,6 +284,7 @@ func (s *ClickHouseSink) writeDeletionFences(ctx context.Context, batch Batch) e
 	if err != nil {
 		return fmt.Errorf("prepare deletion fence batch: %w", err)
 	}
+	defer insert.Close()
 	for _, row := range batch.Resources {
 		if !row.IsDeleted {
 			continue
@@ -549,6 +554,7 @@ func (s *ClickHouseSink) writeProjectionRows(ctx context.Context, batch Batch) e
 		if err != nil {
 			return fmt.Errorf("prepare projection %s batch: %w", table, err)
 		}
+		defer insert.Close()
 		for _, row := range rows {
 			if row.Multi != multi {
 				return fmt.Errorf("projection %s mixes single-row and multi-row writes", table)
