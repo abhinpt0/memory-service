@@ -551,30 +551,85 @@ func (s *SQLiteStore) createConversationWithID(ctx context.Context, userID strin
 		}
 		actualGroupID = groupID
 		ownerUserID = parentConv.OwnerUserID
-		group := model.ConversationGroup{ID: actualGroupID, CreatedAt: now}
-		if err := db.Create(&group).Error; err != nil {
-			logDuplicateKey("createConversationWithID:createStartedGroup", err,
-				"userID", userID,
-				"conversationID", string(convID),
-				"conversationGroupID", actualGroupID.String(),
-				"startedByConversationID", conversationIDPtrString(startedByConversationID),
-				"startedByEntryID", uuidPtrString(startedByEntryID),
-			)
-			return nil, fmt.Errorf("failed to create conversation group: %w", err)
-		}
 		if err := db.Where("conversation_group_id = ?", parentConv.ConversationGroupID).Order("created_at ASC").Find(&membershipsToCopy).Error; err != nil {
 			return nil, fmt.Errorf("failed to load parent memberships: %w", err)
 		}
 	} else {
 		actualGroupID = groupID
+	}
+
+	// Check if conversation already exists before creating group (Issue #3 fix)
+	var existing model.Conversation
+	existingResult := db.Where("id = ?", convID).Limit(1).Find(&existing)
+	if existingResult.Error != nil {
+		return nil, fmt.Errorf("failed to check existing conversation: %w", existingResult.Error)
+	}
+
+	if existingResult.RowsAffected > 0 {
+		// Conversation exists - validate and return without creating orphan group
+
+		// 1. Archived conversation - treat as unavailable
+		if existing.ArchivedAt != nil {
+			return nil, &registrystore.NotFoundError{Resource: "conversation", ID: convID}
+		}
+
+		// 2. User isolation - another user owns this ID
+		if existing.OwnerUserID != userID {
+			return nil, &registrystore.NotFoundError{Resource: "conversation", ID: convID}
+		}
+
+		// Decrypt title for comparison
+		decryptedTitle, err := s.decryptConversationTitle(existing.ID, existing.Title)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decrypt conversation title: %w", err)
+		}
+
+		// Hydrate fork lineage before comparison
+		if err := s.hydrateConversationFork(ctx, &existing); err != nil {
+			return nil, err
+		}
+
+		// 3. Compare complete creation request
+		if !registrystore.ConversationsMatch(&existing, userID, clientID, title, decryptedTitle, metadata, agentID,
+			forkedAtConversationID, forkedAtEntryID, startedByConversationID, startedByEntryID) {
+			// Conflicting retry
+			return nil, registrystore.NewConversationIDConflictError(convID)
+		}
+
+		// Exact retry - return existing conversation
+		return &registrystore.CreateConversationResult{
+			Conversation: &registrystore.ConversationDetail{
+				ConversationSummary: registrystore.ConversationSummary{
+					ID:                      existing.ID,
+					Title:                   decryptedTitle,
+					OwnerUserID:             existing.OwnerUserID,
+					ClientID:                existing.ClientID,
+					AgentID:                 existing.AgentID,
+					Metadata:                existing.Metadata,
+					ConversationGroupID:     existing.ConversationGroupID,
+					ForkedAtConversationID:  existing.ForkedAtConversationID,
+					ForkedAtEntryID:         existing.ForkedAtEntryID,
+					StartedByConversationID: existing.StartedByConversationID,
+					StartedByEntryID:        existing.StartedByEntryID,
+					CreatedAt:               existing.CreatedAt,
+					UpdatedAt:               existing.UpdatedAt,
+					AccessLevel:             model.AccessLevelOwner,
+				},
+			},
+			ExactRetry: true,
+		}, nil
+	}
+
+	// Conversation doesn't exist - create group for root and started-by conversations
+	if forkedAtConversationID == nil {
 		group := model.ConversationGroup{ID: actualGroupID, CreatedAt: now}
 		if err := db.Create(&group).Error; err != nil {
 			logDuplicateKey("createConversationWithID:createGroup", err,
 				"userID", userID,
 				"conversationID", string(convID),
 				"conversationGroupID", actualGroupID.String(),
-				"forkedAtConversationID", conversationIDPtrString(forkedAtConversationID),
-				"forkedAtEntryID", uuidPtrString(forkedAtEntryID),
+				"startedByConversationID", conversationIDPtrString(startedByConversationID),
+				"startedByEntryID", uuidPtrString(startedByEntryID),
 			)
 			return nil, fmt.Errorf("failed to create conversation group: %w", err)
 		}
@@ -600,71 +655,10 @@ func (s *SQLiteStore) createConversationWithID(ctx context.Context, userID strin
 
 	createErr := db.Create(&conv).Error
 	if createErr != nil {
-		// Check if this is a duplicate key error
+		// This should not happen since we checked above, but handle it anyway
 		if _, ok := sqliteUniqueViolation(createErr); ok {
-			// Conflict detected - fetch existing record WITHOUT archive filter
-			var existing model.Conversation
-			result := db.Where("id = ?", convID).Limit(1).Find(&existing)
-			if result.Error != nil {
-				return nil, fmt.Errorf("failed to load existing conversation: %w", result.Error)
-			}
-			if result.RowsAffected == 0 {
-				return nil, fmt.Errorf("conflict on insert but existing record not found: %s", convID)
-			}
-
-			// 1. Archived conversation - treat as unavailable
-			if existing.ArchivedAt != nil {
-				return nil, &registrystore.NotFoundError{Resource: "conversation", ID: convID}
-			}
-
-			// 2. User isolation - another user owns this ID
-			if existing.OwnerUserID != userID {
-				return nil, &registrystore.NotFoundError{Resource: "conversation", ID: convID}
-			}
-
-			// Decrypt title for comparison
-			decryptedTitle, err := s.decryptConversationTitle(existing.ID, existing.Title)
-			if err != nil {
-				return nil, fmt.Errorf("failed to decrypt conversation title: %w", err)
-			}
-
-			// Hydrate fork lineage before comparison (fork fields are populated from ancestry table)
-			if err := s.hydrateConversationFork(ctx, &existing); err != nil {
-				return nil, err
-			}
-
-			// 3. Compare complete creation request
-			if !registrystore.ConversationsMatch(&existing, userID, clientID, title, decryptedTitle, metadata, agentID,
-				forkedAtConversationID, forkedAtEntryID, startedByConversationID, startedByEntryID) {
-				// Conflicting retry
-				return nil, registrystore.NewConversationIDConflictError(convID)
-			}
-
-			// Exact retry - return existing conversation
-
-			return &registrystore.CreateConversationResult{
-				Conversation: &registrystore.ConversationDetail{
-					ConversationSummary: registrystore.ConversationSummary{
-						ID:                      existing.ID,
-						Title:                   decryptedTitle,
-						OwnerUserID:             existing.OwnerUserID,
-						ClientID:                existing.ClientID,
-						AgentID:                 existing.AgentID,
-						Metadata:                existing.Metadata,
-						ConversationGroupID:     existing.ConversationGroupID,
-						ForkedAtConversationID:  existing.ForkedAtConversationID,
-						ForkedAtEntryID:         existing.ForkedAtEntryID,
-						StartedByConversationID: existing.StartedByConversationID,
-						StartedByEntryID:        existing.StartedByEntryID,
-						CreatedAt:               existing.CreatedAt,
-						UpdatedAt:               existing.UpdatedAt,
-						AccessLevel:             model.AccessLevelOwner,
-					},
-				},
-				ExactRetry: true,
-			}, nil
+			return nil, fmt.Errorf("conversation insert returned duplicate key after existence check passed")
 		}
-
 		logDuplicateKey("createConversationWithID:createConversation", createErr,
 			"userID", userID,
 			"conversationID", string(convID),

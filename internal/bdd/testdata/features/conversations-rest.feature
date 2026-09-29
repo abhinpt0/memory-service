@@ -734,3 +734,20 @@ Feature: Conversations REST API
     When I call GET "/v1/conversations/concurrent-001"
     Then the response status should be 200
     And the response body "id" should be "concurrent-001"
+
+
+  Scenario: Create conversation with explicit ID - true concurrent retries (race condition test)
+    # This tests database-level race safety: N goroutines firing simultaneously
+    # should result in no duplicate rows, no 5xx errors, and consistent responses
+    When I call POST "/v1/conversations" concurrently 5 times with body:
+    """
+    {
+      "id": "race-test-001",
+      "title": "Race Condition Test"
+    }
+    """
+    Then at most one response should have status 201 and the rest should have status 200
+    # Verify only one conversation exists
+    When I call GET "/v1/conversations/race-test-001"
+    Then the response status should be 200
+    And the response body "id" should be "race-test-001"
