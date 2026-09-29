@@ -504,8 +504,67 @@ func (s *PostgresStore) createConversationWithID(ctx context.Context, userID str
 		return nil, fmt.Errorf("failed to create conversation: %w", createResult.Error)
 	}
 	if createResult.RowsAffected == 0 {
-		// This should not happen since we checked above, but handle it anyway
-		return nil, fmt.Errorf("conversation insert returned 0 rows after existence check passed")
+		// Concurrent race: another request created the conversation between our existence check and insert
+		// Re-fetch and validate as exact retry
+		var existing model.Conversation
+		existingResult := db.Where("id = ?", convID).Limit(1).Find(&existing)
+		if existingResult.Error != nil {
+			return nil, fmt.Errorf("conversation insert conflict but record not found: %w", existingResult.Error)
+		}
+		if existingResult.RowsAffected == 0 {
+			return nil, fmt.Errorf("conversation insert returned 0 rows but record not found")
+		}
+
+		// 1. Archived conversation - treat as unavailable
+		if existing.ArchivedAt != nil {
+			return nil, &registrystore.NotFoundError{Resource: "conversation", ID: convID}
+		}
+
+		// 2. User isolation - another user owns this ID
+		if existing.OwnerUserID != userID {
+			return nil, &registrystore.NotFoundError{Resource: "conversation", ID: convID}
+		}
+
+		// Decrypt title for comparison
+		decryptedTitle, err := s.decryptConversationTitle(existing.ID, existing.Title)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decrypt conversation title: %w", err)
+		}
+
+		// Hydrate fork lineage before comparison
+		if err := s.hydrateConversationFork(ctx, &existing); err != nil {
+			return nil, err
+		}
+
+		// 3. Compare complete creation request
+		if !registrystore.ConversationsMatch(&existing, userID, clientID, title, decryptedTitle, metadata, agentID,
+			forkedAtConversationID, forkedAtEntryID, startedByConversationID, startedByEntryID) {
+			// Conflicting retry
+			return nil, registrystore.NewConversationIDConflictError(convID)
+		}
+
+		// Exact retry - return existing conversation
+		return &registrystore.CreateConversationResult{
+			Conversation: &registrystore.ConversationDetail{
+				ConversationSummary: registrystore.ConversationSummary{
+					ID:                      existing.ID,
+					Title:                   decryptedTitle,
+					OwnerUserID:             existing.OwnerUserID,
+					ClientID:                existing.ClientID,
+					AgentID:                 existing.AgentID,
+					Metadata:                existing.Metadata,
+					ConversationGroupID:     existing.ConversationGroupID,
+					ForkedAtConversationID:  existing.ForkedAtConversationID,
+					ForkedAtEntryID:         existing.ForkedAtEntryID,
+					StartedByConversationID: existing.StartedByConversationID,
+					StartedByEntryID:        existing.StartedByEntryID,
+					CreatedAt:               existing.CreatedAt,
+					UpdatedAt:               existing.UpdatedAt,
+					AccessLevel:             model.AccessLevelOwner,
+				},
+			},
+			ExactRetry: true,
+		}, nil
 	}
 
 	if err := s.createConversationAncestry(ctx, db, actualGroupID, convID, sourceConv, forkedAtEntryID, anchorOwnerDepth); err != nil {
