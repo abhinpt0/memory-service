@@ -977,3 +977,29 @@ func TestClickHouseInsertDeduplicationReadiness(t *testing.T) {
 	require.Equal(t, uint64(2), count, "settings upgrades preserve stored data")
 }
 
+func TestClickHousePurgeSubjectsBatched(t *testing.T) {
+	if os.Getenv("MEMORY_SERVICE_TEST_CLICKHOUSE") != "true" {
+		t.Skip("set MEMORY_SERVICE_TEST_CLICKHOUSE=true")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	database, admin := createIntegrationDatabase(t, ctx)
+	sink := &ClickHouseSink{conn: admin, database: database}
+	require.NoError(t, sink.EnsureSchema(ctx, "manage"))
+	require.NoError(t, admin.Exec(ctx, "SYSTEM STOP MERGES "+quoteIdentifier(database)+".purge_subjects"))
+	defer admin.Exec(context.Background(), "SYSTEM START MERGES "+quoteIdentifier(database)+".purge_subjects")
+	subjects := map[string][]string{"conversation": {"conversation-1"}}
+	for i := range 300 {
+		subjects["entry"] = append(subjects["entry"], fmt.Sprintf("entry-%d", i))
+	}
+	purge := PurgeRow{ExporterID: "purge-batch", PurgeID: strings.Repeat("p", 64)}
+	require.NoError(t, sink.persistPurgeSubjects(ctx, purge, subjects))
+	var rows, parts uint64
+	require.NoError(t, admin.QueryRow(ctx, "SELECT count(), uniqExact(_part) FROM "+quoteIdentifier(database)+".purge_subjects").Scan(&rows, &parts))
+	require.Equal(t, uint64(301), rows)
+	require.Equal(t, uint64(1), parts, "subjects should be sent in one insert, not one part per subject")
+	loaded := map[string][]string{}
+	require.NoError(t, sink.mergePersistedPurgeSubjects(ctx, purge, loaded))
+	require.ElementsMatch(t, subjects["entry"], loaded["entry"])
+	require.NoError(t, sink.persistPurgeSubjects(ctx, purge, nil))
+}

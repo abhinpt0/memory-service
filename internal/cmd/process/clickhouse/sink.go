@@ -424,14 +424,29 @@ func (s *ClickHouseSink) loadPurgeSubjects(ctx context.Context, purge PurgeRow) 
 }
 
 func (s *ClickHouseSink) persistPurgeSubjects(ctx context.Context, purge PurgeRow, subjects map[string][]string) error {
+	var kinds []string
 	for kind, ids := range subjects {
-		for _, id := range ids {
-			if err := s.conn.Exec(ctx, fmt.Sprintf("INSERT INTO %s.purge_subjects (exporter_id,purge_id,subject_kind,subject_id,version) VALUES (?,?,?,?,?)", quoteIdentifier(s.database)), purge.ExporterID, purge.PurgeID, kind, id, uint64(1)); err != nil {
+		if len(ids) > 0 {
+			kinds = append(kinds, kind)
+		}
+	}
+	if len(kinds) == 0 {
+		return nil
+	}
+	sort.Strings(kinds)
+	insert, err := s.conn.PrepareBatch(ctx, fmt.Sprintf("INSERT INTO %s.purge_subjects (exporter_id,purge_id,subject_kind,subject_id,version)", quoteIdentifier(s.database)))
+	if err != nil {
+		return err
+	}
+	defer insert.Close()
+	for _, kind := range kinds {
+		for _, id := range uniqueStrings(subjects[kind]) {
+			if err := insert.Append(purge.ExporterID, purge.PurgeID, kind, id, uint64(1)); err != nil {
 				return err
 			}
 		}
 	}
-	return nil
+	return insert.Send()
 }
 
 func (s *ClickHouseSink) mergePersistedPurgeSubjects(ctx context.Context, purge PurgeRow, subjects map[string][]string) error {
