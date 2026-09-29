@@ -1,6 +1,19 @@
 {
   "pins": [
     {
+      "ecosystem": "github-actions",
+      "name": "uv",
+      "pinnedVersion": "0.12.13",
+      "location": ".github/workflows/ci.yml test-site setup-uv version",
+      "class": "temporary cooldown",
+      "reason": "setup-uv otherwise installs the latest uv release; 0.12.20 was published inside the seven-day cooldown.",
+      "introducedBy": "dependency-update",
+      "introducedAt": "2026-09-29",
+      "blockedVersion": "0.12.20",
+      "blockedPublishedAt": "2026-09-28T23:20:35Z",
+      "reviewAfter": "after 2026-10-05T23:20:35Z"
+    },
+    {
       "ecosystem": "python",
       "name": "uv exclude-newer",
       "pinnedVersion": "2026-09-22T00:00:00Z",
