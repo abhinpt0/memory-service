@@ -54,6 +54,38 @@ func TestRedisBusPublishesRecoveryInvalidateAfterPublishFailure(t *testing.T) {
 	require.Equal(t, "pubsub recovery", redisEventReason(invalidate))
 }
 
+func TestRedisBusAdminReceivesOneCopyWithUserSubscriber(t *testing.T) {
+	ctx := testRedisBusContext(t)
+	redisURL := testredis.StartRedis(t)
+	opts, err := redis.ParseURL(redisURL)
+	require.NoError(t, err)
+	bus := mustLoadRedisBus(t, ctx, opts)
+	defer func() { require.NoError(t, bus.Close()) }()
+
+	subCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	userEvents, err := bus.Subscribe(subCtx, "alice")
+	require.NoError(t, err)
+	bobEvents, err := bus.Subscribe(subCtx, "bob")
+	require.NoError(t, err)
+	adminEvents, err := bus.Subscribe(subCtx, "")
+	require.NoError(t, err)
+
+	require.NoError(t, bus.Publish(ctx, registryeventbus.Event{
+		Event: "created", Kind: "entry", Data: map[string]any{"entry": "one"}, UserIDs: []string{"alice", "bob"},
+	}))
+	_ = waitForRedisEvent(t, userEvents, 5*time.Second, func(event registryeventbus.Event) bool { return event.Kind == "entry" })
+	_ = waitForRedisEvent(t, bobEvents, 5*time.Second, func(event registryeventbus.Event) bool { return event.Kind == "entry" })
+	_ = waitForRedisEvent(t, adminEvents, 5*time.Second, func(event registryeventbus.Event) bool { return event.Kind == "entry" })
+	for name, events := range map[string]<-chan registryeventbus.Event{"alice": userEvents, "bob": bobEvents, "admin": adminEvents} {
+		select {
+		case event := <-events:
+			t.Fatalf("%s received duplicate event: %+v", name, event)
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+}
+
 func TestRedisBusPublishesRecoveryInvalidateAfterSubscriptionLoss(t *testing.T) {
 	ctx := testRedisBusContext(t)
 	redisURL := testredis.StartRedis(t)

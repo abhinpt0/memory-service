@@ -24,6 +24,7 @@ type Event struct {
 	UserIDs             []string  `json:"-"`                // explicit user delivery targets
 	Broadcast           bool      `json:"-"`                // deliver to all user/admin subscribers
 	AdminOnly           bool      `json:"-"`                // deliver only to admin/all subscribers
+	UserOnly            bool      `json:"-"`                // suppress admin delivery for a copy received on a user channel
 	Internal            bool      `json:"-"`                // internal control events (e.g. resync.required), never forwarded to clients
 }
 

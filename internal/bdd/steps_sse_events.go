@@ -35,7 +35,7 @@ func init() {
 		ctx.Step(`^"([^"]*)" should receive an SSE event with kind "([^"]*)" and event "([^"]*)" within (\d+) seconds$`, e.userShouldReceiveSSEEvent)
 		ctx.Step(`^"([^"]*)" should receive an SSE event with kind "([^"]*)" and event "([^"]*)"$`, e.userShouldReceiveSSEEventDefault)
 		ctx.Step(`^"([^"]*)" should receive an SSE event with kind "([^"]*)" and event "([^"]*)" where data "([^"]*)" is "([^"]*)"$`, e.userShouldReceiveSSEEventWithDataField)
-		ctx.Step(`^"([^"]*)" should not receive an SSE event with kind "([^"]*)" and event "([^"]*)" within (\d+) seconds$`, e.userShouldNotReceiveSSEEventWithKind)
+		ctx.Step(`^"([^"]*)" should not receive an SSE event with kind "([^"]*)" and event "([^"]*)" within (\d+) seconds?$`, e.userShouldNotReceiveSSEEventWithKind)
 		ctx.Step(`^"([^"]*)" should not receive any SSE event within (\d+) seconds$`, e.userShouldNotReceiveSSEEvent)
 		ctx.Step(`^the SSE event cursor should be saved as "([^"]*)"$`, e.saveSSEEventCursor)
 		ctx.Step(`^the SSE event cursor should match the Postgres outbox format$`, e.sseEventCursorShouldMatchPostgresOutboxFormat)

@@ -423,7 +423,20 @@ func (r *redisBus) runSubscription(ctx context.Context, channels []string, onRea
 					log.Warn("Failed to unmarshal event from Redis", "err", err)
 					continue
 				}
-				_ = r.local.Publish(ctx, fromWire(w))
+				event := fromWire(w)
+				event.UserOnly = msg.Channel != redisAdminChannel && msg.Channel != redisBroadcastChannel
+				if event.UserOnly {
+					for _, userID := range event.UserIDs {
+						if redisUserChannel(userID) == msg.Channel {
+							event.UserIDs = []string{userID}
+							break
+						}
+					}
+					if len(event.UserIDs) != 1 || redisUserChannel(event.UserIDs[0]) != msg.Channel {
+						continue
+					}
+				}
+				_ = r.local.Publish(ctx, event)
 			}
 		}
 	}
