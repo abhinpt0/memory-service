@@ -61,7 +61,9 @@ func StartSinglePortHTTPAndGRPC(
 	var plainServer *http.Server
 	if cfg.EnablePlainText {
 		plainServer = &http.Server{
-			Handler:           h2c.NewHandler(dispatch, &http2.Server{}),
+			Handler: h2c.NewHandler(dispatch, &http2.Server{CountError: func(reason string) {
+				log.Warn("listener http2 protocol error", "reason", reason)
+			}}),
 			ReadHeaderTimeout: cfg.ReadHeaderTimeout,
 			MaxHeaderBytes:    cfg.MaxHeaderBytes,
 			IdleTimeout:       cfg.IdleTimeout,

@@ -68,6 +68,8 @@ public final class MemoryServiceGrpcClients {
                 socketPath.startsWith("/"),
                 "memory-service.grpc.unix-socket must be an absolute path");
         return NettyChannelBuilder.forAddress(UnixDomainSocketAddress.of(socketPath))
+                // A socket path is not a valid HTTP/2 :authority.
+                .overrideAuthority("localhost")
                 .channelType(NioDomainSocketChannel.class, UnixDomainSocketAddress.class)
                 .eventLoopGroup(UDS_EVENT_LOOP_GROUP);
     }
