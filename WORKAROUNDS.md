@@ -1,5 +1,11 @@
 # Workarounds
 
+## gRPC Java Unix socket authority
+
+- What: The Spring and Quarkus Unix socket gRPC channel builders set the HTTP/2 authority to `localhost`.
+- Why: gRPC Java otherwise uses the socket path as `:authority`. The Go h2c listener rejects that value with `invalid_authority`, so response recording and resumption fail.
+- Proper fix: Remove the overrides after gRPC Java supplies a valid default authority for Unix socket addresses, and verify both Unix socket site scenarios.
+
 ## gRPC vulnerability database version mismatch
 
 - What: Keep `google.golang.org/grpc` at v1.83.2 and `google.golang.org/api` at v0.298.0. The newer API version selects gRPC v1.84.0.
