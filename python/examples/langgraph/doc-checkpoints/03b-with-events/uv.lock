@@ -610,7 +610,7 @@ wheels = [
 [[package]]
 name = "memory-service-langchain"
 version = "0.1.0"
-source = { registry = "../../../../../../../../../tmp/memory-service-pr631-fix.eKoDUe/repo/python/dist" }
+source = { registry = "../../../../dist" }
 dependencies = [
     { name = "fastapi" },
     { name = "grpcio" },
