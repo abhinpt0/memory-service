@@ -29,6 +29,7 @@ type Event struct {
 	Broadcast           bool       `json:"-"`                    // deliver to all user/admin subscribers
 	AdminOnly           bool       `json:"-"`                    // deliver only to admin/all subscribers
 	Internal            bool       `json:"-"`                    // internal control events (e.g. resync.required), never forwarded to clients
+	UserOnly            bool       `json:"-"`                    // suppress admin delivery for a copy received on a user channel
 }
 
 // EventBus is the interface for publishing and subscribing to events.

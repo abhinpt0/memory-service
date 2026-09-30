@@ -403,7 +403,20 @@ func (p *postgresBus) runSubscription(ctx context.Context, channels []string, on
 						log.Warn("Failed to unmarshal event from pg_notify", "err", err)
 						continue
 					}
-					_ = p.local.Publish(ctx, fromWire(w))
+					event := fromWire(w)
+					event.UserOnly = notification.Channel != pgAdminChannel && notification.Channel != pgBroadcastChannel
+					if event.UserOnly {
+						for _, userID := range event.UserIDs {
+							if postgresUserChannel(userID) == notification.Channel {
+								event.UserIDs = []string{userID}
+								break
+							}
+						}
+						if len(event.UserIDs) != 1 || postgresUserChannel(event.UserIDs[0]) != notification.Channel {
+							continue
+						}
+					}
+					_ = p.local.Publish(ctx, event)
 				}
 			}
 		})
@@ -460,7 +473,10 @@ func postgresEventForChannel(event registryeventbus.Event, channel string) regis
 
 func postgresUserChannel(userID string) string {
 	sum := sha1.Sum([]byte(userID))
-	return "memory_service_events_user_" + hex.EncodeToString(sum[:])
+	// BACKWARD COMPATIBILITY: remove in a future breaking release.
+	// Match the 63-byte identifier used by legacy LISTEN subscribers.
+	const prefix = "memory_service_events_user_"
+	return prefix + hex.EncodeToString(sum[:])[:63-len(prefix)]
 }
 
 func (p *postgresBus) subscriptionChannels() []string {

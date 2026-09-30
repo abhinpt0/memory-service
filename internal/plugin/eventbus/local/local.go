@@ -74,8 +74,10 @@ func (b *Bus) Publish(ctx context.Context, event registryeventbus.Event) error {
 	}
 
 	recipients := make(map[*subscriber]struct{})
-	for s := range b.globalSubs {
-		recipients[s] = struct{}{}
+	if !event.UserOnly {
+		for s := range b.globalSubs {
+			recipients[s] = struct{}{}
+		}
 	}
 	switch {
 	case event.Broadcast:

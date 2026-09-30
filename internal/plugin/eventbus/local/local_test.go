@@ -171,6 +171,37 @@ func TestTargetedUserDelivery(t *testing.T) {
 	}
 }
 
+func TestUserChannelCopyDoesNotReachAdmin(t *testing.T) {
+	bus := New(64)
+	defer bus.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	userCh, err := bus.Subscribe(ctx, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminCh, err := bus.Subscribe(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	event := registryeventbus.Event{Event: "created", Kind: "entry", UserIDs: []string{"alice"}, UserOnly: true}
+	if err := bus.Publish(ctx, event); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-userCh:
+	case <-time.After(time.Second):
+		t.Fatal("user did not receive user channel copy")
+	}
+	select {
+	case got := <-adminCh:
+		t.Fatalf("admin received user channel copy: %+v", got)
+	default:
+	}
+}
+
 func TestBroadcastDelivery(t *testing.T) {
 	bus := New(64)
 	defer bus.Close()

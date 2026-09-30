@@ -78,6 +78,45 @@ func TestPostgresBusPreservesDurableMetadataAcrossNodes(t *testing.T) {
 	require.Equal(t, occurred, received.OccurredAt.UTC())
 }
 
+func TestPostgresBusAdminReceivesOneCopyWithUserSubscriber(t *testing.T) {
+	ctx := testPostgresBusContext(t)
+	dsn := testpg.StartPostgres(t)
+	bus := mustLoadPostgresBus(t, ctx, dsn)
+	defer func() { require.NoError(t, bus.Close()) }()
+
+	subCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	userEvents, err := bus.Subscribe(subCtx, "alice")
+	require.NoError(t, err)
+	bobEvents, err := bus.Subscribe(subCtx, "bob")
+	require.NoError(t, err)
+	adminEvents, err := bus.Subscribe(subCtx, "")
+	require.NoError(t, err)
+
+	require.NoError(t, bus.Publish(ctx, registryeventbus.Event{
+		Event: "created", Kind: "entry", Data: map[string]any{"entry": "one"}, UserIDs: []string{"alice", "bob"},
+	}))
+	_ = waitForPostgresEvent(t, userEvents, 5*time.Second, func(event registryeventbus.Event) bool { return event.Kind == "entry" })
+	_ = waitForPostgresEvent(t, bobEvents, 5*time.Second, func(event registryeventbus.Event) bool { return event.Kind == "entry" })
+	_ = waitForPostgresEvent(t, adminEvents, 5*time.Second, func(event registryeventbus.Event) bool { return event.Kind == "entry" })
+	for name, events := range map[string]<-chan registryeventbus.Event{"alice": userEvents, "bob": bobEvents, "admin": adminEvents} {
+		select {
+		case event := <-events:
+			t.Fatalf("%s received duplicate event: %+v", name, event)
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+}
+
+func TestPostgresUserChannelFitsIdentifierLimit(t *testing.T) {
+	require.LessOrEqual(t, len(postgresUserChannel("alice")), 63)
+}
+
+func TestPostgresUserChannelMatchesLegacyListenerName(t *testing.T) {
+	// Legacy LISTEN truncated its 67-byte identifier to PostgreSQL's 63-byte limit.
+	require.Equal(t, "memory_service_events_user_522b276a356bdf39013dfabea2cd43e141ec", postgresUserChannel("alice"))
+}
+
 func TestPostgresBusPublishesRecoveryInvalidateAfterSubscriptionLoss(t *testing.T) {
 	ctx := testPostgresBusContext(t)
 	dsn := testpg.StartPostgres(t)
