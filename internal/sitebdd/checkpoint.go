@@ -470,11 +470,12 @@ func (s *SiteScenario) buildCheckpoint(extraArgs ...string) error {
 	var cmd *exec.Cmd
 	if isPython {
 		// Always reinstall local packages so any wheel rebuild is picked up.
-		// --frozen is not used because lock files may be absent (new checkpoints)
-		// or reference local registries that require UV_FIND_LINKS.
-		cmd = exec.Command("uv", "sync",
-			"--reinstall-package", "memory-service-langchain",
-		)
+		args := []string{"sync", "--reinstall-package", "memory-service-langchain"}
+		if fileExists(filepath.Join(s.CheckpointPath, "uv.lock")) {
+			// Keep site runs on the versions checked in for the checkpoint.
+			args = append(args, "--frozen")
+		}
+		cmd = exec.Command("uv", args...)
 		cmd.Dir = s.CheckpointPath
 		cmd.Env = pythonBuildEnv(s.ProjectRoot)
 	} else if isNode {

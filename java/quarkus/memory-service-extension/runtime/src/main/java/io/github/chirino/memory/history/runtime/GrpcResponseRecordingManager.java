@@ -412,6 +412,8 @@ public class GrpcResponseRecordingManager implements ResponseRecordingManager {
                     "memory-service.client.url must use unix:///absolute/path syntax");
         }
         return NettyChannelBuilder.forAddress(UnixDomainSocketAddress.of(unixSocket))
+                // A socket path is not a valid HTTP/2 :authority.
+                .overrideAuthority("localhost")
                 .channelType(NioDomainSocketChannel.class, UnixDomainSocketAddress.class)
                 .eventLoopGroup(UDS_EVENT_LOOP_GROUP)
                 .usePlaintext()
