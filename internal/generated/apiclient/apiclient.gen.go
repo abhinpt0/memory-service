@@ -1914,11 +1914,16 @@ type ClientInterface interface {
 	// Creates a new conversation owned by the current user.
 	//
 	// **Idempotency**: When a conversation ID is provided in the request, this
-	// operation is idempotent. If the exact same conversation already exists
-	// (same ID, title, metadata, and ownership), the operation returns 200 OK
-	// with the existing conversation. If a conversation with the same ID exists
-	// but has different properties, the operation returns 409 Conflict with
-	// error code `conversation_already_exists`.
+	// operation is idempotent. If the exact same conversation already exists,
+	// the operation returns 200 OK with the existing conversation. If a
+	// conversation with the same ID exists but differs in any compared field,
+	// the operation returns 409 Conflict with error code
+	// `conversation_already_exists`.
+	//
+	// The complete equivalence rule: all of `title`, `metadata`, `agentId`,
+	// `forkedAtConversationId`, `forkedAtEntryId` must match, and the
+	// authenticated user identity and client identity (derived from the
+	// authentication token) must also match.
 	//
 	// Takes any type of body and a specified content type.
 	//
@@ -1930,11 +1935,16 @@ type ClientInterface interface {
 	// Creates a new conversation owned by the current user.
 	//
 	// **Idempotency**: When a conversation ID is provided in the request, this
-	// operation is idempotent. If the exact same conversation already exists
-	// (same ID, title, metadata, and ownership), the operation returns 200 OK
-	// with the existing conversation. If a conversation with the same ID exists
-	// but has different properties, the operation returns 409 Conflict with
-	// error code `conversation_already_exists`.
+	// operation is idempotent. If the exact same conversation already exists,
+	// the operation returns 200 OK with the existing conversation. If a
+	// conversation with the same ID exists but differs in any compared field,
+	// the operation returns 409 Conflict with error code
+	// `conversation_already_exists`.
+	//
+	// The complete equivalence rule: all of `title`, `metadata`, `agentId`,
+	// `forkedAtConversationId`, `forkedAtEntryId` must match, and the
+	// authenticated user identity and client identity (derived from the
+	// authentication token) must also match.
 	//
 	// Takes a body of the `application/json` content type.
 	//
@@ -2590,11 +2600,16 @@ func (c *Client) ListConversations(ctx context.Context, params *ListConversation
 // Creates a new conversation owned by the current user.
 //
 // **Idempotency**: When a conversation ID is provided in the request, this
-// operation is idempotent. If the exact same conversation already exists
-// (same ID, title, metadata, and ownership), the operation returns 200 OK
-// with the existing conversation. If a conversation with the same ID exists
-// but has different properties, the operation returns 409 Conflict with
-// error code `conversation_already_exists`.
+// operation is idempotent. If the exact same conversation already exists,
+// the operation returns 200 OK with the existing conversation. If a
+// conversation with the same ID exists but differs in any compared field,
+// the operation returns 409 Conflict with error code
+// `conversation_already_exists`.
+//
+// The complete equivalence rule: all of `title`, `metadata`, `agentId`,
+// `forkedAtConversationId`, `forkedAtEntryId` must match, and the
+// authenticated user identity and client identity (derived from the
+// authentication token) must also match.
 //
 // Takes any type of body and a specified content type.
 //
@@ -2616,11 +2631,16 @@ func (c *Client) CreateConversationWithBody(ctx context.Context, contentType str
 // Creates a new conversation owned by the current user.
 //
 // **Idempotency**: When a conversation ID is provided in the request, this
-// operation is idempotent. If the exact same conversation already exists
-// (same ID, title, metadata, and ownership), the operation returns 200 OK
-// with the existing conversation. If a conversation with the same ID exists
-// but has different properties, the operation returns 409 Conflict with
-// error code `conversation_already_exists`.
+// operation is idempotent. If the exact same conversation already exists,
+// the operation returns 200 OK with the existing conversation. If a
+// conversation with the same ID exists but differs in any compared field,
+// the operation returns 409 Conflict with error code
+// `conversation_already_exists`.
+//
+// The complete equivalence rule: all of `title`, `metadata`, `agentId`,
+// `forkedAtConversationId`, `forkedAtEntryId` must match, and the
+// authenticated user identity and client identity (derived from the
+// authentication token) must also match.
 //
 // Takes a body of the `application/json` content type.
 //
@@ -5916,11 +5936,16 @@ type ClientWithResponsesInterface interface {
 	// Creates a new conversation owned by the current user.
 	//
 	// **Idempotency**: When a conversation ID is provided in the request, this
-	// operation is idempotent. If the exact same conversation already exists
-	// (same ID, title, metadata, and ownership), the operation returns 200 OK
-	// with the existing conversation. If a conversation with the same ID exists
-	// but has different properties, the operation returns 409 Conflict with
-	// error code `conversation_already_exists`.
+	// operation is idempotent. If the exact same conversation already exists,
+	// the operation returns 200 OK with the existing conversation. If a
+	// conversation with the same ID exists but differs in any compared field,
+	// the operation returns 409 Conflict with error code
+	// `conversation_already_exists`.
+	//
+	// The complete equivalence rule: all of `title`, `metadata`, `agentId`,
+	// `forkedAtConversationId`, `forkedAtEntryId` must match, and the
+	// authenticated user identity and client identity (derived from the
+	// authentication token) must also match.
 	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -5932,11 +5957,16 @@ type ClientWithResponsesInterface interface {
 	// Creates a new conversation owned by the current user.
 	//
 	// **Idempotency**: When a conversation ID is provided in the request, this
-	// operation is idempotent. If the exact same conversation already exists
-	// (same ID, title, metadata, and ownership), the operation returns 200 OK
-	// with the existing conversation. If a conversation with the same ID exists
-	// but has different properties, the operation returns 409 Conflict with
-	// error code `conversation_already_exists`.
+	// operation is idempotent. If the exact same conversation already exists,
+	// the operation returns 200 OK with the existing conversation. If a
+	// conversation with the same ID exists but differs in any compared field,
+	// the operation returns 409 Conflict with error code
+	// `conversation_already_exists`.
+	//
+	// The complete equivalence rule: all of `title`, `metadata`, `agentId`,
+	// `forkedAtConversationId`, `forkedAtEntryId` must match, and the
+	// authenticated user identity and client identity (derived from the
+	// authentication token) must also match.
 	//
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -8616,11 +8646,16 @@ func (c *ClientWithResponses) ListConversationsWithResponse(ctx context.Context,
 // Creates a new conversation owned by the current user.
 //
 // **Idempotency**: When a conversation ID is provided in the request, this
-// operation is idempotent. If the exact same conversation already exists
-// (same ID, title, metadata, and ownership), the operation returns 200 OK
-// with the existing conversation. If a conversation with the same ID exists
-// but has different properties, the operation returns 409 Conflict with
-// error code `conversation_already_exists`.
+// operation is idempotent. If the exact same conversation already exists,
+// the operation returns 200 OK with the existing conversation. If a
+// conversation with the same ID exists but differs in any compared field,
+// the operation returns 409 Conflict with error code
+// `conversation_already_exists`.
+//
+// The complete equivalence rule: all of `title`, `metadata`, `agentId`,
+// `forkedAtConversationId`, `forkedAtEntryId` must match, and the
+// authenticated user identity and client identity (derived from the
+// authentication token) must also match.
 //
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 //
@@ -8638,11 +8673,16 @@ func (c *ClientWithResponses) CreateConversationWithBodyWithResponse(ctx context
 // Creates a new conversation owned by the current user.
 //
 // **Idempotency**: When a conversation ID is provided in the request, this
-// operation is idempotent. If the exact same conversation already exists
-// (same ID, title, metadata, and ownership), the operation returns 200 OK
-// with the existing conversation. If a conversation with the same ID exists
-// but has different properties, the operation returns 409 Conflict with
-// error code `conversation_already_exists`.
+// operation is idempotent. If the exact same conversation already exists,
+// the operation returns 200 OK with the existing conversation. If a
+// conversation with the same ID exists but differs in any compared field,
+// the operation returns 409 Conflict with error code
+// `conversation_already_exists`.
+//
+// The complete equivalence rule: all of `title`, `metadata`, `agentId`,
+// `forkedAtConversationId`, `forkedAtEntryId` must match, and the
+// authenticated user identity and client identity (derived from the
+// authentication token) must also match.
 //
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 //

@@ -1007,9 +1007,10 @@ export type CreateConversationErrors = {
    */
   404: ErrorResponse;
   /**
-   * A conversation with the provided ID already exists but has different
-   * properties (title, metadata, or ownership). Error code will be
-   * `conversation_already_exists`.
+   * A conversation with the provided ID already exists but differs in at
+   * least one compared field (title, metadata, agentId,
+   * forkedAtConversationId, forkedAtEntryId, or the authenticated user
+   * or client identity). Error code will be `conversation_already_exists`.
    */
   409: ErrorResponse;
   /**
@@ -1023,8 +1024,10 @@ export type CreateConversationError = CreateConversationErrors[keyof CreateConve
 export type CreateConversationResponses = {
   /**
    * Exact retry: a conversation with the provided ID already exists and
-   * matches all request properties (title, metadata, ownership). Returns
-   * the existing conversation without creating a duplicate.
+   * matches all compared fields (title, metadata, agentId,
+   * forkedAtConversationId, forkedAtEntryId, and the authenticated user
+   * and client identity). Returns the existing conversation without
+   * creating a duplicate.
    */
   200: Conversation;
   /**

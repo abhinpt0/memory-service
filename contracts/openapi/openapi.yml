@@ -204,11 +204,16 @@ paths:
         Creates a new conversation owned by the current user.
 
         **Idempotency**: When a conversation ID is provided in the request, this
-        operation is idempotent. If the exact same conversation already exists
-        (same ID, title, metadata, and ownership), the operation returns 200 OK
-        with the existing conversation. If a conversation with the same ID exists
-        but has different properties, the operation returns 409 Conflict with
-        error code `conversation_already_exists`.
+        operation is idempotent. If the exact same conversation already exists,
+        the operation returns 200 OK with the existing conversation. If a
+        conversation with the same ID exists but differs in any compared field,
+        the operation returns 409 Conflict with error code
+        `conversation_already_exists`.
+
+        The complete equivalence rule: all of `title`, `metadata`, `agentId`,
+        `forkedAtConversationId`, `forkedAtEntryId` must match, and the
+        authenticated user identity and client identity (derived from the
+        authentication token) must also match.
       operationId: createConversation
       requestBody:
         required: true
@@ -220,8 +225,10 @@ paths:
         '200':
           description: |-
             Exact retry: a conversation with the provided ID already exists and
-            matches all request properties (title, metadata, ownership). Returns
-            the existing conversation without creating a duplicate.
+            matches all compared fields (title, metadata, agentId,
+            forkedAtConversationId, forkedAtEntryId, and the authenticated user
+            and client identity). Returns the existing conversation without
+            creating a duplicate.
           content:
             application/json:
               schema:
@@ -242,9 +249,10 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
         '409':
           description: |-
-            A conversation with the provided ID already exists but has different
-            properties (title, metadata, or ownership). Error code will be
-            `conversation_already_exists`.
+            A conversation with the provided ID already exists but differs in at
+            least one compared field (title, metadata, agentId,
+            forkedAtConversationId, forkedAtEntryId, or the authenticated user
+            or client identity). Error code will be `conversation_already_exists`.
           content:
             application/json:
               schema:

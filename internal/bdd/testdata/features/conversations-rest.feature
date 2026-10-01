@@ -746,8 +746,28 @@ Feature: Conversations REST API
       "title": "Race Condition Test"
     }
     """
-    Then at most one response should have status 201 and the rest should have status 200
+    Then exactly one response should have status 201 and the rest should have status 200
     # Verify only one conversation exists
     When I call GET "/v1/conversations/race-test-001"
     Then the response status should be 200
     And the response body "id" should be "race-test-001"
+    # Verify exactly one conversation_group row was created (no orphan groups from race losers)
+    And I resolve the conversation group ID for conversation "race-test-001" into "raceGroupId"
+    When I execute SQL query:
+      """
+      SELECT COUNT(*) AS count FROM conversation_groups WHERE id = '${raceGroupId}'
+      """
+    Then the SQL result should match:
+      | count |
+      | 1     |
+    When I execute MongoDB query:
+      """
+      {
+        "collection": "conversation_groups",
+        "operation": "count",
+        "filter": { "_id": "${raceGroupId}" }
+      }
+      """
+    Then the MongoDB result should match:
+      | count |
+      | 1     |

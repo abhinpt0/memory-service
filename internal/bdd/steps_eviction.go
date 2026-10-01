@@ -28,7 +28,7 @@ func init() {
 		ctx.Step(`^the final progress should be (\d+)$`, e.theFinalProgressShouldBe)
 		ctx.Step(`^I call POST "([^"]*)" concurrently (\d+) times with body:$`, e.iCallPOSTConcurrentlyTimesWithBody)
 		ctx.Step(`^all responses should have status (\d+)$`, e.allResponsesShouldHaveStatus)
-		ctx.Step(`^at most one response should have status (\d+) and the rest should have status (\d+)$`, e.atMostOneResponseShouldHaveStatusAndTheRestShouldHaveStatus)
+		ctx.Step(`^exactly one response should have status (\d+) and the rest should have status (\d+)$`, e.exactlyOneResponseShouldHaveStatusAndTheRestShouldHaveStatus)
 	})
 }
 
@@ -184,6 +184,7 @@ func (e *evictionSteps) iCallPOSTConcurrentlyTimesWithBody(path string, count in
 
 	apiURL := e.s.APIBaseURL()
 	subject := e.s.Session().TestUser.Subject
+	clientID := e.s.Session().Header.Get("X-Client-ID")
 	var wg sync.WaitGroup
 	e.concurrentResp = make([]int, count)
 
@@ -198,6 +199,9 @@ func (e *evictionSteps) iCallPOSTConcurrentlyTimesWithBody(path string, count in
 			}
 			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set("Authorization", "Bearer "+subject)
+			if clientID != "" {
+				req.Header.Set("X-Client-ID", clientID)
+			}
 
 			client := &http.Client{Timeout: 30 * time.Second}
 			resp, err := client.Do(req)
@@ -222,7 +226,7 @@ func (e *evictionSteps) allResponsesShouldHaveStatus(expected int) error {
 	return nil
 }
 
-func (e *evictionSteps) atMostOneResponseShouldHaveStatusAndTheRestShouldHaveStatus(firstStatus int, restStatus int) error {
+func (e *evictionSteps) exactlyOneResponseShouldHaveStatusAndTheRestShouldHaveStatus(firstStatus int, restStatus int) error {
 	firstCount := 0
 	for i, status := range e.concurrentResp {
 		if status == firstStatus {
@@ -231,8 +235,8 @@ func (e *evictionSteps) atMostOneResponseShouldHaveStatusAndTheRestShouldHaveSta
 			return fmt.Errorf("concurrent request %d had status %d, expected either %d or %d", i, status, firstStatus, restStatus)
 		}
 	}
-	if firstCount > 1 {
-		return fmt.Errorf("expected at most one response with status %d, got %d", firstStatus, firstCount)
+	if firstCount != 1 {
+		return fmt.Errorf("expected exactly one response with status %d, got %d", firstStatus, firstCount)
 	}
 	return nil
 }
