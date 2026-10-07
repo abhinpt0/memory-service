@@ -195,9 +195,7 @@ func createConversation(c *gin.Context, store registrystore.MemoryStore, eventBu
 				eventsToPublish = events
 			}
 		}
-		// Java parity: fork creation returns 200, regular creation returns 201.
-		// Exact retry also returns 200 (following #528 pattern).
-		if forkConvID != nil || isExactRetry {
+		if isExactRetry {
 			c.JSON(http.StatusOK, toConversationDetail(conv))
 		} else {
 			c.JSON(http.StatusCreated, toConversationDetail(conv))

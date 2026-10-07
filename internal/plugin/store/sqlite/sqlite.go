@@ -600,13 +600,20 @@ func (s *SQLiteStore) createConversationWithID(ctx context.Context, userID strin
 			return nil, fmt.Errorf("failed to decrypt conversation title: %w", err)
 		}
 
-		// Hydrate fork lineage before comparison
+		persistedStartedByConversationID := existing.StartedByConversationID
+		persistedStartedByEntryID := existing.StartedByEntryID
+
+		// Hydrate logical lineage for the response, but compare the started-by
+		// fields stored on this branch with the original creation request.
 		if err := s.hydrateConversationFork(ctx, &existing); err != nil {
 			return nil, err
 		}
+		existingForMatch := existing
+		existingForMatch.StartedByConversationID = persistedStartedByConversationID
+		existingForMatch.StartedByEntryID = persistedStartedByEntryID
 
 		// 3. Compare complete creation request
-		if !registrystore.ConversationsMatch(&existing, ownerUserID, clientID, title, decryptedTitle, metadata, agentID,
+		if !registrystore.ConversationsMatch(&existingForMatch, ownerUserID, clientID, title, decryptedTitle, metadata, agentID,
 			forkedAtConversationID, forkedAtEntryID, startedByConversationID, startedByEntryID) {
 			// Conflicting retry
 			return nil, registrystore.NewConversationIDConflictError(convID)
@@ -711,13 +718,20 @@ func (s *SQLiteStore) createConversationWithID(ctx context.Context, userID strin
 				return nil, fmt.Errorf("failed to decrypt conversation title: %w", err)
 			}
 
-			// Hydrate fork lineage before comparison
+			persistedStartedByConversationID := existing.StartedByConversationID
+			persistedStartedByEntryID := existing.StartedByEntryID
+
+			// Hydrate logical lineage for the response, but compare the started-by
+			// fields stored on this branch with the original creation request.
 			if err := s.hydrateConversationFork(ctx, &existing); err != nil {
 				return nil, err
 			}
+			existingForMatch := existing
+			existingForMatch.StartedByConversationID = persistedStartedByConversationID
+			existingForMatch.StartedByEntryID = persistedStartedByEntryID
 
 			// 3. Compare complete creation request
-			if !registrystore.ConversationsMatch(&existing, ownerUserID, clientID, title, decryptedTitle, metadata, agentID,
+			if !registrystore.ConversationsMatch(&existingForMatch, ownerUserID, clientID, title, decryptedTitle, metadata, agentID,
 				forkedAtConversationID, forkedAtEntryID, startedByConversationID, startedByEntryID) {
 				// Conflicting retry
 				return nil, registrystore.NewConversationIDConflictError(convID)

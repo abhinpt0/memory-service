@@ -599,6 +599,73 @@ Feature: Conversations REST API
     And the response body "id" should be "idempotent-conv-001"
     And the response body "createdAt" should be "${firstCreatedAt}"
 
+  Scenario: Create conversation with an explicit ID fork returns 201
+    Given I have a conversation with title "Fork status root"
+    And set "forkStatusRootId" to "${conversationId}"
+    And set "forkStatusChildId" to "00000000-0000-4000-8000-000000000801"
+    And I call POST "/v1/conversations/${forkStatusChildId}/entries" with body:
+    """
+    {
+      "channel": "HISTORY",
+      "contentType": "history",
+      "startedByConversationId": "${forkStatusRootId}",
+      "content": [{"role": "USER", "text": "Child fork anchor"}]
+    }
+    """
+    And set "forkStatusEntryId" to the json response field "id"
+    When I create a conversation with request:
+    """
+    {
+      "id": "explicit-child-fork-status-001",
+      "title": "Explicit child fork",
+      "forkedAtConversationId": "${forkStatusChildId}",
+      "forkedAtEntryId": "${forkStatusEntryId}"
+    }
+    """
+    Then the response status should be 201
+    And the response body "id" should be "explicit-child-fork-status-001"
+    And the response body "startedByConversationId" should be "${forkStatusRootId}"
+
+  Scenario: Retry an explicit ID fork inside a started child group
+    Given I have a conversation with title "Fork retry root"
+    And set "forkRetryRootId" to "${conversationId}"
+    And set "forkRetryChildId" to "00000000-0000-4000-8000-000000000802"
+    And I call POST "/v1/conversations/${forkRetryChildId}/entries" with body:
+    """
+    {
+      "channel": "HISTORY",
+      "contentType": "history",
+      "startedByConversationId": "${forkRetryRootId}",
+      "content": [{"role": "USER", "text": "Child fork retry anchor"}]
+    }
+    """
+    And set "forkRetryEntryId" to the json response field "id"
+    And "alice" is connected to the SSE event stream
+    And I create a conversation with request:
+    """
+    {
+      "id": "explicit-child-fork-retry-001",
+      "title": "Retry child fork",
+      "forkedAtConversationId": "${forkRetryChildId}",
+      "forkedAtEntryId": "${forkRetryEntryId}"
+    }
+    """
+    And set "forkRetryCreatedAt" to the json response field "createdAt"
+    And "alice" should receive an SSE event with kind "conversation" and event "created" where data "conversation" is "explicit-child-fork-retry-001"
+    When I create a conversation with request:
+    """
+    {
+      "id": "explicit-child-fork-retry-001",
+      "title": "Retry child fork",
+      "forkedAtConversationId": "${forkRetryChildId}",
+      "forkedAtEntryId": "${forkRetryEntryId}"
+    }
+    """
+    Then the response status should be 200
+    And the response body "createdAt" should be "${forkRetryCreatedAt}"
+    And the response body "startedByConversationId" should be "${forkRetryRootId}"
+    And "alice" should not receive an SSE event with kind "conversation" and event "created" within 1 second
+
   Scenario: Create conversation with explicit ID - conflicting retry returns 409
     When I create a conversation with request:
     """

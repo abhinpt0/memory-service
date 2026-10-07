@@ -1118,11 +1118,15 @@ func (s *MongoStore) createConversation(ctx context.Context, userID string, clie
 		if err != nil {
 			return nil, fmt.Errorf("failed to decrypt conversation title: %w", err)
 		}
+		persistedStartedByConversationID := existing.StartedByConversationID
+		persistedStartedByEntryID := existing.StartedByEntryID
 		if err := s.hydrateConversationFork(ctx, &existing); err != nil {
 			return nil, err
 		}
 
 		existingModel := existing.toModel()
+		existingModel.StartedByConversationID = ptrStrToConversationID(persistedStartedByConversationID)
+		existingModel.StartedByEntryID = ptrStrToUUID(persistedStartedByEntryID)
 		if !registrystore.ConversationsMatch(&existingModel, ownerUserID, clientID, title, decryptedTitle, metadata, agentID,
 			forkedAtConversationID, forkedAtEntryID, startedByConversationID, startedByEntryID) {
 			return nil, registrystore.NewConversationIDConflictError(convID)
