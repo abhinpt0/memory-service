@@ -52,6 +52,71 @@ func TestPostgresBusPublishesRecoveryInvalidateAfterPublishFailure(t *testing.T)
 	require.Equal(t, "pubsub recovery", postgresEventReason(invalidate))
 }
 
+func TestPostgresWirePreservesDurableMetadata(t *testing.T) {
+	t.Parallel()
+	occurred := time.Unix(123, 456).UTC()
+	event := registryeventbus.Event{Event: "created", Kind: "entry", OutboxCursor: "mongo:cursor", OccurredAt: &occurred}
+	roundTrip := fromWire(toWire(event))
+	require.Equal(t, event.OutboxCursor, roundTrip.OutboxCursor)
+	require.Equal(t, event.OccurredAt, roundTrip.OccurredAt)
+}
+
+func TestPostgresBusPreservesDurableMetadataAcrossNodes(t *testing.T) {
+	ctx := testPostgresBusContext(t)
+	dsn := testpg.StartPostgres(t)
+	busA := mustLoadPostgresBus(t, ctx, dsn)
+	defer busA.Close()
+	busB := mustLoadPostgresBus(t, ctx, dsn)
+	defer busB.Close()
+	subCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	events, err := busB.Subscribe(subCtx, "")
+	require.NoError(t, err)
+	occurred := time.Unix(123, 456).UTC()
+	require.NoError(t, busA.PublishDurable(ctx, registryeventbus.Event{Event: "created", Kind: "entry", Broadcast: true, OutboxCursor: "mongo:cursor", OccurredAt: &occurred}))
+	received := waitForPostgresEvent(t, events, 10*time.Second, func(event registryeventbus.Event) bool { return event.OutboxCursor == "mongo:cursor" })
+	require.Equal(t, occurred, received.OccurredAt.UTC())
+}
+
+func TestPostgresBusAdminReceivesOneCopyWithUserSubscriber(t *testing.T) {
+	ctx := testPostgresBusContext(t)
+	dsn := testpg.StartPostgres(t)
+	bus := mustLoadPostgresBus(t, ctx, dsn)
+	defer func() { require.NoError(t, bus.Close()) }()
+
+	subCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	userEvents, err := bus.Subscribe(subCtx, "alice")
+	require.NoError(t, err)
+	bobEvents, err := bus.Subscribe(subCtx, "bob")
+	require.NoError(t, err)
+	adminEvents, err := bus.Subscribe(subCtx, "")
+	require.NoError(t, err)
+
+	require.NoError(t, bus.Publish(ctx, registryeventbus.Event{
+		Event: "created", Kind: "entry", Data: map[string]any{"entry": "one"}, UserIDs: []string{"alice", "bob"},
+	}))
+	_ = waitForPostgresEvent(t, userEvents, 5*time.Second, func(event registryeventbus.Event) bool { return event.Kind == "entry" })
+	_ = waitForPostgresEvent(t, bobEvents, 5*time.Second, func(event registryeventbus.Event) bool { return event.Kind == "entry" })
+	_ = waitForPostgresEvent(t, adminEvents, 5*time.Second, func(event registryeventbus.Event) bool { return event.Kind == "entry" })
+	for name, events := range map[string]<-chan registryeventbus.Event{"alice": userEvents, "bob": bobEvents, "admin": adminEvents} {
+		select {
+		case event := <-events:
+			t.Fatalf("%s received duplicate event: %+v", name, event)
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+}
+
+func TestPostgresUserChannelFitsIdentifierLimit(t *testing.T) {
+	require.LessOrEqual(t, len(postgresUserChannel("alice")), 63)
+}
+
+func TestPostgresUserChannelMatchesLegacyListenerName(t *testing.T) {
+	// Legacy LISTEN truncated its 67-byte identifier to PostgreSQL's 63-byte limit.
+	require.Equal(t, "memory_service_events_user_522b276a356bdf39013dfabea2cd43e141ec", postgresUserChannel("alice"))
+}
+
 func TestPostgresBusPublishesRecoveryInvalidateAfterSubscriptionLoss(t *testing.T) {
 	ctx := testPostgresBusContext(t)
 	dsn := testpg.StartPostgres(t)

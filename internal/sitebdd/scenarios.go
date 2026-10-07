@@ -13,15 +13,20 @@ import (
 
 // ScenarioData mirrors the JSON structure produced by the Astro build.
 type ScenarioData struct {
-	Checkpoint  string        `json:"checkpoint"`
-	SourceFile  string        `json:"sourceFile"`
-	Description string        `json:"description,omitempty"`
-	Scenarios   []ScenarioCmd `json:"scenarios"`
-	WaveID      int           `json:"-"`
+	Checkpoint  string          `json:"checkpoint"`
+	SourceFile  string          `json:"sourceFile"`
+	Description string          `json:"description,omitempty"`
+	Fixture     json.RawMessage `json:"fixture,omitempty"`
+	Scenarios   []ScenarioCmd   `json:"scenarios"`
+	WaveID      int             `json:"-"`
 }
 
 type ScenarioCmd struct {
+	Kind         string        `json:"kind,omitempty"`
 	Bash         string        `json:"bash"`
+	SQL          string        `json:"sql,omitempty"`
+	Columns      []string      `json:"columns,omitempty"`
+	MinRows      int           `json:"minRows,omitempty"`
 	Expectations []Expectation `json:"expectations"`
 	CustomSteps  []string      `json:"customSteps"`
 }
@@ -159,17 +164,7 @@ func writeScenario(sb *strings.Builder, s ScenarioData, sourceFile string, curlO
 		sb.WriteString("\n")
 	}
 
-	framework := deriveFramework(s.SourceFile)
-	title := s.Description
-	if title == "" {
-		title = deriveFeatureName(s.SourceFile)
-	}
-	checkpointName := lastSegment(s.Checkpoint)
-	scenarioLabel := title
-	if checkpointName != "" {
-		scenarioLabel += " - " + checkpointName
-	}
-	sb.WriteString(fmt.Sprintf("  Scenario: [%s] %s\n", framework, scenarioLabel))
+	sb.WriteString(fmt.Sprintf("  Scenario: %s\n", scenarioName(s)))
 	sb.WriteString(fmt.Sprintf("    # From %s\n", s.SourceFile))
 
 	if scenarioUsesUnixSocket(sourceFile) {
@@ -182,8 +177,32 @@ func writeScenario(sb *strings.Builder, s ScenarioData, sourceFile string, curlO
 		sb.WriteString("    When I start the checkpoint\n")
 		sb.WriteString("    Then the application should be running\n\n")
 	}
+	if hasSQLCommands(s) {
+		if len(s.Fixture) == 0 {
+			return fmt.Errorf("SQL scenario %s has no analytics fixture", sourceFile)
+		}
+		sb.WriteString("    Given the ClickHouse analytics fixture is loaded:\n")
+		sb.WriteString("      \"\"\"\n")
+		for _, line := range strings.Split(strings.TrimSpace(string(s.Fixture)), "\n") {
+			sb.WriteString("      " + strings.TrimRight(line, " \t") + "\n")
+		}
+		sb.WriteString("      \"\"\"\n\n")
+	}
 
 	for _, cmd := range s.Scenarios {
+		if cmd.Kind == "sql" || strings.TrimSpace(cmd.SQL) != "" {
+			sb.WriteString("    When I execute the ClickHouse query:\n")
+			sb.WriteString("      \"\"\"\n")
+			for _, line := range strings.Split(strings.TrimSpace(cmd.SQL), "\n") {
+				sb.WriteString("      " + strings.TrimRight(line, " \t") + "\n")
+			}
+			sb.WriteString("      \"\"\"\n")
+			if len(cmd.Columns) > 0 {
+				sb.WriteString(fmt.Sprintf("    Then the ClickHouse columns should be %q\n", strings.Join(cmd.Columns, ",")))
+			}
+			sb.WriteString(fmt.Sprintf("    And the ClickHouse query should return at least %d rows\n\n", cmd.MinRows))
+			continue
+		}
 		if !containsCurl(cmd.Bash) {
 			continue
 		}
@@ -223,6 +242,21 @@ func writeScenario(sb *strings.Builder, s ScenarioData, sourceFile string, curlO
 	return nil
 }
 
+// scenarioName returns the generated godog scenario name for s. At runtime it
+// is also the scenario key used by the UUID and checkpoint-path registries
+// (see SiteScenario.scenarioKey).
+func scenarioName(s ScenarioData) string {
+	title := s.Description
+	if title == "" {
+		title = deriveFeatureName(s.SourceFile)
+	}
+	label := title
+	if checkpointName := lastSegment(s.Checkpoint); checkpointName != "" {
+		label += " - " + checkpointName
+	}
+	return fmt.Sprintf("[%s] %s", deriveFramework(s.SourceFile), label)
+}
+
 func containsCurl(bash string) bool {
 	for _, line := range strings.Split(bash, "\n") {
 		if strings.HasPrefix(strings.TrimSpace(line), "curl") {
@@ -258,6 +292,9 @@ func sourceFileToFilename(sourceFile string) string {
 
 func deriveTags(s ScenarioData) []string {
 	var tags []string
+	if hasSQLCommands(s) {
+		tags = append(tags, "@clickhouse")
+	}
 	fw := deriveFramework(s.SourceFile)
 	if fw != "unknown" {
 		tags = append(tags, "@"+fw)
@@ -273,8 +310,19 @@ func deriveTags(s ScenarioData) []string {
 	return tags
 }
 
+func hasSQLCommands(s ScenarioData) bool {
+	for _, command := range s.Scenarios {
+		if command.Kind == "sql" || strings.TrimSpace(command.SQL) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func deriveFramework(sourceFile string) string {
 	switch {
+	case strings.HasPrefix(sourceFile, "/docs/analytics/"):
+		return "analytics"
 	case strings.HasPrefix(sourceFile, "/docs/concepts/"):
 		return "concepts"
 	case strings.HasPrefix(sourceFile, "/docs/python-langchain/"):

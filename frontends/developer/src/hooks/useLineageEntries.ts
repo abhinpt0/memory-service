@@ -2,7 +2,7 @@ import { useMemo } from "react";
 import { useInfiniteQuery } from "@tanstack/react-query";
 import { adminGetEntries } from "@/api/generated/sdk.gen";
 import { adminGetEntriesQueryKey } from "@/api/generated/@tanstack/react-query.gen";
-import type { ConversationForkPoint, Entry } from "@/api/generated/types.gen";
+import type { AdminEntry as Entry, ConversationForkPoint } from "@/api/generated/types.gen";
 import type { ForkOption } from "@/lib/conversation";
 
 export type { ForkOption };
@@ -35,6 +35,9 @@ const pageSize = 50;
  * then pages backward through older entries.
  * Sibling-fork entries are never requested; navigation options from the
  * admin fork snapshot are attached to their visible display entries.
+ * Keep forks=none with beforeCursor reverse paging: fork badges come from the
+ * admin {conversationIds, forkPoints} snapshot, so do not fetch sibling
+ * entries with forks=all.
  */
 export function useLineageEntries({ conversationId, forkPoints }: UseLineageEntriesOptions): UseLineageEntriesResult {
   const initialOptions = {

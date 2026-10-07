@@ -1510,7 +1510,8 @@ export class EventsService {
    * hints — clients should refetch the affected resource on receipt.
    *
    * The response is `text/event-stream`. Each message is a JSON object:
-   * `{"event":"<action>","kind":"<resource>","data":{...}}`
+   * `{"event":"<action>","kind":"<resource>","change":"<lifecycle-change>","data":{...}}`.
+   * With `detail=full`, `data` is the corresponding agent OpenAPI resource.
    */
   public static subscribeEvents<ThrowOnError extends boolean = true>(
     parameters?: {
@@ -1567,6 +1568,7 @@ export class AdminService {
       kinds?: string;
       after?: string;
       detail?: "summary" | "full";
+      initial_state?: "none" | "current";
       entry_channels?: string;
       entry_content_types?: string;
       entry_roles?: string;
@@ -1582,6 +1584,7 @@ export class AdminService {
             { in: "query", key: "kinds" },
             { in: "query", key: "after" },
             { in: "query", key: "detail" },
+            { in: "query", key: "initial_state" },
             { in: "query", key: "entry_channels" },
             { in: "query", key: "entry_content_types" },
             { in: "query", key: "entry_roles" },

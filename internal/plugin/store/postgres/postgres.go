@@ -23,12 +23,14 @@ import (
 	registrymigrate "github.com/chirino/memory-service/internal/registry/migrate"
 	registrystore "github.com/chirino/memory-service/internal/registry/store"
 	"github.com/chirino/memory-service/internal/security"
+	internaltracing "github.com/chirino/memory-service/internal/tracing"
 	"github.com/chirino/memory-service/internal/txscope"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
+	"gorm.io/plugin/opentelemetry/tracing"
 )
 
 func init() {
@@ -39,6 +41,14 @@ func init() {
 			db, err := gorm.Open(postgres.Open(cfg.DBURL), &gorm.Config{})
 			if err != nil {
 				return nil, fmt.Errorf("failed to connect to postgres: %w", err)
+			}
+			tp := internaltracing.ProviderFromContextOrNoop(ctx)
+			if err := db.Use(tracing.NewPlugin(
+				tracing.WithTracerProvider(tp),
+				tracing.WithoutMetrics(),
+				tracing.WithoutQueryVariables(),
+			)); err != nil {
+				return nil, fmt.Errorf("postgres: register otelgorm plugin: %w", err)
 			}
 			sqlDB, err := db.DB()
 			if err != nil {
@@ -492,6 +502,9 @@ func (s *PostgresStore) createConversationWithID(ctx context.Context, userID str
 		UpdatedAt:               now,
 	}
 
+	// Concurrent creates of the same conversation ID must use ON CONFLICT DO NOTHING
+	// rather than catching 23505: a failed statement aborts the surrounding Postgres
+	// transaction, so the reload below would fail with 25P02.
 	createResult := db.Clauses(clause.OnConflict{DoNothing: true}).Create(&conv)
 	if createResult.Error != nil {
 		logDuplicateKey("createConversationWithID:createConversation", createResult.Error,
@@ -2248,6 +2261,8 @@ func (s *PostgresStore) SyncAgentEntry(ctx context.Context, userID string, conve
 }
 
 // autoCreateConversation creates a conversation with a given ID for sync auto-creation.
+// Like normal root creation it must also write the ancestry self row, or
+// ancestry-backed context and entry-listing reads fail after the first sync.
 func (s *PostgresStore) autoCreateConversation(ctx context.Context, userID string, clientID string, conversationID string, agentID *string) (model.Conversation, error) {
 	db, err := s.writeDBFor(ctx, "auto-create conversation")
 	if err != nil {

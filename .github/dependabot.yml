@@ -16,7 +16,7 @@ updates:
     commit-message:
       prefix: "chore"
       include: "scope"
-    open-pull-requests-limit: 2
+    open-pull-requests-limit: 0
 
   - package-ecosystem: "gomod"
     directory: "/"
@@ -33,6 +33,7 @@ updates:
     commit-message:
       prefix: "chore"
       include: "scope"
+    open-pull-requests-limit: 0
 
   - package-ecosystem: "maven"
     directories:
@@ -51,11 +52,13 @@ updates:
     commit-message:
       prefix: "chore"
       include: "scope"
+    open-pull-requests-limit: 0
 
   - package-ecosystem: "npm"
     directories:
       - "/site"
       - "/frontends/chat-frontend"
+      - "/frontends/developer"
       - "/typescript/vercelai"
       - "/typescript/examples/vecelai/chat-vecelai-ts"
       - "/typescript/examples/vecelai/doc-checkpoints/01-basic-chat"
@@ -81,7 +84,7 @@ updates:
     commit-message:
       prefix: "chore"
       include: "scope"
-    open-pull-requests-limit: 3
+    open-pull-requests-limit: 0
 
   - package-ecosystem: "uv"
     directories:
@@ -118,7 +121,7 @@ updates:
     commit-message:
       prefix: "chore"
       include: "scope"
-    open-pull-requests-limit: 3
+    open-pull-requests-limit: 0
 
   - package-ecosystem: "docker"
     directories:
@@ -138,6 +141,7 @@ updates:
     commit-message:
       prefix: "chore"
       include: "scope"
+    open-pull-requests-limit: 0
 
   - package-ecosystem: "docker-compose"
     directories:
@@ -156,6 +160,7 @@ updates:
     commit-message:
       prefix: "chore"
       include: "scope"
+    open-pull-requests-limit: 0
 
   - package-ecosystem: "devcontainers"
     directory: "/"
@@ -172,3 +177,4 @@ updates:
     commit-message:
       prefix: "chore"
       include: "scope"
+    open-pull-requests-limit: 0

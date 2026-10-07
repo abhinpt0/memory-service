@@ -118,7 +118,7 @@ services:
       retries: 10
 
   keycloak:
-    image: quay.io/keycloak/keycloak:26.7.3
+    image: quay.io/keycloak/keycloak:26.7.4
     command: ["start-dev", "--import-realm"]
     environment:
       KC_BOOTSTRAP_ADMIN_USERNAME: admin
@@ -188,6 +188,8 @@ services:
       # ── Authentication & authorization ─────────────────────────
       MEMORY_SERVICE_OIDC_ISSUER: http://${KEYCLOAK_HOSTNAME:-localhost}:${KEYCLOAK_HOSTNAME_PORT:-8081}/realms/memory-service
       MEMORY_SERVICE_OIDC_DISCOVERY_URL: http://keycloak:8080/realms/memory-service
+      # Every browser client that calls Memory Service must add the memory-service
+      # audience to its access tokens, or they are rejected here.
       MEMORY_SERVICE_OIDC_ALLOWED_AUDIENCES: memory-service
       MEMORY_SERVICE_OIDC_USER_ID_CLAIM: /preferred_username
       MEMORY_SERVICE_ROLES_ADMIN_OIDC_ROLE: admin
@@ -308,7 +310,9 @@ services:
         condition: service_healthy
 
   minio:
-    image: minio/minio:latest
+    # Upstream minio/minio and minio/mc are no longer pullable; pgsty/* are drop-in
+    # community forks.
+    image: pgsty/minio:latest
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
       MINIO_ROOT_USER: minioadmin
@@ -326,7 +330,8 @@ services:
       start_period: 10s
 
   minio-init:
-    image: minio/mc:latest
+    # pgsty/mc replaces the no-longer-pullable minio/mc and includes sh and mc.
+    image: pgsty/mc:latest
     entrypoint: >
       /bin/sh -c "
       until mc alias set minio http://minio:9000 minioadmin minioadmin; do
@@ -373,6 +378,10 @@ services:
 
   cognition-processor:
     profiles: ["cognition"]
+    # With no checkpoint this image logs "starting from beginning" but sends a null gRPC
+    # after_cursor, which SubscribeEvents treats as tail-only, so events published before
+    # the first start are not replayed. Durable replay from the oldest retained event
+    # requires after_cursor "start"; nothing here overrides the image default.
     image: quay.io/rigazilla/cognitive-memory:cd-latest
     ports:
       - "8090:8090"
@@ -424,7 +433,7 @@ services:
 
   clickhouse:
     profiles: ["langfuse"]
-    image: clickhouse/clickhouse-server:26.8.2.7
+    image: clickhouse/clickhouse-server:26.8.4.11
     environment:
       CLICKHOUSE_DB: default
       CLICKHOUSE_USER: clickhouse

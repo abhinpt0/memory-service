@@ -192,6 +192,12 @@ type AdminMemoryPage struct {
 	AfterCursor string
 }
 
+// EventSnapshotStore exposes the global memory scan required by
+// initial_state=current admin event subscriptions.
+type EventSnapshotStore interface {
+	AdminListEventSnapshotMemories(ctx context.Context, query AdminMemoryQuery) (AdminMemoryPage, error)
+}
+
 type AdminNamespaceQuery struct {
 	NamespacePrefix []string
 	Suffix          []string
@@ -738,9 +744,10 @@ type EpisodicStore interface {
 	// (namespace, key) that satisfies the archive filter, without loading or decrypting
 	// the value.  Returns ("", false, nil) if no matching row exists.
 	//
-	// For write-path authz (PutMemory, ArchiveMemory) pass ArchiveFilterExclude
-	// so only the active row is checked.  For read-path authz (GetMemory) pass the
-	// caller's requested archive filter so the row authorized matches the row read.
+	// For write-path authz (ArchiveMemory) pass ArchiveFilterExclude so only the
+	// active row is checked; PutMemory uses GetMemoryPredecessor instead. For
+	// read-path authz (GetMemory) pass the caller's requested archive filter so the
+	// row authorized matches the row read.
 	GetMemoryRowKind(ctx context.Context, namespace []string, key string, archived ArchiveFilter) (kind string, found bool, err error)
 
 	// GetMemoryPredecessor returns the active row identity used for optimistic
@@ -835,6 +842,26 @@ type EpisodicStore interface {
 
 	// AdminCountPendingIndexing returns the number of memories with indexed_at IS NULL.
 	AdminCountPendingIndexing(ctx context.Context) (int64, error)
+}
+
+// MemoryLifecycleChange contains only the payload-safe fields needed to emit
+// durable analytics events for background expiry and eviction work.
+type MemoryLifecycleChange struct {
+	ID         uuid.UUID
+	MemoryKind string
+	Revision   int64
+	CreatedAt  time.Time
+	ExpiresAt  *time.Time
+	ArchivedAt *time.Time
+}
+
+// BackgroundMemoryLifecycleStore returns the exact rows changed by a
+// maintenance pass so its outbox events can be appended in the same write
+// transaction.
+type BackgroundMemoryLifecycleStore interface {
+	ExpireMemoriesWithChanges(ctx context.Context) ([]MemoryLifecycleChange, error)
+	TombstoneDeletedMemoriesWithChanges(ctx context.Context, limit int) ([]MemoryLifecycleChange, error)
+	HardDeleteExpiredTombstonesWithChanges(ctx context.Context, olderThan time.Time, limit int) ([]MemoryLifecycleChange, error)
 }
 
 // Loader creates an EpisodicStore from context (config + encryption service injected via context).

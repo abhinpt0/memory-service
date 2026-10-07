@@ -47,6 +47,11 @@ func init() {
 			if err := client.Ping(ctx, nil); err != nil {
 				return nil, fmt.Errorf("failed to ping MongoDB: %w", err)
 			}
+			if cfg.OutboxEnabled {
+				if err := requireMongoTransactionTopology(ctx, client); err != nil {
+					return nil, err
+				}
+			}
 
 			dbName := "memory_service"
 			store := &MongoStore{
@@ -157,6 +162,8 @@ func (m *mongoMigrator) Migrate(ctx context.Context) error {
 		"outbox_events": {
 			{Keys: bson.D{{Key: "created_at", Value: 1}, {Key: "_id", Value: 1}}},
 			{Keys: bson.D{{Key: "kind", Value: 1}, {Key: "created_at", Value: 1}, {Key: "_id", Value: 1}}},
+			{Keys: bson.D{{Key: "event_seq", Value: 1}}, Options: options.Index().SetUnique(true).SetSparse(true).SetName("outbox_event_seq")},
+			{Keys: bson.D{{Key: "resume_token", Value: 1}}, Options: options.Index().SetSparse(true).SetName("outbox_resume_token")},
 		},
 		"tasks": {
 			{Keys: bson.D{{Key: "retry_at", Value: 1}, {Key: "created_at", Value: 1}}},
@@ -388,13 +395,14 @@ func mongoCleanupOrphanConversationAncestry(ctx context.Context, db *mongo.Datab
 
 // MongoStore implements MemoryStore using MongoDB.
 type MongoStore struct {
-	client                      *mongo.Client
-	db                          *mongo.Database
-	cfg                         *config.Config
-	enc                         *dataencryption.Service
-	entriesCache                registrycache.MemoryEntriesCache
-	maxBSONDocumentSizeOverride int
-	metadataPatchBeforeUpdate   func() // test-only synchronization hook; nil in production
+	client                       *mongo.Client
+	db                           *mongo.Database
+	cfg                          *config.Config
+	enc                          *dataencryption.Service
+	entriesCache                 registrycache.MemoryEntriesCache
+	maxBSONDocumentSizeOverride  int
+	metadataPatchBeforeUpdate    func()                    // test-only synchronization hook; nil in production
+	materializeBeforeTransaction func(bson.ObjectID) error // test-only fault-injection hook; nil in production
 }
 
 func (s *MongoStore) OutboxEnabled() bool {
@@ -405,8 +413,26 @@ func (s *MongoStore) InReadTx(ctx context.Context, fn func(context.Context) erro
 	return fn(txscope.WithIntent(ctx, txscope.IntentRead))
 }
 
+// InWriteTx only records write intent; it does not open a MongoDB session
+// transaction, so multi-write flows (conversationPatch, outbox appends) are not
+// atomic on Mongo (the episodic store opens its own session transactions).
+// See WORKAROUNDS.md.
 func (s *MongoStore) InWriteTx(ctx context.Context, fn func(context.Context) error) error {
-	return fn(txscope.WithIntent(ctx, txscope.IntentWrite))
+	if !s.OutboxEnabled() {
+		return fn(txscope.WithIntent(ctx, txscope.IntentWrite))
+	}
+	if session := mongo.SessionFromContext(ctx); session != nil && session.TransactionRunning() {
+		return fn(txscope.WithIntent(ctx, txscope.IntentWrite))
+	}
+	session, err := s.client.StartSession()
+	if err != nil {
+		return fmt.Errorf("start MongoDB write transaction: %w", err)
+	}
+	defer session.EndSession(ctx)
+	_, err = session.WithTransaction(ctx, func(txCtx context.Context) (any, error) {
+		return nil, fn(txscope.WithIntent(txCtx, txscope.IntentWrite))
+	})
+	return err
 }
 
 // ForceImport is a no-op variable that can be referenced to ensure this package's init() runs.
@@ -809,6 +835,10 @@ func (s *MongoStore) createConversationAncestryDoc(ctx context.Context, convID, 
 	return doc, nil
 }
 
+// claimConversationAncestry is the first step of the publish order: ancestry is
+// claimed before the conversation document is inserted last. A duplicate claim is
+// accepted only when its lineage matches; a matching orphan left by a failed
+// publish is deleted and the claim retried once.
 func (s *MongoStore) claimConversationAncestry(ctx context.Context, requested conversationAncestryDoc) (*registrystore.ConversationDetail, error) {
 	for attempt := 0; attempt < 2; attempt++ {
 		if _, err := s.conversationAncestry().InsertOne(ctx, requested); err == nil {
@@ -1625,6 +1655,8 @@ func (s *MongoStore) ListConversations(ctx context.Context, userID string, query
 		}
 	}
 
+	// Known gap: Mongo does not yet apply the query title filter; the Postgres
+	// and SQLite stores do.
 	pipeline := buildPublicConversationListPipeline(userID, anchorValue, anchorID, limit, mode, ancestry, archived, metadataFilters, sort)
 	opts := buildConversationAggregateOptions(metadataFilters)
 
@@ -3025,6 +3057,8 @@ func (s *MongoStore) SyncAgentEntry(ctx context.Context, userID string, conversa
 }
 
 // autoCreateConversation creates a conversation with a given ID for sync auto-creation.
+// Like normal root creation it must also write the ancestry self document, or
+// ancestry-backed context and entry-listing reads fail after the first sync.
 func (s *MongoStore) autoCreateConversation(ctx context.Context, userID string, clientID string, conversationID string, agentID *string) (convDoc, error) {
 	now := time.Now()
 	groupID := uuid.New().String()
@@ -4299,6 +4333,8 @@ func (s *MongoStore) CreateTask(ctx context.Context, taskType string, taskBody m
 		"processing_at": nil,
 		"retry_count":   0,
 	}
+	// Unnamed tasks must omit task_name entirely: the sparse unique index still
+	// indexes explicit nulls, so a second null-named task would collide.
 	if taskName != nil {
 		doc["task_name"] = *taskName
 		res, err := s.db.Collection("tasks").UpdateOne(

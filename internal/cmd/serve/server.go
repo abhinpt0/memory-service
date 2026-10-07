@@ -184,7 +184,7 @@ func buildInboundPropagator() propagation.TextMapPropagator {
 }
 
 // buildOutboundPropagator constructs the propagator used by outbound clients
-// (OpenAI, Qdrant, Infinispan, episodicQdrant, attachment source-URL).
+// (OpenAI, Qdrant, Infinispan, episodicQdrant, attachment source-URL, Prometheus stats).
 // It honours OTEL_PROPAGATORS (via the same autoprop base as inbound) and strips
 // the baggage key so internal baggage is never forwarded to third-party services.
 // Inject is gated by ParticipatingPropagator so untraced requests inject nothing.
@@ -303,11 +303,11 @@ func BuildServer(ctx context.Context, cfg *config.Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	store, err := storeLoader(ctx)
+	primaryStore, err := storeLoader(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize store: %w", err)
 	}
-	store = storemetrics.Wrap(store)
+	store := storemetrics.Wrap(primaryStore)
 
 	// Set up gin
 	gin.SetMode(gin.ReleaseMode)
@@ -393,11 +393,11 @@ func BuildServer(ctx context.Context, cfg *config.Config) (*Server, error) {
 	builtServer.TokenResolver = resolver
 
 	// Initialize and mount episodic memory store + routes.
-	episodicStore, episodicPolicy, err := initEpisodic(ctx, cfg)
+	episodicStore, episodicPolicy, err := initEpisodic(ctx, cfg, primaryStore)
 	if err != nil {
 		return nil, err
 	}
-	episodicTTL := service.NewEpisodicTTLService(episodicStore, cfg.EpisodicTTLInterval, cfg.EpisodicEvictionBatchSize, cfg.EpisodicTombstoneRetention)
+	episodicTTL := service.NewEpisodicTTLService(episodicStore, store, eventBus, cfg.EpisodicTTLInterval, cfg.EpisodicEvictionBatchSize, cfg.EpisodicTombstoneRetention)
 	episodicIdx := service.NewEpisodicIndexer(episodicStore, embedder, cfg.EpisodicIndexingInterval, cfg.EpisodicIndexingBatchSize)
 
 	attachSigningKeys, signingKeysErr := encSvc.AttachmentSigningKeys(ctx)
@@ -445,7 +445,7 @@ func BuildServer(ctx context.Context, cfg *config.Config) (*Server, error) {
 	// Set up knowledge clustering (if enabled). Clustering runs inside the
 	// BackgroundIndexer after each embedding batch — no separate goroutine.
 	if cfg.KnowledgeClusteringEnabled && cfg.DatastoreType == "postgres" && cfg.DBURL != "" && cfg.VectorType == "pgvector" && vectorStore != nil && vectorStore.IsEnabled() {
-		knowledgeStore, err := knowledge.OpenPostgresKnowledgeStore(cfg.DBURL)
+		knowledgeStore, err := knowledge.OpenPostgresKnowledgeStore(ctx, cfg.DBURL)
 		if err != nil {
 			log.Warn("Knowledge clustering: failed to open store", "err", err)
 		} else {
@@ -505,16 +505,20 @@ func BuildServer(ctx context.Context, cfg *config.Config) (*Server, error) {
 	pb.RegisterOwnershipTransfersServiceServer(grpcServer, &grpcserver.TransfersServer{Store: store})
 	pb.RegisterSearchServiceServer(grpcServer, &grpcserver.SearchServer{Store: store, Config: cfg, Embedder: embedder, VectorStore: vectorStore})
 	pb.RegisterMemoriesServiceServer(grpcServer, &grpcserver.MemoriesServer{
-		Store:    episodicStore,
-		Policy:   episodicPolicy,
-		Config:   cfg,
-		Embedder: embedder,
+		Store:       episodicStore,
+		Policy:      episodicPolicy,
+		Config:      cfg,
+		Embedder:    embedder,
+		MemoryStore: store,
+		EventBus:    eventBus,
 	})
 	pb.RegisterAdminMemoriesServiceServer(grpcServer, &grpcserver.AdminMemoriesServer{
-		Store:    episodicStore,
-		Policy:   episodicPolicy,
-		Config:   cfg,
-		Embedder: embedder,
+		Store:       episodicStore,
+		Policy:      episodicPolicy,
+		Config:      cfg,
+		Embedder:    embedder,
+		MemoryStore: store,
+		EventBus:    eventBus,
 	})
 	pb.RegisterAttachmentsServiceServer(grpcServer, &grpcserver.AttachmentsServer{
 		Store:       store,
@@ -536,6 +540,7 @@ func BuildServer(ctx context.Context, cfg *config.Config) (*Server, error) {
 		Config:         cfg,
 		UserIDAsserter: userIDAsserter,
 		RateLimiter:    rateLimiter,
+		EpisodicStore:  episodicStore,
 	})
 	pb.RegisterAdminCheckpointServiceServer(grpcServer, &grpcserver.AdminCheckpointServer{Store: store})
 	pb.RegisterAdminMemoryKindServiceServer(grpcServer, &grpcserver.AdminMemoryKindServer{
@@ -646,6 +651,9 @@ func newConfiguredRouter(
 	opts routerOptions,
 ) (*gin.Engine, error) {
 	router := newGinRouter()
+	// gin.New() trusts every proxy until SetTrustedProxies is called, so both branches
+	// must call it even with no CIDRs configured; otherwise ClientIP honors spoofed
+	// X-Forwarded-For/X-Real-IP headers.
 	if opts.includePublic {
 		trustedProxies, err := parseTrustedProxyCIDRs(opts.trustedProxies)
 		if err != nil {
@@ -742,13 +750,24 @@ func loadManagementRoutes(router *gin.Engine) error {
 
 // initEpisodic initializes the episodic memory store and OPA policy engine.
 // Returns nil, nil, nil when the episodic store is not available for the configured datastore.
-func initEpisodic(ctx context.Context, cfg *config.Config) (registryepisodic.EpisodicStore, *episodic.PolicyEngine, error) {
-	loader, err := registryepisodic.Select(cfg.DatastoreType)
-	if err != nil {
-		log.Warn("Episodic store not available for datastore", "datastore", cfg.DatastoreType, "err", err)
-		return nil, nil, nil
+func initEpisodic(ctx context.Context, cfg *config.Config, primaryStore registrystore.MemoryStore) (registryepisodic.EpisodicStore, *episodic.PolicyEngine, error) {
+	type colocatedEpisodicStoreProvider interface {
+		NewEpisodicStore(context.Context) (registryepisodic.EpisodicStore, error)
 	}
-	eStore, err := loader(ctx)
+
+	var eStore registryepisodic.EpisodicStore
+	var err error
+	if provider, ok := primaryStore.(colocatedEpisodicStoreProvider); ok {
+		eStore, err = provider.NewEpisodicStore(ctx)
+	} else {
+		var loader registryepisodic.Loader
+		loader, err = registryepisodic.Select(cfg.DatastoreType)
+		if err != nil {
+			log.Warn("Episodic store not available for datastore", "datastore", cfg.DatastoreType, "err", err)
+			return nil, nil, nil
+		}
+		eStore, err = loader(ctx)
+	}
 	if err != nil {
 		log.Warn("Failed to initialize episodic store", "err", err)
 		return nil, nil, nil

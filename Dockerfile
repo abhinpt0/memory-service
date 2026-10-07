@@ -1,5 +1,5 @@
 # Build developer frontend
-FROM node:26-alpine@sha256:2d984a15c9b54fd0aeb608b8e0d0d83529eb34d2966db27a1fb4f1edc3d298a3 AS frontend-builder
+FROM node:26.8.2-alpine@sha256:ef24c5053d50fdc3e4e56eb4e7ddb7861874ab0fdc797046ba897581deb8e868 AS frontend-builder
 WORKDIR /build
 COPY frontends/developer/package*.json ./
 RUN npm ci
@@ -16,9 +16,12 @@ RUN go mod download
 COPY . .
 ARG GO_BUILD_TAGS="sqlite_fts5 sqlite_json"
 ARG VERSION=""
+# The build context may lack usable .git metadata (git worktrees, trimmed contexts),
+# so VCS stamping stays disabled; otherwise go build fails with "error obtaining VCS status".
 RUN CGO_ENABLED=1 go build -buildvcs=false -tags "${GO_BUILD_TAGS}" -ldflags "-X main.Version=${VERSION}" -o /memory-service .
 
-# Runtime image
+# Runtime image. Keep it glibc-based: sqlite-vec does not compile cleanly against musl
+# without extra CFLAGS shims; the static musl build lives in Dockerfile.portable.
 FROM registry.access.redhat.com/ubi9/ubi-minimal:latest@sha256:7fbeae18dc9476399f565e68255f602a3374ea8614ba3d14843565131a13ff93
 RUN microdnf install -y --nodocs \
     curl-minimal \
@@ -33,6 +36,7 @@ WORKDIR /app
 COPY --from=builder --chown=10001:10001 /memory-service /memory-service
 COPY --from=frontend-builder --chown=10001:10001 /build/dist /app/memory-service-developer
 COPY --chown=10001:10001 deploy/episodic-policies/ /etc/memory-service/policies/
+COPY --chown=10001:10001 deploy/clickhouse/projections/ /etc/memory-service/clickhouse/projections/
 ENV MEMORY_SERVICE_DEVELOPER_FRONTEND_DIR=/app/memory-service-developer
 ENV MEMORY_SERVICE_POLICY_IMPORT_PATH=/etc/memory-service/policies/
 ENV MEMORY_SERVICE_TEMP_DIR=/var/lib/memory-service/tmp

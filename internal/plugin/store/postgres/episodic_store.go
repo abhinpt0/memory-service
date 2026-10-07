@@ -16,11 +16,12 @@ import (
 	"github.com/chirino/memory-service/internal/episodic"
 	episodicqdrant "github.com/chirino/memory-service/internal/plugin/store/episodicqdrant"
 	registryepisodic "github.com/chirino/memory-service/internal/registry/episodic"
-	"github.com/chirino/memory-service/internal/tracing"
+	internaltracing "github.com/chirino/memory-service/internal/tracing"
 	"github.com/google/uuid"
 	pgvec "github.com/pgvector/pgvector-go"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"gorm.io/plugin/opentelemetry/tracing"
 )
 
 func init() {
@@ -31,6 +32,14 @@ func init() {
 			db, err := gorm.Open(postgres.Open(cfg.DBURL), &gorm.Config{})
 			if err != nil {
 				return nil, fmt.Errorf("episodic store: failed to connect to postgres: %w", err)
+			}
+			tp := internaltracing.ProviderFromContextOrNoop(ctx)
+			if err := db.Use(tracing.NewPlugin(
+				tracing.WithTracerProvider(tp),
+				tracing.WithoutMetrics(),
+				tracing.WithoutQueryVariables(),
+			)); err != nil {
+				return nil, fmt.Errorf("episodic store: register otelgorm plugin: %w", err)
 			}
 			sqlDB, err := db.DB()
 			if err != nil {
@@ -45,7 +54,7 @@ func init() {
 			}
 			store := &postgresEpisodicStore{db: db, s: ps}
 			if strings.EqualFold(strings.TrimSpace(cfg.VectorType), "qdrant") {
-				client, qErr := episodicqdrant.New(cfg, tracing.ProviderFromContext(ctx), tracing.OutboundPropagatorFromContext(ctx))
+				client, qErr := episodicqdrant.New(cfg, internaltracing.ProviderFromContext(ctx), internaltracing.OutboundPropagatorFromContext(ctx))
 				if qErr != nil {
 					log.Warn("Episodic qdrant unavailable; falling back to local vector backend", "err", qErr)
 				} else {
@@ -880,18 +889,25 @@ func (e *postgresEpisodicStore) GetMemoriesByIDs(ctx context.Context, ids []uuid
 
 // ExpireMemories archives memories whose TTL has elapsed.
 func (e *postgresEpisodicStore) ExpireMemories(ctx context.Context) (int64, error) {
+	changes, err := e.ExpireMemoriesWithChanges(ctx)
+	return int64(len(changes)), err
+}
+
+func (e *postgresEpisodicStore) ExpireMemoriesWithChanges(ctx context.Context) ([]registryepisodic.MemoryLifecycleChange, error) {
 	db, dbErr := e.s.writeDBFor(ctx, "expire memories")
 	if dbErr != nil {
-		return 0, dbErr
+		return nil, dbErr
 	}
 	deletedReason := int16(2)
-	result := db.Exec(`
+	var changes []registryepisodic.MemoryLifecycleChange
+	result := db.Raw(`
 		UPDATE memories
 		SET archived_at = NOW(), indexed_at = NULL, deleted_reason = ?, revision = revision + 1
-		WHERE expires_at <= NOW() AND archived_at IS NULL`,
+		WHERE expires_at <= NOW() AND archived_at IS NULL
+		RETURNING id, memory_kind, revision, created_at, expires_at, archived_at`,
 		deletedReason,
-	)
-	return result.RowsAffected, result.Error
+	).Scan(&changes)
+	return changes, result.Error
 }
 
 // HardDeleteEvictableUpdates hard-deletes rows with deleted_reason=0 (superseded by update)
@@ -915,11 +931,17 @@ func (e *postgresEpisodicStore) HardDeleteEvictableUpdates(ctx context.Context, 
 // TombstoneDeletedMemories clears encrypted data from rows with deleted_reason IN (1,2)
 // that have been re-indexed (indexed_at IS NOT NULL). Returns the number tombstoned.
 func (e *postgresEpisodicStore) TombstoneDeletedMemories(ctx context.Context, limit int) (int64, error) {
+	changes, err := e.TombstoneDeletedMemoriesWithChanges(ctx, limit)
+	return int64(len(changes)), err
+}
+
+func (e *postgresEpisodicStore) TombstoneDeletedMemoriesWithChanges(ctx context.Context, limit int) ([]registryepisodic.MemoryLifecycleChange, error) {
 	db, dbErr := e.s.writeDBFor(ctx, "tombstone deleted memories")
 	if dbErr != nil {
-		return 0, dbErr
+		return nil, dbErr
 	}
-	result := db.Exec(`
+	var changes []registryepisodic.MemoryLifecycleChange
+	result := db.Raw(`
 		UPDATE memories
 		SET value_encrypted = NULL,
 		    policy_attributes = '{}'::jsonb,
@@ -930,26 +952,34 @@ func (e *postgresEpisodicStore) TombstoneDeletedMemories(ctx context.Context, li
 			WHERE deleted_reason IN (1, 2) AND indexed_at IS NOT NULL AND value_encrypted IS NOT NULL
 			ORDER BY archived_at ASC
 			LIMIT ?
-		)`, limit)
-	return result.RowsAffected, result.Error
+		)
+		RETURNING id, memory_kind, revision, created_at, expires_at, archived_at`, limit).Scan(&changes)
+	return changes, result.Error
 }
 
 // HardDeleteExpiredTombstones hard-deletes tombstone rows older than olderThan.
 // Returns the number deleted.
 func (e *postgresEpisodicStore) HardDeleteExpiredTombstones(ctx context.Context, olderThan time.Time, limit int) (int64, error) {
+	changes, err := e.HardDeleteExpiredTombstonesWithChanges(ctx, olderThan, limit)
+	return int64(len(changes)), err
+}
+
+func (e *postgresEpisodicStore) HardDeleteExpiredTombstonesWithChanges(ctx context.Context, olderThan time.Time, limit int) ([]registryepisodic.MemoryLifecycleChange, error) {
 	db, dbErr := e.s.writeDBFor(ctx, "hard delete expired tombstones")
 	if dbErr != nil {
-		return 0, dbErr
+		return nil, dbErr
 	}
-	result := db.Exec(`
+	var changes []registryepisodic.MemoryLifecycleChange
+	result := db.Raw(`
 		DELETE FROM memories
 		WHERE id IN (
 			SELECT id FROM memories
 			WHERE deleted_reason IN (1, 2) AND value_encrypted IS NULL AND archived_at <= ?
 			ORDER BY archived_at ASC
 			LIMIT ?
-		)`, olderThan, limit)
-	return result.RowsAffected, result.Error
+		)
+		RETURNING id, memory_kind, revision, created_at, expires_at, archived_at`, olderThan, limit).Scan(&changes)
+	return changes, result.Error
 }
 
 // ListMemoryEvents returns a paginated, time-ordered stream of memory lifecycle events.
@@ -1164,6 +1194,10 @@ func (e *postgresEpisodicStore) ListMemoryEvents(ctx context.Context, req regist
 
 // AdminGetMemoryByID retrieves any memory by UUID.
 func (e *postgresEpisodicStore) AdminGetMemoryByID(ctx context.Context, memoryID uuid.UUID) (*registryepisodic.MemoryItem, error) {
+	return e.adminGetMemoryByID(ctx, memoryID)
+}
+
+func (e *postgresEpisodicStore) adminGetMemoryByID(ctx context.Context, memoryID uuid.UUID) (*registryepisodic.MemoryItem, error) {
 	var row memoryRow
 	result := e.s.dbFor(ctx).Where("id = ?", memoryID).Limit(1).Find(&row)
 	if result.Error != nil {
@@ -1197,6 +1231,10 @@ func (e *postgresEpisodicStore) AdminCountPendingIndexing(ctx context.Context) (
 
 // AdminListMemories retrieves latest memory rows across users without policy injection.
 func (e *postgresEpisodicStore) AdminListMemories(ctx context.Context, query registryepisodic.AdminMemoryQuery) (registryepisodic.AdminMemoryPage, error) {
+	return e.AdminListEventSnapshotMemories(ctx, query)
+}
+
+func (e *postgresEpisodicStore) AdminListEventSnapshotMemories(ctx context.Context, query registryepisodic.AdminMemoryQuery) (registryepisodic.AdminMemoryPage, error) {
 	limit := query.Limit
 	if limit <= 0 {
 		limit = 50

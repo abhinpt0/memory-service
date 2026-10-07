@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// REST-only outbox coverage; see TestFeaturesPgOutbox for the outbox runner matrix.
 func TestFeaturesMongoOutbox(t *testing.T) {
 	var missing []string
 	if !buildcaps.MongoDB {
@@ -65,7 +66,9 @@ func TestFeaturesMongoOutbox(t *testing.T) {
 
 	featureFiles := []string{
 		filepath.Join("testdata", "features", "sse-events-rest.feature"),
+		filepath.Join("testdata", "features", "sse-events-replay-rest.feature"),
 		filepath.Join("testdata", "features-mongo", "entries-seq-retry-archive-rest.feature"),
+		filepath.Join("testdata", "features-mongo", "memory-outbox-transactions.feature"),
 	}
 	runBDDFeatures(t, "mongo-outbox", featureFiles, apiURL, grpcAddr, &cfg, &MongoTestDB{DBURL: mongoURL}, map[string]interface{}{
 		"mockPrometheus": prom,

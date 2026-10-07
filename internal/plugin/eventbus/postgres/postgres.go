@@ -109,14 +109,16 @@ type postgresBus struct {
 }
 
 type wireEvent struct {
-	Event               string    `json:"event"`
-	Kind                string    `json:"kind"`
-	Data                any       `json:"data"`
-	ConversationGroupID uuid.UUID `json:"conversationGroupId,omitempty"`
-	UserIDs             []string  `json:"userIds,omitempty"`
-	Broadcast           bool      `json:"broadcast,omitempty"`
-	AdminOnly           bool      `json:"adminOnly,omitempty"`
-	Internal            bool      `json:"internal,omitempty"`
+	Event               string     `json:"event"`
+	Kind                string     `json:"kind"`
+	Data                any        `json:"data"`
+	OutboxCursor        string     `json:"cursor,omitempty"`
+	OccurredAt          *time.Time `json:"occurredAt,omitempty"`
+	ConversationGroupID uuid.UUID  `json:"conversationGroupId,omitempty"`
+	UserIDs             []string   `json:"userIds,omitempty"`
+	Broadcast           bool       `json:"broadcast,omitempty"`
+	AdminOnly           bool       `json:"adminOnly,omitempty"`
+	Internal            bool       `json:"internal,omitempty"`
 }
 
 func toWire(e registryeventbus.Event) wireEvent {
@@ -124,6 +126,8 @@ func toWire(e registryeventbus.Event) wireEvent {
 		Event:               e.Event,
 		Kind:                e.Kind,
 		Data:                e.Data,
+		OutboxCursor:        e.OutboxCursor,
+		OccurredAt:          e.OccurredAt,
 		ConversationGroupID: e.ConversationGroupID,
 		UserIDs:             e.UserIDs,
 		Broadcast:           e.Broadcast,
@@ -137,6 +141,8 @@ func fromWire(w wireEvent) registryeventbus.Event {
 		Event:               w.Event,
 		Kind:                w.Kind,
 		Data:                w.Data,
+		OutboxCursor:        w.OutboxCursor,
+		OccurredAt:          w.OccurredAt,
 		ConversationGroupID: w.ConversationGroupID,
 		UserIDs:             w.UserIDs,
 		Broadcast:           w.Broadcast,
@@ -147,6 +153,9 @@ func fromWire(w wireEvent) registryeventbus.Event {
 
 // Publish queues an event for cross-node delivery via pg_notify.
 func (p *postgresBus) Publish(ctx context.Context, event registryeventbus.Event) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	select {
 	case p.outbound <- event:
 	default:
@@ -159,7 +168,17 @@ func (p *postgresBus) Publish(ctx context.Context, event registryeventbus.Event)
 	return nil
 }
 
+func (p *postgresBus) PublishDurable(ctx context.Context, event registryeventbus.Event) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return p.publishBatch(ctx, []registryeventbus.Event{event})
+}
+
 // Subscribe delegates to the local bus and tracks user-scoped interest.
+// It must not return until the refreshed LISTEN channel set is active
+// (waitForSubscription); otherwise the caller races a stale broadcast-only
+// LISTEN loop and can miss the recovery invalidation.
 func (p *postgresBus) Subscribe(ctx context.Context, userID string) (<-chan registryeventbus.Event, error) {
 	ch, err := p.local.Subscribe(ctx, userID)
 	if err != nil {
@@ -384,7 +403,20 @@ func (p *postgresBus) runSubscription(ctx context.Context, channels []string, on
 						log.Warn("Failed to unmarshal event from pg_notify", "err", err)
 						continue
 					}
-					_ = p.local.Publish(ctx, fromWire(w))
+					event := fromWire(w)
+					event.UserOnly = notification.Channel != pgAdminChannel && notification.Channel != pgBroadcastChannel
+					if event.UserOnly {
+						for _, userID := range event.UserIDs {
+							if postgresUserChannel(userID) == notification.Channel {
+								event.UserIDs = []string{userID}
+								break
+							}
+						}
+						if len(event.UserIDs) != 1 || postgresUserChannel(event.UserIDs[0]) != notification.Channel {
+							continue
+						}
+					}
+					_ = p.local.Publish(ctx, event)
 				}
 			}
 		})
@@ -441,7 +473,10 @@ func postgresEventForChannel(event registryeventbus.Event, channel string) regis
 
 func postgresUserChannel(userID string) string {
 	sum := sha1.Sum([]byte(userID))
-	return "memory_service_events_user_" + hex.EncodeToString(sum[:])
+	// BACKWARD COMPATIBILITY: remove in a future breaking release.
+	// Match the 63-byte identifier used by legacy LISTEN subscribers.
+	const prefix = "memory_service_events_user_"
+	return prefix + hex.EncodeToString(sum[:])[:63-len(prefix)]
 }
 
 func (p *postgresBus) subscriptionChannels() []string {
