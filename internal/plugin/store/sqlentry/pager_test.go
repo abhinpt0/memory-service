@@ -68,6 +68,7 @@ func setupPagerTestEntries(t *testing.T) (*gorm.DB, []model.Entry) {
 	require.NoError(t, err)
 	require.NoError(t, db.Exec(`
 		CREATE TABLE entries (
+			append_batch BLOB,
 			id TEXT NOT NULL,
 			conversation_id TEXT NOT NULL,
 			conversation_group_id TEXT NOT NULL,
