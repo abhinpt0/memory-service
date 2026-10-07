@@ -1903,13 +1903,8 @@ func (s *EntriesServer) appendEntries(ctx context.Context, conversationID string
 		AgentID:  agentIDPtr,
 		Epoch:    epoch,
 	}
-	// Single-entry sequenced appends attempt the normal insert first; only after a
-	// duplicate-sequence conflict (or NotFound when the request carries an archived
-	// patch) do they load the stored entry at that sequence and return it when every
-	// persisted field matches, even if it is no longer the tail. Don't add a
-	// read-before-write or current-tail requirement, and don't extend this to
-	// multi-entry batches.
-	retryEligible := len(appendEntries) == 1 && appendEntries[0].store.Seq != nil
+	// Insert first, then recover through the first conversation-scoped sequence.
+	retryEligible := retryRequest.Anchor() >= 0
 
 	var eventsToPublish []registryeventbus.Event
 	var retryCreatedAttachmentIDs []uuid.UUID
@@ -2035,9 +2030,6 @@ func (s *EntriesServer) appendEntries(ctx context.Context, conversationID string
 			originalErr := err
 			eventsToPublish = nil
 			entries, err = withMemoryWrite(ctx, s.Store, func(txCtx context.Context) ([]model.Entry, error) {
-				if cleanupErr := cleanupGRPCRetryAttachments(txCtx, s.Store, userID, retryCreatedAttachmentIDs); cleanupErr != nil {
-					return nil, cleanupErr
-				}
 				normalizedRequest, normalizeErr := normalizeGRPCAppendRetry(txCtx, s.Store, userID, convID, retryRequest)
 				if normalizeErr != nil {
 					return nil, normalizeErr
@@ -2047,15 +2039,19 @@ func (s *EntriesServer) appendEntries(ctx context.Context, conversationID string
 					return nil, matchErr
 				}
 				if !match.Exact {
+					if cleanupErr := cleanupGRPCRetryAttachments(txCtx, s.Store, userID, retryCreatedAttachmentIDs); cleanupErr != nil {
+						return nil, cleanupErr
+					}
+
 					if match.AnyExisting {
 						return nil, registrystore.NewDuplicateSequenceConflict()
 					}
 					return nil, originalErr
 				}
-				// Exact retries skip stale title and metadata patches. An explicit
-				// archived=false still applies when the conversation was archived
-				// after the original append.
-				if validatedPatch.needsUnarchiveBeforeWrite() {
+				// Completed batch retries skip append-time patches. A newly recovered
+				// batch still needs its original unarchive; single-entry retries
+				// continue to honor explicit archived=false on later archives.
+				if (len(retryRequest.Entries) == 1 || len(match.Created) > 0) && validatedPatch.needsUnarchiveBeforeWrite() {
 					conv, convErr := s.Store.GetConversation(txCtx, userID, convID)
 					if convErr != nil {
 						return nil, convErr
@@ -2080,6 +2076,16 @@ func (s *EntriesServer) appendEntries(ctx context.Context, conversationID string
 					if repairErr := registrystore.RepairStoredEntryAttachmentLinks(txCtx, s.Store, userID, storedEntry); repairErr != nil {
 						return nil, repairErr
 					}
+				}
+				if cleanupErr := cleanupGRPCRetryAttachments(txCtx, s.Store, userID, retryCreatedAttachmentIDs); cleanupErr != nil {
+					return nil, cleanupErr
+				}
+				if s.EventBus != nil && len(match.Created) > 0 {
+					createdEvents, eventErr := s.entryEventsForCreatedEntries(txCtx, convID, match.Created, false, grpcPatchResult{}, true)
+					if eventErr != nil {
+						return nil, eventErr
+					}
+					eventsToPublish = append(eventsToPublish, createdEvents...)
 				}
 				return match.Entries, nil
 			})
@@ -2521,6 +2527,18 @@ func normalizeGRPCAppendRetry(ctx context.Context, store registrystore.MemorySto
 
 func cleanupGRPCRetryAttachments(ctx context.Context, store registrystore.MemoryStore, userID string, attachmentIDs []uuid.UUID) error {
 	for _, attachmentID := range attachmentIDs {
+		// Recovery may have linked this attempt's clones to reserved positions.
+		attachment, err := store.GetAttachment(ctx, userID, "", attachmentID)
+		if err != nil {
+			var notFound *registrystore.NotFoundError
+			if errors.As(err, &notFound) {
+				continue
+			}
+			return err
+		}
+		if attachment.EntryID != nil {
+			continue
+		}
 		if err := store.DeleteAttachment(ctx, userID, "", attachmentID); err != nil {
 			var notFound *registrystore.NotFoundError
 			if errors.As(err, &notFound) {

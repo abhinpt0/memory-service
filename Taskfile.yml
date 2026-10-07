@@ -175,6 +175,8 @@ tasks:
         CGO_ENABLED=1 go run gotest.tools/gotestsum --format {{.GOTESTSUM_FMT | default .DEFAULT_GOTESTSUM_FMT}} -- -race -tags='sqlite_fts5 auth_testfixtures' -run 'TestFeaturesSQLitePolicy$' ./internal/bdd/ {{.CLI_ARGS}}
       - |
         CGO_ENABLED=1 go run gotest.tools/gotestsum --format {{.GOTESTSUM_FMT | default .DEFAULT_GOTESTSUM_FMT}} -- -race -tags='sqlite_fts5 auth_testfixtures' -run 'TestSessionToolContractFixtures$' ./internal/cmd/mcp/ {{.CLI_ARGS}}
+      - |
+        CGO_ENABLED=1 go run gotest.tools/gotestsum --format {{.GOTESTSUM_FMT | default .DEFAULT_GOTESTSUM_FMT}} -- -race -tags='sqlite_fts5 auth_testfixtures' -run 'TestFeaturesOrderedAppend$' ./internal/bdd/ {{.CLI_ARGS}}
 
   test:bdd:sqlite:
     desc: Run issue 476 SQLite metadata BDD scenarios

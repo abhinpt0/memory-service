@@ -383,13 +383,8 @@ func appendEntry(c *gin.Context, store registrystore.MemoryStore, eventBus regis
 		AgentID:  agentID,
 		Epoch:    req.Epoch,
 	}
-	// Single-entry sequenced appends attempt the normal insert first; only after a
-	// duplicate-sequence conflict (or NotFound when the request carries an archived
-	// patch) do they load the stored entry at that sequence and return it when every
-	// persisted field matches, even if it is no longer the tail. Don't add a
-	// read-before-write or current-tail requirement, and don't extend this to
-	// multi-entry batches.
-	retryEligible := len(entries) == 1 && entries[0].Seq != nil
+	// Insert first, then recover through the first conversation-scoped sequence.
+	retryEligible := retryRequest.Anchor() >= 0
 	writeErr := routetx.MemoryWrite(c, store, func(ctx context.Context) error {
 		// Check if conversation exists before append — if not, AppendEntries will auto-create it
 		// and we need to publish a conversation/created event. Must be inside the transaction
@@ -592,9 +587,6 @@ func appendEntry(c *gin.Context, store registrystore.MemoryStore, eventBus regis
 			originalErr := writeErr
 			eventsToPublish = nil
 			recoveryErr := routetx.MemoryWrite(c, store, func(ctx context.Context) error {
-				if err := cleanupRetryAttachments(ctx, store, userID, retryCreatedAttachmentIDs); err != nil {
-					return err
-				}
 				normalizedRequest, err := normalizeRESTAppendRetry(ctx, store, userID, convID, retryRequest)
 				if err != nil {
 					return err
@@ -604,17 +596,19 @@ func appendEntry(c *gin.Context, store registrystore.MemoryStore, eventBus regis
 					return err
 				}
 				if !match.Exact {
+					if err := cleanupRetryAttachments(ctx, store, userID, retryCreatedAttachmentIDs); err != nil {
+						return err
+					}
+
 					if match.AnyExisting {
 						return registrystore.NewDuplicateSequenceConflict()
 					}
 					return originalErr
 				}
-				// Exact retries normally skip all append-time patches so stale title or
-				// metadata cannot overwrite newer conversation state. Explicit
-				// archived=false is the exception: it describes the caller's desired
-				// current state and must unarchive a conversation archived after the
-				// original append.
-				if validatedPatch.needsUnarchiveBeforeWrite() {
+				// Completed batch retries skip append-time patches. A newly recovered
+				// batch still needs its original unarchive; single-entry retries
+				// continue to honor explicit archived=false on later archives.
+				if (len(retryRequest.Entries) == 1 || len(match.Created) > 0) && validatedPatch.needsUnarchiveBeforeWrite() {
 					conv, err := store.GetConversation(ctx, userID, convID)
 					if err != nil {
 						return err
@@ -638,6 +632,24 @@ func appendEntry(c *gin.Context, store registrystore.MemoryStore, eventBus regis
 				for _, storedEntry := range match.Entries {
 					if err := registrystore.RepairStoredEntryAttachmentLinks(ctx, store, userID, storedEntry); err != nil {
 						return err
+					}
+				}
+				if err := cleanupRetryAttachments(ctx, store, userID, retryCreatedAttachmentIDs); err != nil {
+					return err
+				}
+				if eventBus != nil && len(match.Created) > 0 {
+					events := make([]registryeventbus.Event, 0, len(match.Created))
+					for _, entry := range match.Created {
+						events = append(events, registryeventbus.Event{Event: "created", Kind: "entry", Data: eventstream.EntryEventData(entry, entry.ConversationGroupID), ConversationGroupID: entry.ConversationGroupID})
+					}
+					appended, used, err := eventstream.AppendOutboxEvents(ctx, store, events...)
+					if err != nil {
+						return err
+					}
+					if used {
+						eventsToPublish = append(eventsToPublish, appended...)
+					} else {
+						eventsToPublish = append(eventsToPublish, events...)
 					}
 				}
 				result = match.Entries
@@ -989,6 +1001,18 @@ func normalizeRESTAppendRetry(ctx context.Context, store registrystore.MemorySto
 
 func cleanupRetryAttachments(ctx context.Context, store registrystore.MemoryStore, userID string, attachmentIDs []uuid.UUID) error {
 	for _, attachmentID := range attachmentIDs {
+		// Recovery may have linked this attempt's clones to reserved positions.
+		attachment, err := store.GetAttachment(ctx, userID, "", attachmentID)
+		if err != nil {
+			var notFound *registrystore.NotFoundError
+			if errors.As(err, &notFound) {
+				continue
+			}
+			return err
+		}
+		if attachment.EntryID != nil {
+			continue
+		}
 		if err := store.DeleteAttachment(ctx, userID, "", attachmentID); err != nil {
 			var notFound *registrystore.NotFoundError
 			if errors.As(err, &notFound) {

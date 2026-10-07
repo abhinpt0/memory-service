@@ -429,6 +429,9 @@ type MemoryStore interface {
 	// Entries
 	GetEntries(ctx context.Context, userID string, conversationID string, query EntryListQuery) (*PagedEntries, error)
 	GetEntriesBySequence(ctx context.Context, userID string, conversationID string, sequences []uint32) ([]model.Entry, error)
+	// RecoverAppendBatch loads the reserved positions and completes missing ones
+	// on non-atomic stores. The anchor comes from GetEntriesBySequence in this scope.
+	RecoverAppendBatch(ctx context.Context, anchor model.Entry, request SequencedAppendRequest) (SequencedAppendMatch, error)
 	AppendEntries(ctx context.Context, userID string, conversationID string, entries []CreateEntryRequest, clientID *string, agentID *string, epoch *int64) ([]model.Entry, error)
 	// AppendEntriesBeforeUnarchive permits insertion while the conversation is archived.
 	// Callers must derive this authority from a validated archived=false patch and must

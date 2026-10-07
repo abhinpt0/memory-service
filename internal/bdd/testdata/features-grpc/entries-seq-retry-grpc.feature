@@ -429,3 +429,48 @@ Feature: Sequenced entry retry gRPC API
     """
     Then the gRPC response should not have an error
     And the gRPC response field "id" should be "${archivedEntryId}"
+
+  Scenario: Mixed batch retries return original positions and reject shorter batches
+    When I send gRPC request "EntriesService/AppendEntries" with body:
+    """
+    conversation_id: "${conversationId}"
+    entries { channel: HISTORY content_type: "history" content { struct_value { fields { key: "role" value { string_value: "USER" } } fields { key: "text" value { string_value: "prefix" } } } } }
+    entries { channel: JOURNAL content_type: "test.v1" seq: 210 content { string_value: "anchor" } }
+    entries { channel: HISTORY content_type: "history" content { struct_value { fields { key: "role" value { string_value: "USER" } } fields { key: "text" value { string_value: "suffix" } } } } }
+    conversation_patch { title: "Original" }
+    """
+    Then the gRPC response should not have an error
+    And set "prefixId" to the gRPC response field "entries[0].id"
+    And set "anchorId" to the gRPC response field "entries[1].id"
+    And set "suffixId" to the gRPC response field "entries[2].id"
+    And set "suffixCreatedAt" to the gRPC response field "entries[2].createdAt"
+    When I send gRPC request "EntriesService/AppendEntry" with body:
+    """
+    conversation_id: "${conversationId}"
+    entry { channel: JOURNAL content_type: "test.v1" seq: 211 content { string_value: "later" } }
+    conversation_patch { title: "Later title" }
+    """
+    Then the gRPC response should not have an error
+    When I send gRPC request "EntriesService/AppendEntries" with body:
+    """
+    conversation_id: "${conversationId}"
+    entries { channel: HISTORY content_type: "history" content { struct_value { fields { key: "role" value { string_value: "USER" } } fields { key: "text" value { string_value: "prefix" } } } } }
+    entries { channel: JOURNAL content_type: "test.v1" seq: 210 content { string_value: "anchor" } }
+    entries { channel: HISTORY content_type: "history" content { struct_value { fields { key: "role" value { string_value: "USER" } } fields { key: "text" value { string_value: "suffix" } } } } }
+    conversation_patch { title: "Original" }
+    """
+    Then the gRPC response should not have an error
+    And the gRPC response field "entries[0].id" should be "${prefixId}"
+    And the gRPC response field "entries[1].id" should be "${anchorId}"
+    And the gRPC response field "entries[2].id" should be "${suffixId}"
+    And the gRPC response field "entries[2].createdAt" should be "${suffixCreatedAt}"
+    When I call GET "/v1/conversations/${conversationId}"
+    Then the response status should be 200
+    And the response body "title" should be "Later title"
+    When I send gRPC request "EntriesService/AppendEntries" with body:
+    """
+    conversation_id: "${conversationId}"
+    entries { channel: HISTORY content_type: "history" content { struct_value { fields { key: "role" value { string_value: "USER" } } fields { key: "text" value { string_value: "prefix" } } } } }
+    entries { channel: JOURNAL content_type: "test.v1" seq: 210 content { string_value: "anchor" } }
+    """
+    Then the gRPC response should have status "ABORTED"

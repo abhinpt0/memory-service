@@ -371,3 +371,66 @@ Feature: Client-assigned entry sequence (REST)
       ]
     }
     """
+
+  Scenario: Mixed batch retries preserve request order and skip stale patches
+    When I call POST "/v1/conversations/${conversationId}/entries" with body:
+    """
+    {
+      "conversationPatch":{"title":"Original batch title"},
+      "entries":[
+        {"channel":"JOURNAL","contentType":"test.v1","seq":210,"content":[{"text":"J10"}]},
+        {"channel":"HISTORY","contentType":"history","content":[{"role":"USER","text":"H10"}]},
+        {"channel":"JOURNAL","contentType":"test.v1","seq":211,"content":[{"text":"J11"}]},
+        {"channel":"HISTORY","contentType":"history","content":[{"role":"USER","text":"H11"}]}
+      ]
+    }
+    """
+    Then the response status should be 201
+    And set "j10" to the json response field "[0].id"
+    And set "h10" to the json response field "[1].id"
+    And set "j11" to the json response field "[2].id"
+    And set "h11" to the json response field "[3].id"
+    And set "h11CreatedAt" to the json response field "[3].createdAt"
+    When I call POST "/v1/conversations/${conversationId}/entries" with body:
+    """
+    {"channel":"HISTORY","contentType":"history","content":[{"role":"USER","text":"Later"}],"conversationPatch":{"title":"Later title"}}
+    """
+    Then the response status should be 201
+    When I call POST "/v1/conversations/${conversationId}/entries" with body:
+    """
+    {
+      "conversationPatch":{"title":"Original batch title"},
+      "entries":[
+        {"channel":"JOURNAL","contentType":"test.v1","seq":210,"content":[{"text":"J10"}]},
+        {"channel":"HISTORY","contentType":"history","content":[{"role":"USER","text":"H10"}]},
+        {"channel":"JOURNAL","contentType":"test.v1","seq":211,"content":[{"text":"J11"}]},
+        {"channel":"HISTORY","contentType":"history","content":[{"role":"USER","text":"H11"}]}
+      ]
+    }
+    """
+    Then the response status should be 201
+    And the response body "[0].id" should be "${j10}"
+    And the response body "[1].id" should be "${h10}"
+    And the response body "[2].id" should be "${j11}"
+    And the response body "[3].id" should be "${h11}"
+    And the response body "[3].createdAt" should be "${h11CreatedAt}"
+    When I call GET "/v1/conversations/${conversationId}"
+    Then the response status should be 200
+    And the response body "title" should be "Later title"
+    When I call GET "/v1/conversations/${conversationId}/entries?limit=2"
+    Then the response status should be 200
+    And the response body "data[0].id" should be "${j10}"
+    And the response body "data[1].id" should be "${h10}"
+    When I call GET "/v1/conversations/${conversationId}/entries?afterCursor=${h10}&limit=2"
+    Then the response status should be 200
+    And the response body "data[0].id" should be "${j11}"
+    And the response body "data[1].id" should be "${h11}"
+    When I call POST "/v1/conversations/${conversationId}/entries" with body:
+    """
+    {"entries":[
+      {"channel":"JOURNAL","contentType":"test.v1","seq":210,"content":[{"text":"J10"}]},
+      {"channel":"HISTORY","contentType":"history","content":[{"role":"USER","text":"H10"}]},
+      {"channel":"JOURNAL","contentType":"test.v1","seq":211,"content":[{"text":"J11"}]}
+    ]}
+    """
+    Then the response status should be 409

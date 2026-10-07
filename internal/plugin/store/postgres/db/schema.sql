@@ -135,6 +135,7 @@ CREATE INDEX IF NOT EXISTS idx_conversation_groups_archived
 ------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS entries (
+    append_batch BYTEA,
     id                UUID NOT NULL,
     conversation_id   TEXT NOT NULL REFERENCES conversations (id) ON DELETE CASCADE,
     conversation_group_id UUID NOT NULL REFERENCES conversation_groups (id) ON DELETE CASCADE,
@@ -576,3 +577,5 @@ CREATE INDEX IF NOT EXISTS idx_entries_group_channel_seq_id
 -- Branch/channel/order index for bounded backward and tail history reads (Enhancement 109).
 CREATE INDEX IF NOT EXISTS idx_entries_conv_channel_created_seq_id
     ON entries (conversation_id, channel, created_at ASC, seq ASC NULLS FIRST, id ASC);
+
+ALTER TABLE entries ADD COLUMN IF NOT EXISTS append_batch BYTEA;

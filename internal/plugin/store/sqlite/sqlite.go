@@ -89,6 +89,9 @@ func (m *sqliteMigrator) Migrate(ctx context.Context) error {
 	if _, err := handle.sqlDB.ExecContext(ctx, schemaSQL); err != nil {
 		return fmt.Errorf("migration: failed to execute schema: %w", err)
 	}
+	if _, err := handle.sqlDB.ExecContext(ctx, "ALTER TABLE entries ADD COLUMN append_batch BLOB"); err != nil && !isSQLiteDuplicateColumnError(err) {
+		return fmt.Errorf("migration: add append batch definition: %w", err)
+	}
 	defaultKind, err := coreepisodic.BuiltinDefaultKindVersion(ctx)
 	if err != nil {
 		return fmt.Errorf("migration: load built-in default memory kind: %w", err)
@@ -131,6 +134,9 @@ func (m *sqliteMigrator) Migrate(ctx context.Context) error {
 	if _, err := handle.sqlDB.ExecContext(ctx,
 		`CREATE INDEX IF NOT EXISTS idx_entries_created_at_unix_ms ON entries(created_at_unix_ms)`); err != nil {
 		return fmt.Errorf("migration: failed to create idx_entries_created_at_unix_ms index: %w", err)
+	}
+	if _, err := handle.sqlDB.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_entries_group_created_at_unix_ms ON entries(conversation_group_id,created_at_unix_ms)`); err != nil {
+		return fmt.Errorf("migration: index append timestamp allocation: %w", err)
 	}
 	if handle.fts5Enabled {
 		if _, err := handle.sqlDB.ExecContext(ctx, ftsSchemaSQL); err != nil {
@@ -1870,6 +1876,12 @@ func (s *SQLiteStore) AppendEntriesBeforeUnarchive(ctx context.Context, userID s
 }
 
 func (s *SQLiteStore) appendEntries(ctx context.Context, userID string, conversationID string, entries []registrystore.CreateEntryRequest, clientID *string, agentID *string, epoch *int64, allowArchived bool) ([]model.Entry, error) {
+	if len(entries) == 0 {
+		return []model.Entry{}, nil
+	}
+	if err := registrystore.ValidateAppendSequences(entries); err != nil {
+		return nil, err
+	}
 	if err := registrystore.ValidateEntryEpochChannels(entries, epoch); err != nil {
 		return nil, &registrystore.ValidationError{Field: "epoch", Message: err.Error()}
 	}
@@ -1967,7 +1979,26 @@ func (s *SQLiteStore) appendEntries(ctx context.Context, userID string, conversa
 		}
 	}
 
-	now := time.Now()
+	// Serialize allocation for the conversation group, including native forks.
+	var latest model.Entry
+	if err := db.Select("created_at").Where("conversation_group_id = ?", conv.ConversationGroupID).Order("created_at_unix_ms DESC").Limit(1).Find(&latest).Error; err != nil {
+		return nil, err
+	}
+	now := registrystore.NextAppendTime(time.Now(), latest.CreatedAt)
+	batch := registrystore.NewAppendBatch(registrystore.SequencedAppendRequest{Entries: entries, UserID: userID, ClientID: clientID, AgentID: agentID, Epoch: epoch}, now)
+	var batchData []byte
+	anchor := batch.Request.Anchor()
+	if len(entries) > 1 && anchor >= 0 {
+		data, err := registrystore.EncodeAppendBatch(ctx, s, batch)
+		if err != nil {
+			return nil, err
+		}
+		batchData, err = s.encryptEntryContent(batch.IDs[anchor], data)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	result := make([]model.Entry, len(entries))
 	for i, req := range entries {
 		ch := model.Channel(strings.ToLower(req.Channel))
@@ -1976,7 +2007,7 @@ func (s *SQLiteStore) appendEntries(ctx context.Context, userID string, conversa
 		}
 
 		entryEpoch := registrystore.EpochForChannel(ch, epoch)
-		entryID := uuid.New()
+		entryID := batch.IDs[i]
 
 		encContent, err := s.encryptEntryContent(entryID, req.Content)
 		if err != nil {
@@ -1995,7 +2026,10 @@ func (s *SQLiteStore) appendEntries(ctx context.Context, userID string, conversa
 			ContentType:         req.ContentType,
 			Content:             encContent,
 			IndexedContent:      req.IndexedContent,
-			CreatedAt:           now,
+			CreatedAt:           now.Add(time.Duration(i) * time.Millisecond),
+		}
+		if i == anchor {
+			entry.AppendBatch = batchData
 		}
 		if err := db.Create(&entry).Error; err != nil {
 			if _, ok := sqliteUniqueViolation(err); ok {
@@ -2029,7 +2063,7 @@ func (s *SQLiteStore) appendEntries(ctx context.Context, userID string, conversa
 	}
 
 	// Update conversation timestamp
-	db.Model(&model.Conversation{}).Where("id = ?", conversationID).Update("updated_at", now)
+	db.Model(&model.Conversation{}).Where("id = ?", conversationID).Update("updated_at", now.Add(time.Duration(len(entries)-1)*time.Millisecond))
 
 	// Keep memory latest-epoch cache warm after memory appends.
 	if clientID != nil {
@@ -2183,7 +2217,11 @@ func (s *SQLiteStore) SyncAgentEntry(ctx context.Context, userID string, convers
 		appendContent = marshalContentArray(incomingContent)
 	}
 
-	now := time.Now()
+	var latestCreated model.Entry
+	if err := db.Select("created_at").Where("conversation_group_id = ?", conv.ConversationGroupID).Order("created_at_unix_ms DESC").Limit(1).Find(&latestCreated).Error; err != nil {
+		return nil, err
+	}
+	now := registrystore.NextAppendTime(time.Now(), latestCreated.CreatedAt)
 	entryID := uuid.New()
 	encContent, err := s.encryptEntryContent(entryID, appendContent)
 	if err != nil {

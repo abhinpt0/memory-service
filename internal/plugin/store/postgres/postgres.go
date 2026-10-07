@@ -1821,11 +1821,29 @@ func (s *PostgresStore) AppendEntriesBeforeUnarchive(ctx context.Context, userID
 }
 
 func (s *PostgresStore) appendEntries(ctx context.Context, userID string, conversationID string, entries []registrystore.CreateEntryRequest, clientID *string, agentID *string, epoch *int64, allowArchived bool) ([]model.Entry, error) {
+	if len(entries) == 0 {
+		return []model.Entry{}, nil
+	}
+	if err := registrystore.ValidateAppendSequences(entries); err != nil {
+		return nil, err
+	}
+	if _, scoped := scopeFromContext(ctx); !scoped {
+		var result []model.Entry
+		err := s.InWriteTx(ctx, func(txCtx context.Context) error {
+			var err error
+			result, err = s.appendEntries(txCtx, userID, conversationID, entries, clientID, agentID, epoch, allowArchived)
+			return err
+		})
+		return result, err
+	}
 	if err := registrystore.ValidateEntryEpochChannels(entries, epoch); err != nil {
 		return nil, &registrystore.ValidationError{Field: "epoch", Message: err.Error()}
 	}
 	db, err := s.writeDBFor(ctx, "append entries")
 	if err != nil {
+		return nil, err
+	}
+	if err := db.Exec("SELECT pg_advisory_xact_lock(hashtextextended(?, 1))", conversationID).Error; err != nil {
 		return nil, err
 	}
 	var conv model.Conversation
@@ -1918,7 +1936,29 @@ func (s *PostgresStore) appendEntries(ctx context.Context, userID string, conver
 		}
 	}
 
-	now := time.Now()
+	// Serialize allocation for the conversation group, including native forks.
+	if err := db.Exec("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))", conv.ConversationGroupID.String()).Error; err != nil {
+		return nil, err
+	}
+	var latest model.Entry
+	if err := db.Select("created_at").Where("conversation_group_id = ?", conv.ConversationGroupID).Order("created_at DESC").Limit(1).Find(&latest).Error; err != nil {
+		return nil, err
+	}
+	now := registrystore.NextAppendTime(time.Now(), latest.CreatedAt)
+	batch := registrystore.NewAppendBatch(registrystore.SequencedAppendRequest{Entries: entries, UserID: userID, ClientID: clientID, AgentID: agentID, Epoch: epoch}, now)
+	var batchData []byte
+	anchor := batch.Request.Anchor()
+	if len(entries) > 1 && anchor >= 0 {
+		data, err := registrystore.EncodeAppendBatch(ctx, s, batch)
+		if err != nil {
+			return nil, err
+		}
+		batchData, err = s.encryptEntryContent(batch.IDs[anchor], data)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	result := make([]model.Entry, len(entries))
 	for i, req := range entries {
 		ch := model.Channel(strings.ToLower(req.Channel))
@@ -1927,7 +1967,7 @@ func (s *PostgresStore) appendEntries(ctx context.Context, userID string, conver
 		}
 
 		entryEpoch := registrystore.EpochForChannel(ch, epoch)
-		entryID := uuid.New()
+		entryID := batch.IDs[i]
 
 		encContent, err := s.encryptEntryContent(entryID, req.Content)
 		if err != nil {
@@ -1946,7 +1986,10 @@ func (s *PostgresStore) appendEntries(ctx context.Context, userID string, conver
 			ContentType:         req.ContentType,
 			Content:             encContent,
 			IndexedContent:      req.IndexedContent,
-			CreatedAt:           now,
+			CreatedAt:           now.Add(time.Duration(i) * time.Millisecond),
+		}
+		if i == anchor {
+			entry.AppendBatch = batchData
 		}
 		if err := db.Create(&entry).Error; err != nil {
 			if _, ok := pgUniqueViolation(err); ok {
@@ -1976,7 +2019,7 @@ func (s *PostgresStore) appendEntries(ctx context.Context, userID string, conver
 	}
 
 	// Update conversation timestamp
-	db.Model(&model.Conversation{}).Where("id = ?", conversationID).Update("updated_at", now)
+	db.Model(&model.Conversation{}).Where("id = ?", conversationID).Update("updated_at", now.Add(time.Duration(len(entries)-1)*time.Millisecond))
 
 	// Keep memory latest-epoch cache warm after memory appends.
 	if clientID != nil {
@@ -2132,7 +2175,14 @@ func (s *PostgresStore) SyncAgentEntry(ctx context.Context, userID string, conve
 		appendContent = marshalContentArray(incomingContent)
 	}
 
-	now := time.Now()
+	if err := db.Exec("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))", conv.ConversationGroupID.String()).Error; err != nil {
+		return nil, err
+	}
+	var latestCreated model.Entry
+	if err := db.Select("created_at").Where("conversation_group_id = ?", conv.ConversationGroupID).Order("created_at DESC").Limit(1).Find(&latestCreated).Error; err != nil {
+		return nil, err
+	}
+	now := registrystore.NextAppendTime(time.Now(), latestCreated.CreatedAt)
 	entryID := uuid.New()
 	encContent, err := s.encryptEntryContent(entryID, appendContent)
 	if err != nil {
