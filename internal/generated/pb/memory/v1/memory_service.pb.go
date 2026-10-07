@@ -2206,6 +2206,7 @@ type CreateEntryRequest struct {
 	// The content array for history entries must contain exactly 1 object with:
 	//   - text (string): The message text.
 	//   - role (string): Either "USER" or "AI".
+	//
 	// Other content_types (e.g., "LC4J", "SpringAI") may be used for
 	// agent context entries.
 	ContentType string `protobuf:"bytes,4,opt,name=content_type,json=contentType,proto3" json:"content_type,omitempty"`
@@ -4179,6 +4180,7 @@ type Entry struct {
 	// The content array for history entries contains objects with:
 	//   - text (string): The message text.
 	//   - role (string): Either "USER" or "AI".
+	//
 	// Other content_types (e.g., "LC4J", "SpringAI") may be used for
 	// agent context entries.
 	ContentType string `protobuf:"bytes,6,opt,name=content_type,json=contentType,proto3" json:"content_type,omitempty"`
