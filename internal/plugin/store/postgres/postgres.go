@@ -318,7 +318,7 @@ func (s *PostgresStore) createConversationWithID(ctx context.Context, userID str
 		return nil, err
 	}
 	groupID := uuid.New()
-	now := time.Now()
+	now := time.Now().UTC().Truncate(time.Microsecond)
 
 	if metadata == nil {
 		metadata = map[string]interface{}{}
@@ -331,6 +331,7 @@ func (s *PostgresStore) createConversationWithID(ctx context.Context, userID str
 	// If forking, look up the source conversation's group
 	var actualGroupID uuid.UUID
 	ownerUserID := userID
+	callerAccessLevel := model.AccessLevelOwner
 	var membershipsToCopy []model.ConversationMembership
 	var sourceConv *model.Conversation
 	var anchorOwnerDepth *int
@@ -386,7 +387,8 @@ func (s *PostgresStore) createConversationWithID(ctx context.Context, userID str
 		if findResult.RowsAffected == 0 {
 			return nil, &registrystore.NotFoundError{Resource: "conversation", ID: string(*startedByConversationID)}
 		}
-		if _, err := s.requireAccess(ctx, userID, parentConv.ConversationGroupID, model.AccessLevelWriter); err != nil {
+		callerAccessLevel, err = s.requireAccess(ctx, userID, parentConv.ConversationGroupID, model.AccessLevelWriter)
+		if err != nil {
 			return nil, err
 		}
 		if startedByEntryID != nil {
@@ -423,7 +425,7 @@ func (s *PostgresStore) createConversationWithID(ctx context.Context, userID str
 		}
 
 		// 2. User isolation - another user owns this ID
-		if existing.OwnerUserID != userID {
+		if startedByConversationID == nil && existing.OwnerUserID != userID {
 			return nil, &registrystore.NotFoundError{Resource: "conversation", ID: convID}
 		}
 
@@ -439,7 +441,7 @@ func (s *PostgresStore) createConversationWithID(ctx context.Context, userID str
 		}
 
 		// 3. Compare complete creation request
-		if !registrystore.ConversationsMatch(&existing, userID, clientID, title, decryptedTitle, metadata, agentID,
+		if !registrystore.ConversationsMatch(&existing, ownerUserID, clientID, title, decryptedTitle, metadata, agentID,
 			forkedAtConversationID, forkedAtEntryID, startedByConversationID, startedByEntryID) {
 			// Conflicting retry
 			return nil, registrystore.NewConversationIDConflictError(convID)
@@ -462,7 +464,7 @@ func (s *PostgresStore) createConversationWithID(ctx context.Context, userID str
 					StartedByEntryID:        existing.StartedByEntryID,
 					CreatedAt:               existing.CreatedAt,
 					UpdatedAt:               existing.UpdatedAt,
-					AccessLevel:             model.AccessLevelOwner,
+					AccessLevel:             callerAccessLevel,
 				},
 			},
 			ExactRetry: true,
@@ -527,6 +529,18 @@ func (s *PostgresStore) createConversationWithID(ctx context.Context, userID str
 		if existingResult.RowsAffected == 0 {
 			return nil, fmt.Errorf("conversation insert returned 0 rows but record not found")
 		}
+		// The request allocated this group before losing the conversation-ID
+		// race. Remove it before any return, including errors that append auto-
+		// creation intentionally recovers from.
+		if forkedAtConversationID == nil {
+			cleanup := db.Where("id = ?", actualGroupID).Delete(&model.ConversationGroup{})
+			if cleanup.Error != nil {
+				return nil, fmt.Errorf("failed to remove unused conversation group: %w", cleanup.Error)
+			}
+			if cleanup.RowsAffected != 1 {
+				return nil, fmt.Errorf("failed to remove unused conversation group %s", actualGroupID)
+			}
+		}
 
 		// 1. Archived conversation - treat as unavailable
 		if existing.ArchivedAt != nil {
@@ -534,7 +548,7 @@ func (s *PostgresStore) createConversationWithID(ctx context.Context, userID str
 		}
 
 		// 2. User isolation - another user owns this ID
-		if existing.OwnerUserID != userID {
+		if startedByConversationID == nil && existing.OwnerUserID != userID {
 			return nil, &registrystore.NotFoundError{Resource: "conversation", ID: convID}
 		}
 
@@ -550,13 +564,13 @@ func (s *PostgresStore) createConversationWithID(ctx context.Context, userID str
 		}
 
 		// 3. Compare complete creation request
-		if !registrystore.ConversationsMatch(&existing, userID, clientID, title, decryptedTitle, metadata, agentID,
+		if !registrystore.ConversationsMatch(&existing, ownerUserID, clientID, title, decryptedTitle, metadata, agentID,
 			forkedAtConversationID, forkedAtEntryID, startedByConversationID, startedByEntryID) {
 			// Conflicting retry
 			return nil, registrystore.NewConversationIDConflictError(convID)
 		}
 
-		// Exact retry - return existing conversation
+		// Return the conversation created by the winning request.
 		return &registrystore.CreateConversationResult{
 			Conversation: &registrystore.ConversationDetail{
 				ConversationSummary: registrystore.ConversationSummary{
@@ -573,7 +587,7 @@ func (s *PostgresStore) createConversationWithID(ctx context.Context, userID str
 					StartedByEntryID:        existing.StartedByEntryID,
 					CreatedAt:               existing.CreatedAt,
 					UpdatedAt:               existing.UpdatedAt,
-					AccessLevel:             model.AccessLevelOwner,
+					AccessLevel:             callerAccessLevel,
 				},
 			},
 			ExactRetry: true,
@@ -625,7 +639,7 @@ func (s *PostgresStore) createConversationWithID(ctx context.Context, userID str
 				StartedByEntryID:        logicalStartedByEntryID,
 				CreatedAt:               now,
 				UpdatedAt:               now,
-				AccessLevel:             model.AccessLevelOwner,
+				AccessLevel:             callerAccessLevel,
 			},
 		},
 		ExactRetry: false,

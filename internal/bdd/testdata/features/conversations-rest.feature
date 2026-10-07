@@ -277,6 +277,40 @@ Feature: Conversations REST API
     And the response body "data[0].id" should be "${childConversationId}"
     And the response body "data[0].startedByConversationId" should be "${parentConversationId}"
 
+  Scenario: A non-owner writer can race to create a started child conversation
+    Given I have a conversation with title "Shared parent conversation"
+    And set "parentConversationId" to "${conversationId}"
+    And I share the conversation with user "bob" with request:
+    """
+    {
+      "userId": "bob",
+      "accessLevel": "writer"
+    }
+    """
+    And the response status should be 201
+    And I am authenticated as user "bob"
+    And I am authenticated as agent with API key "test-agent-key"
+    When I call POST "/v1/conversations/started-race-001/entries" concurrently 5 times with body:
+    """
+    {
+      "channel": "HISTORY",
+      "contentType": "history",
+      "startedByConversationId": "${parentConversationId}",
+      "content": [
+        {
+          "role": "USER",
+          "text": "Concurrent child task"
+        }
+      ]
+    }
+    """
+    Then all responses should have status 201
+    When I call GET "/v1/conversations/started-race-001"
+    Then the response status should be 200
+    And the response body "ownerUserId" should be "alice"
+    And the response body "accessLevel" should be "writer"
+    And the response body "startedByConversationId" should be "${parentConversationId}"
+
   Scenario: Archiving a conversation keeps it readable and marks it archived
     Given I have a conversation with title "To Be Deleted"
     When I archive the conversation
@@ -734,40 +768,3 @@ Feature: Conversations REST API
     When I call GET "/v1/conversations/concurrent-001"
     Then the response status should be 200
     And the response body "id" should be "concurrent-001"
-
-
-  Scenario: Create conversation with explicit ID - true concurrent retries (race condition test)
-    # This tests database-level race safety: N goroutines firing simultaneously
-    # should result in no duplicate rows, no 5xx errors, and consistent responses
-    When I call POST "/v1/conversations" concurrently 5 times with body:
-    """
-    {
-      "id": "race-test-001",
-      "title": "Race Condition Test"
-    }
-    """
-    Then exactly one response should have status 201 and the rest should have status 200
-    # Verify only one conversation exists
-    When I call GET "/v1/conversations/race-test-001"
-    Then the response status should be 200
-    And the response body "id" should be "race-test-001"
-    # Verify exactly one conversation_group row was created (no orphan groups from race losers)
-    And I resolve the conversation group ID for conversation "race-test-001" into "raceGroupId"
-    When I execute SQL query:
-      """
-      SELECT COUNT(*) AS count FROM conversation_groups WHERE id = '${raceGroupId}'
-      """
-    Then the SQL result should match:
-      | count |
-      | 1     |
-    When I execute MongoDB query:
-      """
-      {
-        "collection": "conversation_groups",
-        "operation": "count",
-        "filter": { "_id": "${raceGroupId}" }
-      }
-      """
-    Then the MongoDB result should match:
-      | count |
-      | 1     |

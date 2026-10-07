@@ -120,10 +120,11 @@ type CreateConversationResult struct {
 
 // ConversationsMatch compares all semantically significant creation fields.
 // Server-assigned fields (createdAt, updatedAt, conversationGroupID) are excluded.
-// Identity fields (userID, clientID) come from the request context, following #528 pattern.
+// Identity fields (expectedOwnerUserID, clientID) come from the resolved creation request.
+// Started-by conversations inherit expectedOwnerUserID from their parent.
 // The existingDecryptedTitle parameter should be the decrypted title from existing.Title.
 func ConversationsMatch(existing *model.Conversation,
-	userID, clientID, title string,
+	expectedOwnerUserID, clientID, title string,
 	existingDecryptedTitle string,
 	metadata map[string]interface{},
 	agentID *string,
@@ -131,8 +132,7 @@ func ConversationsMatch(existing *model.Conversation,
 	forkedAtEntryID *uuid.UUID,
 	startedByConversationID *string,
 	startedByEntryID *uuid.UUID) bool {
-	// Identity fields from request context (lesson from #528)
-	if existing.OwnerUserID != userID {
+	if existing.OwnerUserID != expectedOwnerUserID {
 		return false
 	}
 	if existing.ClientID != clientID {
