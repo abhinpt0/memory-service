@@ -794,6 +794,12 @@ type CreateConversationRequest struct {
 	// AgentId Optional logical agent associated with this conversation.
 	AgentId *string `json:"agentId,omitempty"`
 
+	// ForkedAtConversationId ID of the parent conversation to fork from. Required when creating a forked conversation. Must be an existing, non-archived conversation accessible to the authenticated user.
+	ForkedAtConversationId *string `json:"forkedAtConversationId,omitempty"`
+
+	// ForkedAtEntryId First parent entry excluded by this fork. When provided, the new conversation's history begins immediately after this entry. Valid anchors are history and journal entries visible to the authenticated client; context entries cannot be fork anchors. Omit (or set to null) for a blank-slate fork that inherits no parent entries.
+	ForkedAtEntryId *openapi_types.UUID `json:"forkedAtEntryId,omitempty"`
+
 	// Id Optional client-supplied conversation ID. When provided, the server creates the conversation with exactly this ID instead of generating one. Useful for agents that need a deterministic conversation ID derived from an external thread identifier.
 	Id *string `json:"id,omitempty"`
 
