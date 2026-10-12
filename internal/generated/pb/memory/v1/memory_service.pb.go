@@ -2489,7 +2489,8 @@ type AppendEntryRequest struct {
 	// both changes atomically. MongoDB is atomic with the outbox enabled; otherwise
 	// it applies them as separate operations.
 	// Supports title, metadata merge-patch, and archived. Setting archived=false
-	// unarchives before appending; plain appends are blocked on archived conversations.
+	// allows the append on an archived conversation and unarchives it as part of the
+	// append; plain appends are blocked on archived conversations.
 	ConversationPatch *UpdateConversationRequest `protobuf:"bytes,4,opt,name=conversation_patch,json=conversationPatch,proto3,oneof" json:"conversation_patch,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
@@ -2563,16 +2564,17 @@ type AppendEntriesRequest struct {
 	// retries return original IDs and timestamps in request order. Changed content,
 	// order, or length returns ABORTED. PostgreSQL and SQLite commit atomically;
 	// MongoDB is atomic with the outbox enabled; otherwise it can resume missing
-	// positions from the saved definition. Completed batch retries emit no append
-	// events and do not reapply conversation patches.
+	// positions and finish the original inline conversation patch from the saved
+	// definition. Completed batch retries emit no append events and do not reapply
+	// conversation patches.
 	// Fully unsequenced batches have no retry guarantee.
 	Entries []*CreateEntryRequest `protobuf:"bytes,2,rep,name=entries,proto3" json:"entries,omitempty"`
 	Epoch   *int64                `protobuf:"varint,3,opt,name=epoch,proto3,oneof" json:"epoch,omitempty"`
 	// Optional conversation patch applied once for all entries. PostgreSQL and SQLite
 	// commit the entries and patch atomically. MongoDB is atomic with the outbox
 	// enabled; otherwise it applies them as separate operations. Supports title,
-	// metadata merge-patch, and archived. Setting archived=false unarchives before
-	// appending.
+	// metadata merge-patch, and archived. Setting archived=false allows the append
+	// on an archived conversation and unarchives it as part of the append.
 	ConversationPatch *UpdateConversationRequest `protobuf:"bytes,4,opt,name=conversation_patch,json=conversationPatch,proto3,oneof" json:"conversation_patch,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache

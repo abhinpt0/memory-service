@@ -18,12 +18,13 @@ import (
 // AppendBatch is encrypted on the sequence anchor. IDs and timestamps reserve
 // every position before any partial write, including positions before the anchor.
 type AppendBatch struct {
-	Version      int
-	Request      SequencedAppendRequest
-	IDs          []uuid.UUID
-	Start        time.Time
-	Fingerprints []string
-	Attachments  [][]batchAttachment
+	Version           int
+	Request           SequencedAppendRequest
+	IDs               []uuid.UUID
+	Start             time.Time
+	Fingerprints      []string
+	Attachments       [][]batchAttachment
+	ConversationPatch *AppendConversationPatch
 }
 
 func (r SequencedAppendRequest) Anchor() int {
@@ -36,7 +37,7 @@ func (r SequencedAppendRequest) Anchor() int {
 }
 
 func NewAppendBatch(r SequencedAppendRequest, start time.Time) *AppendBatch {
-	b := &AppendBatch{Version: 1, Request: r, Start: start, IDs: make([]uuid.UUID, len(r.Entries))}
+	b := &AppendBatch{Version: 2, Request: r, Start: start, IDs: make([]uuid.UUID, len(r.Entries))}
 	for i := range b.IDs {
 		b.IDs[i] = uuid.New()
 	}
@@ -69,7 +70,9 @@ func DecodeAppendBatch(data []byte) (*AppendBatch, error) {
 	if err := json.Unmarshal(data, &b); err != nil {
 		return nil, fmt.Errorf("decode append batch: %w", err)
 	}
-	if b.Version != 1 || len(b.Fingerprints) != len(b.IDs) || len(b.Attachments) != len(b.IDs) || len(b.IDs) != len(b.Request.Entries) || len(b.IDs) < 2 || b.Request.Anchor() < 0 {
+	// BACKWARD COMPATIBILITY: remove in a future breaking release.
+	// Version 1 batch definitions did not save the inline conversation patch.
+	if (b.Version != 1 && b.Version != 2) || len(b.Fingerprints) != len(b.IDs) || len(b.Attachments) != len(b.IDs) || len(b.IDs) != len(b.Request.Entries) || len(b.IDs) < 2 || b.Request.Anchor() < 0 {
 		return nil, fmt.Errorf("invalid append batch definition")
 	}
 	return &b, nil

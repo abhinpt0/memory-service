@@ -471,8 +471,9 @@ paths:
         entries in request order, including their IDs and timestamps. Changed
         content, order, or batch length returns 409 Conflict. PostgreSQL and SQLite
         commit the entire batch atomically. MongoDB also commits atomically when
-        the outbox is enabled. Otherwise, it can resume missing positions from the
-        saved batch definition. Completed batch retries do not emit append
+        the outbox is enabled. Otherwise, it can resume missing positions and finish
+        the original inline conversation patch from the saved batch definition.
+        Completed batch retries do not emit append
         events or reapply conversation patches. Fully unsequenced batches have no
         retry guarantee. History projections can keep their sequence unset.
 
@@ -2903,8 +2904,8 @@ components:
             `metadata` merge-patch
             (keys present are set, keys absent are left unchanged, keys explicitly
             set to `null` are removed), and `archived`. Setting `archived: false`
-            unarchives the conversation before appending the entry; setting
-            `archived: true` archives it after. Plain appends without this field
+            allows the append on an archived conversation and unarchives it as part of
+            the append; setting `archived: true` archives it after. Plain appends without this field
             are blocked on archived conversations — use `archived: false` here (or
             `PATCH /v1/conversations/{id}`) to unarchive first.
             Requires writer or higher access on the conversation (owner access

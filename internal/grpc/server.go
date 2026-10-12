@@ -1960,6 +1960,7 @@ func (s *EntriesServer) appendEntries(ctx context.Context, conversationID string
 			storeEntries = append(storeEntries, appendEntry.store)
 		}
 
+		txCtx, storedPatch := registrystore.WithAppendConversationPatch(txCtx, validatedPatch.appendPatch())
 		if appendWhileArchived {
 			writtenEntries, err := s.Store.AppendEntriesBeforeUnarchive(txCtx, userID, convID, storeEntries, clientIDPtr, agentIDPtr, epoch)
 			if err != nil {
@@ -1973,6 +1974,10 @@ func (s *EntriesServer) appendEntries(ctx context.Context, conversationID string
 			}
 			entries = writtenEntries
 		}
+		if storedPatch.Handled {
+			appendWhileArchived = false
+			patchAfterAppend = nil
+		}
 		if appendWhileArchived {
 			unarchiveResult, err := s.Store.UnarchiveConversationIfNeeded(txCtx, userID, convID)
 			if err != nil {
@@ -1980,7 +1985,7 @@ func (s *EntriesServer) appendEntries(ctx context.Context, conversationID string
 			}
 			unarchiveChanged = unarchiveResult.Changed
 		}
-		if validatedPatch != nil && validatedPatch.archived != nil && *validatedPatch.archived {
+		if !storedPatch.Handled && validatedPatch != nil && validatedPatch.archived != nil && *validatedPatch.archived {
 			archiveResult, err := s.Store.ArchiveConversationIfNeeded(txCtx, userID, convID)
 			if err != nil {
 				return nil, err
@@ -1998,7 +2003,7 @@ func (s *EntriesServer) appendEntries(ctx context.Context, conversationID string
 		if err := linkGRPCAttachmentLinks(txCtx, s.Store, userID, entries, pendingLinks); err != nil {
 			return nil, err
 		}
-		var patchRes grpcPatchResult
+		patchRes := grpcPatchResult{changed: storedPatch.Changed, archived: storedPatch.Archived}
 		if patchAfterAppend != nil {
 			var patchErr error
 			patchRes, patchErr = applyValidatedGRPCConversationPatch(txCtx, s.Store, userID, convID, patchAfterAppend, preHandledArchived)
@@ -2025,11 +2030,12 @@ func (s *EntriesServer) appendEntries(ctx context.Context, conversationID string
 	if err != nil {
 		duplicateConflict := registrystore.IsDuplicateSequenceConflict(err)
 		var notFound *registrystore.NotFoundError
-		archivedRetry := retryEligible && validatedPatch != nil && validatedPatch.archived != nil && errors.As(err, &notFound)
+		archivedRetry := retryEligible && (len(retryRequest.Entries) > 1 || validatedPatch != nil && validatedPatch.archived != nil) && errors.As(err, &notFound)
 		if retryEligible && (duplicateConflict || archivedRetry) {
 			originalErr := err
 			eventsToPublish = nil
 			entries, err = withMemoryWrite(ctx, s.Store, func(txCtx context.Context) ([]model.Entry, error) {
+				txCtx, storedPatch := registrystore.WithAppendConversationPatch(txCtx, validatedPatch.appendPatch())
 				normalizedRequest, normalizeErr := normalizeGRPCAppendRetry(txCtx, s.Store, userID, convID, retryRequest)
 				if normalizeErr != nil {
 					return nil, normalizeErr
@@ -2048,10 +2054,9 @@ func (s *EntriesServer) appendEntries(ctx context.Context, conversationID string
 					}
 					return nil, originalErr
 				}
-				// Completed batch retries skip append-time patches. A newly recovered
-				// batch still needs its original unarchive; single-entry retries
-				// continue to honor explicit archived=false on later archives.
-				if (len(retryRequest.Entries) == 1 || len(match.Created) > 0) && validatedPatch.needsUnarchiveBeforeWrite() {
+				// Batch recovery finishes its durable patch in the store. Single-entry
+				// retries retain explicit unarchive behavior on later archives.
+				if !storedPatch.Handled && len(retryRequest.Entries) == 1 && validatedPatch.needsUnarchiveBeforeWrite() {
 					conv, convErr := s.Store.GetConversation(txCtx, userID, convID)
 					if convErr != nil {
 						return nil, convErr
@@ -2081,7 +2086,7 @@ func (s *EntriesServer) appendEntries(ctx context.Context, conversationID string
 					return nil, cleanupErr
 				}
 				if s.EventBus != nil && len(match.Created) > 0 {
-					createdEvents, eventErr := s.entryEventsForCreatedEntries(txCtx, convID, match.Created, false, grpcPatchResult{}, true)
+					createdEvents, eventErr := s.entryEventsForCreatedEntries(txCtx, convID, match.Created, false, grpcPatchResult{changed: storedPatch.Changed, archived: storedPatch.Archived}, true)
 					if eventErr != nil {
 						return nil, eventErr
 					}

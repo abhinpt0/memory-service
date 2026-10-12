@@ -445,6 +445,7 @@ func appendEntry(c *gin.Context, store registrystore.MemoryStore, eventBus regis
 			}
 		}
 
+		ctx, storedPatch := registrystore.WithAppendConversationPatch(ctx, validatedPatch.appendPatch())
 		var err error
 		if appendWhileArchived {
 			result, err = store.AppendEntriesBeforeUnarchive(ctx, userID, convID, entries, clientID, agentID, req.Epoch)
@@ -454,6 +455,10 @@ func appendEntry(c *gin.Context, store registrystore.MemoryStore, eventBus regis
 		if err != nil {
 			return err
 		}
+		if storedPatch.Handled {
+			appendWhileArchived = false
+			patchAfterAppend = nil
+		}
 		if appendWhileArchived {
 			unarchiveResult, err := store.UnarchiveConversationIfNeeded(ctx, userID, convID)
 			if err != nil {
@@ -461,7 +466,7 @@ func appendEntry(c *gin.Context, store registrystore.MemoryStore, eventBus regis
 			}
 			unarchiveChanged = unarchiveResult.Changed
 		}
-		if validatedPatch != nil && validatedPatch.archived != nil && *validatedPatch.archived {
+		if !storedPatch.Handled && validatedPatch != nil && validatedPatch.archived != nil && *validatedPatch.archived {
 			archiveResult, err := store.ArchiveConversationIfNeeded(ctx, userID, convID)
 			if err != nil {
 				return err
@@ -478,7 +483,7 @@ func appendEntry(c *gin.Context, store registrystore.MemoryStore, eventBus regis
 		}
 
 		// Apply inline conversation patch if provided (title/metadata; archived was pre-handled).
-		var patchResult conversationPatchResult
+		patchResult := conversationPatchResult{changed: storedPatch.Changed, archived: storedPatch.Archived}
 		if patchAfterAppend != nil {
 			var err error
 			patchResult, err = applyValidatedConversationPatch(ctx, store, userID, convID, patchAfterAppend, preHandledArchived)
@@ -582,11 +587,12 @@ func appendEntry(c *gin.Context, store registrystore.MemoryStore, eventBus regis
 	})
 	if writeErr != nil {
 		duplicateConflict := registrystore.IsDuplicateSequenceConflict(writeErr)
-		archivedRetry := retryEligible && validatedPatch != nil && validatedPatch.archived != nil && isNotFoundError(writeErr)
+		archivedRetry := retryEligible && (len(retryRequest.Entries) > 1 || validatedPatch != nil && validatedPatch.archived != nil) && isNotFoundError(writeErr)
 		if retryEligible && (duplicateConflict || archivedRetry) {
 			originalErr := writeErr
 			eventsToPublish = nil
 			recoveryErr := routetx.MemoryWrite(c, store, func(ctx context.Context) error {
+				ctx, storedPatch := registrystore.WithAppendConversationPatch(ctx, validatedPatch.appendPatch())
 				normalizedRequest, err := normalizeRESTAppendRetry(ctx, store, userID, convID, retryRequest)
 				if err != nil {
 					return err
@@ -605,10 +611,9 @@ func appendEntry(c *gin.Context, store registrystore.MemoryStore, eventBus regis
 					}
 					return originalErr
 				}
-				// Completed batch retries skip append-time patches. A newly recovered
-				// batch still needs its original unarchive; single-entry retries
-				// continue to honor explicit archived=false on later archives.
-				if (len(retryRequest.Entries) == 1 || len(match.Created) > 0) && validatedPatch.needsUnarchiveBeforeWrite() {
+				// Batch recovery finishes its durable patch in the store. Single-entry
+				// retries retain explicit unarchive behavior on later archives.
+				if !storedPatch.Handled && len(retryRequest.Entries) == 1 && validatedPatch.needsUnarchiveBeforeWrite() {
 					conv, err := store.GetConversation(ctx, userID, convID)
 					if err != nil {
 						return err
@@ -638,6 +643,13 @@ func appendEntry(c *gin.Context, store registrystore.MemoryStore, eventBus regis
 					return err
 				}
 				if eventBus != nil && len(match.Created) > 0 {
+					if storedPatch.Changed {
+						patchEvents, err := conversationPatchEvents(ctx, store, convID, match.Entries[0].ConversationGroupID, conversationPatchResult{changed: true, archived: storedPatch.Archived})
+						if err != nil {
+							return err
+						}
+						eventsToPublish = append(eventsToPublish, patchEvents...)
+					}
 					events := make([]registryeventbus.Event, 0, len(match.Created))
 					for _, entry := range match.Created {
 						events = append(events, registryeventbus.Event{Event: "created", Kind: "entry", Data: eventstream.EntryEventData(entry, entry.ConversationGroupID), ConversationGroupID: entry.ConversationGroupID})

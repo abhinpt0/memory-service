@@ -373,8 +373,9 @@ export class ConversationsService {
    * entries in request order, including their IDs and timestamps. Changed
    * content, order, or batch length returns 409 Conflict. PostgreSQL and SQLite
    * commit the entire batch atomically. MongoDB also commits atomically when
-   * the outbox is enabled. Otherwise, it can resume missing positions from the
-   * saved batch definition. Completed batch retries do not emit append
+   * the outbox is enabled. Otherwise, it can resume missing positions and finish
+   * the original inline conversation patch from the saved batch definition.
+   * Completed batch retries do not emit append
    * events or reapply conversation patches. Fully unsequenced batches have no
    * retry guarantee. History projections can keep their sequence unset.
    *

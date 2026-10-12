@@ -56,6 +56,31 @@ func TestNextAppendTimeRespectsPersistedPrecisionAndFutureTail(t *testing.T) {
 	require.Equal(t, latest.Truncate(time.Millisecond).Add(time.Millisecond), next)
 }
 
+func TestAppendBatchReadsPreviousDefinitionsAndSavesPatch(t *testing.T) {
+	seq := uint32(10)
+	r := SequencedAppendRequest{UserID: "alice", Entries: []CreateEntryRequest{
+		{Channel: "journal", ContentType: "test", Seq: &seq, Content: []byte(`[]`)},
+		{Channel: "history", ContentType: "history", Content: []byte(`[]`)},
+	}}
+	title, archived := "Saved title", false
+	for _, version := range []int{1, 2} {
+		batch := NewAppendBatch(r, time.Now())
+		batch.Version = version
+		if version == 2 {
+			batch.ConversationPatch = &AppendConversationPatch{Title: &title, Archived: &archived, Metadata: MetadataPatch{"removed": nil, "set": "value"}}
+		}
+		encoded, err := EncodeAppendBatch(context.Background(), nil, batch)
+		require.NoError(t, err)
+		decoded, err := DecodeAppendBatch(encoded)
+		require.NoError(t, err)
+		require.Equal(t, batch.Version, decoded.Version)
+		require.Equal(t, batch.ConversationPatch, decoded.ConversationPatch)
+		matches, err := decoded.Matches(context.Background(), nil, r)
+		require.NoError(t, err)
+		require.True(t, matches)
+	}
+}
+
 func TestAppendBatchDefinitionDoesNotDuplicateLargeContent(t *testing.T) {
 	seq := uint32(10)
 	text := strings.Repeat("x", 2*1024*1024)
