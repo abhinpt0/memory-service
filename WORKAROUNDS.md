@@ -1,5 +1,11 @@
 # Workarounds
 
+## SQLite legacy entry timestamp precision
+
+- What: Entry ordering uses numeric Unix milliseconds and extracts a numeric sub-millisecond remainder from legacy `created_at` text.
+- Why: [SQLite date functions](https://www.sqlite.org/lang_datefunc.html) round fractional seconds to milliseconds, while older entries can retain nanoseconds. Comparing the text directly also orders timezone offsets incorrectly.
+- Proper fix: Complete [the numeric SQLite timestamp migration in #660](https://github.com/chirino/memory-service/issues/660), preserve legacy precision in the numeric representation, and remove the text-dependent ordering helpers.
+
 ## gRPC Java Unix socket authority
 
 - What: The Spring and Quarkus Unix socket gRPC channel builders set the HTTP/2 authority to `localhost`.
