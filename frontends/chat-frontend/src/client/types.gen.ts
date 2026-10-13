@@ -201,7 +201,7 @@ export type CreateConversationRequest = ConversationInput & {
    */
   forkedAtConversationId?: string;
   /**
-   * First parent entry excluded by this fork. When provided, the new conversation's history begins immediately after this entry. Valid anchors are history and journal entries visible to the authenticated client; context entries cannot be fork anchors. Omit (or set to null) for a blank-slate fork that inherits no parent entries.
+   * First parent entry excluded by this fork. When provided, the fork inherits all parent entries before this entry; this entry and any after it are excluded. Valid anchors are history and journal entries visible to the authenticated client; context entries cannot be fork anchors. Omit (or set to null) for a blank-slate fork that inherits no parent entries.
    */
   forkedAtEntryId?: string;
 };

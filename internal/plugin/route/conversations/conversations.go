@@ -567,7 +567,8 @@ func handleError(c *gin.Context, err error) {
 			"error":   err.Error(),
 			"details": gin.H{"field": validation.Field},
 		})
-	// convIDConflict must be checked before conflict: ConversationIDConflictError embeds ConflictError.
+	// convIDConflict must be checked before conflict: ConversationIDConflictError unwraps to
+	// ConflictError, so errors.As for *ConflictError would also match it.
 	case errors.As(err, &convIDConflict):
 		c.JSON(http.StatusConflict, gin.H{
 			"code":    convIDConflict.Code,

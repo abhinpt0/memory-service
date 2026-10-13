@@ -53,7 +53,9 @@ func IsDuplicateSequenceConflict(err error) bool {
 
 // ConversationIDConflictError indicates a conversation with the provided ID exists
 // but the request differs from the stored conversation.
-// It embeds ConflictError so errors.As() can detect it for gRPC error mapping.
+// It unwraps to ConflictError (see Unwrap), so errors.As() for *ConflictError also
+// matches it, which lets gRPC error mapping treat it as a conflict. Embedding alone
+// does not cause that match.
 type ConversationIDConflictError struct {
 	*ConflictError
 	ConversationID string
