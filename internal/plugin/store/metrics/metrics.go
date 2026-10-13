@@ -175,6 +175,11 @@ func (m *metricsStore) GetEntriesBySequence(ctx context.Context, userID string, 
 	return m.inner.GetEntriesBySequence(ctx, userID, conversationID, sequences)
 }
 
+func (m *metricsStore) RecoverAppendBatch(ctx context.Context, anchor model.Entry, request store.SequencedAppendRequest) (store.SequencedAppendMatch, error) {
+	defer observe("recover_append_batch", time.Now())
+	return m.inner.RecoverAppendBatch(ctx, anchor, request)
+}
+
 func (m *metricsStore) AppendEntries(ctx context.Context, userID string, conversationID string, entries []store.CreateEntryRequest, clientID *string, agentID *string, epoch *int64) ([]model.Entry, error) {
 	defer observe("append_entries", time.Now())
 	return m.inner.AppendEntries(ctx, userID, conversationID, entries, clientID, agentID, epoch)

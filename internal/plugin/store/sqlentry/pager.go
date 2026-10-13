@@ -210,7 +210,7 @@ func BoundedEntriesFromBase(ctx context.Context, base *gorm.DB, fromSeq *uint32,
 		entryIDValue = UUIDValue
 	}
 	if tail || beforeEntryID != nil {
-		order := "e.created_at DESC, e.seq DESC NULLS LAST, e.id DESC"
+		order := EntryOrderSQL(base, "e", true)
 		if fromSeq != nil {
 			order = "e.seq DESC, e.id DESC"
 		}
@@ -259,7 +259,7 @@ func BoundedEntriesFromBase(ctx context.Context, base *gorm.DB, fromSeq *uint32,
 		return entries, afterCursor, nil, nil
 	}
 
-	order := "e.created_at ASC, e.seq ASC NULLS FIRST, e.id ASC"
+	order := EntryOrderSQL(base, "e", false)
 	if fromSeq != nil {
 		order = "e.seq ASC, e.id ASC"
 	}
@@ -305,45 +305,15 @@ func BoundedEntriesFromBase(ctx context.Context, base *gorm.DB, fromSeq *uint32,
 }
 
 func WhereEntryOrderBeforeAlias(tx *gorm.DB, alias string, bound model.Entry, entryIDValue EntryIDValueFunc) *gorm.DB {
-	id := entryIDValue(bound.ID)
-	if bound.Seq == nil {
-		return tx.Where(
-			fmt.Sprintf("%s.created_at < ? OR (%s.created_at = ? AND %s.seq IS NULL AND %s.id < ?)", alias, alias, alias, alias),
-			bound.CreatedAt, bound.CreatedAt, id,
-		)
-	}
-	return tx.Where(
-		fmt.Sprintf("%s.created_at < ? OR (%s.created_at = ? AND (%s.seq IS NULL OR %s.seq < ? OR (%s.seq = ? AND %s.id < ?)))", alias, alias, alias, alias, alias, alias),
-		bound.CreatedAt, bound.CreatedAt, *bound.Seq, *bound.Seq, id,
-	)
+	return whereEntryOrder(tx, alias, bound, entryIDValue, false, false)
 }
 
 func WhereEntryOrderStrictlyAfterAlias(tx *gorm.DB, alias string, bound model.Entry, entryIDValue EntryIDValueFunc) *gorm.DB {
-	id := entryIDValue(bound.ID)
-	if bound.Seq == nil {
-		return tx.Where(
-			fmt.Sprintf("%s.created_at > ? OR (%s.created_at = ? AND (%s.seq IS NOT NULL OR %s.id > ?))", alias, alias, alias, alias),
-			bound.CreatedAt, bound.CreatedAt, id,
-		)
-	}
-	return tx.Where(
-		fmt.Sprintf("%s.created_at > ? OR (%s.created_at = ? AND (%s.seq > ? OR (%s.seq = ? AND %s.id > ?)))", alias, alias, alias, alias, alias),
-		bound.CreatedAt, bound.CreatedAt, *bound.Seq, *bound.Seq, id,
-	)
+	return whereEntryOrder(tx, alias, bound, entryIDValue, true, false)
 }
 
 func WhereEntryOrderAtOrBeforeAlias(tx *gorm.DB, alias string, bound model.Entry, entryIDValue EntryIDValueFunc) *gorm.DB {
-	id := entryIDValue(bound.ID)
-	if bound.Seq == nil {
-		return tx.Where(
-			fmt.Sprintf("%s.created_at < ? OR (%s.created_at = ? AND %s.seq IS NULL AND %s.id <= ?)", alias, alias, alias, alias),
-			bound.CreatedAt, bound.CreatedAt, id,
-		)
-	}
-	return tx.Where(
-		fmt.Sprintf("%s.created_at < ? OR (%s.created_at = ? AND (%s.seq IS NULL OR %s.seq < ? OR (%s.seq = ? AND %s.id <= ?)))", alias, alias, alias, alias, alias, alias),
-		bound.CreatedAt, bound.CreatedAt, *bound.Seq, *bound.Seq, id,
-	)
+	return whereEntryOrder(tx, alias, bound, entryIDValue, false, true)
 }
 
 func WhereSeqOrderBeforeAlias(tx *gorm.DB, alias string, bound model.Entry, entryIDValue EntryIDValueFunc) *gorm.DB {

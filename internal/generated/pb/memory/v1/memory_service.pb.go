@@ -2206,7 +2206,6 @@ type CreateEntryRequest struct {
 	// The content array for history entries must contain exactly 1 object with:
 	//   - text (string): The message text.
 	//   - role (string): Either "USER" or "AI".
-	//
 	// Other content_types (e.g., "LC4J", "SpringAI") may be used for
 	// agent context entries.
 	ContentType string `protobuf:"bytes,4,opt,name=content_type,json=contentType,proto3" json:"content_type,omitempty"`
@@ -2348,7 +2347,8 @@ type SyncEntriesRequest struct {
 	// the flattened content of existing entries in the latest epoch.
 	Entry *CreateEntryRequest `protobuf:"bytes,2,opt,name=entry,proto3" json:"entry,omitempty"`
 	// Optional conversation patch applied with the sync. PostgreSQL and SQLite commit
-	// both changes atomically; MongoDB currently applies them as separate operations.
+	// both changes atomically. MongoDB is atomic with the outbox enabled; otherwise
+	// it applies them as separate operations.
 	// Supports title, metadata merge-patch, and archived. Setting archived=false
 	// unarchives before syncing; plain syncs are blocked on archived conversations.
 	ConversationPatch *UpdateConversationRequest `protobuf:"bytes,3,opt,name=conversation_patch,json=conversationPatch,proto3,oneof" json:"conversation_patch,omitempty"`
@@ -2486,9 +2486,11 @@ type AppendEntryRequest struct {
 	Entry *CreateEntryRequest `protobuf:"bytes,2,opt,name=entry,proto3" json:"entry,omitempty"`
 	Epoch *int64              `protobuf:"varint,3,opt,name=epoch,proto3,oneof" json:"epoch,omitempty"`
 	// Optional conversation patch applied with the append. PostgreSQL and SQLite commit
-	// both changes atomically; MongoDB currently applies them as separate operations.
+	// both changes atomically. MongoDB is atomic with the outbox enabled; otherwise
+	// it applies them as separate operations.
 	// Supports title, metadata merge-patch, and archived. Setting archived=false
-	// unarchives before appending; plain appends are blocked on archived conversations.
+	// allows the append on an archived conversation and unarchives it as part of the
+	// append; plain appends are blocked on archived conversations.
 	ConversationPatch *UpdateConversationRequest `protobuf:"bytes,4,opt,name=conversation_patch,json=conversationPatch,proto3,oneof" json:"conversation_patch,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
@@ -2555,13 +2557,24 @@ func (x *AppendEntryRequest) GetConversationPatch() *UpdateConversationRequest {
 type AppendEntriesRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Conversation identifier
-	ConversationId string                `protobuf:"bytes,1,opt,name=conversation_id,json=conversationId,proto3" json:"conversation_id,omitempty"`
-	Entries        []*CreateEntryRequest `protobuf:"bytes,2,rep,name=entries,proto3" json:"entries,omitempty"`
-	Epoch          *int64                `protobuf:"varint,3,opt,name=epoch,proto3,oneof" json:"epoch,omitempty"`
+	ConversationId string `protobuf:"bytes,1,opt,name=conversation_id,json=conversationId,proto3" json:"conversation_id,omitempty"`
+	// Entries receive strictly increasing server timestamps in request order.
+	// Later appends sort after committed entries. The first sequenced entry anchors
+	// retries of the complete batch, including entries without sequences. Identical
+	// retries return original IDs and timestamps in request order. Changed content,
+	// order, or length returns ABORTED. PostgreSQL and SQLite commit atomically;
+	// MongoDB is atomic with the outbox enabled; otherwise it can resume missing
+	// positions and finish the original inline conversation patch from the saved
+	// definition. Completed batch retries emit no append events and do not reapply
+	// conversation patches.
+	// Fully unsequenced batches have no retry guarantee.
+	Entries []*CreateEntryRequest `protobuf:"bytes,2,rep,name=entries,proto3" json:"entries,omitempty"`
+	Epoch   *int64                `protobuf:"varint,3,opt,name=epoch,proto3,oneof" json:"epoch,omitempty"`
 	// Optional conversation patch applied once for all entries. PostgreSQL and SQLite
-	// commit the entries and patch atomically; MongoDB currently applies them as separate
-	// operations. Supports title, metadata merge-patch, and
-	// archived. Setting archived=false unarchives before appending.
+	// commit the entries and patch atomically. MongoDB is atomic with the outbox
+	// enabled; otherwise it applies them as separate operations. Supports title,
+	// metadata merge-patch, and archived. Setting archived=false allows the append
+	// on an archived conversation and unarchives it as part of the append.
 	ConversationPatch *UpdateConversationRequest `protobuf:"bytes,4,opt,name=conversation_patch,json=conversationPatch,proto3,oneof" json:"conversation_patch,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
@@ -4168,7 +4181,6 @@ type Entry struct {
 	// The content array for history entries contains objects with:
 	//   - text (string): The message text.
 	//   - role (string): Either "USER" or "AI".
-	//
 	// Other content_types (e.g., "LC4J", "SpringAI") may be used for
 	// agent context entries.
 	ContentType string `protobuf:"bytes,6,opt,name=content_type,json=contentType,proto3" json:"content_type,omitempty"`

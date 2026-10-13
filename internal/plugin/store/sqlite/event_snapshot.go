@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/chirino/memory-service/internal/model"
+	"github.com/chirino/memory-service/internal/plugin/store/sqlentry"
 	registrystore "github.com/chirino/memory-service/internal/registry/store"
 	"github.com/google/uuid"
 )
@@ -105,10 +106,10 @@ func (s *SQLiteStore) AdminListEventSnapshotEntries(ctx context.Context, after *
 	}
 	q := s.dbFor(ctx).Model(&model.Entry{})
 	if after != nil {
-		q = q.Where("created_at > ? OR (created_at = ? AND id > ?)", after.CreatedAt, after.CreatedAt, after.ID)
+		q = sqlentry.WhereEntryTimeAfterAlias(q, "", after.CreatedAt, after.ID)
 	}
 	var rows []model.Entry
-	if err := q.Order("created_at ASC, id ASC").Limit(limit + 1).Find(&rows).Error; err != nil {
+	if err := q.Order(sqlentry.EntryTimeOrderSQL(q, "", false) + ", id ASC").Limit(limit + 1).Find(&rows).Error; err != nil {
 		return nil, nil, fmt.Errorf("list event snapshot entries: %w", err)
 	}
 	hasMore := len(rows) > limit

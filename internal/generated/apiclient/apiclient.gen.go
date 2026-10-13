@@ -837,7 +837,7 @@ type CreateEntryRequest struct {
 	// agent context entries.
 	ContentType string `json:"contentType"`
 
-	// ConversationPatch Optional inline conversation patch applied with the entry. PostgreSQL and SQLite commit both changes atomically in one transaction. MongoDB currently applies the entry and patch as separate operations. Supports `title`, `metadata` merge-patch (keys present are set, keys absent are left unchanged, keys explicitly set to `null` are removed), and `archived`. Setting `archived: false` unarchives the conversation before appending the entry; setting `archived: true` archives it after. Plain appends without this field are blocked on archived conversations — use `archived: false` here (or `PATCH /v1/conversations/{id}`) to unarchive first. Requires writer or higher access on the conversation (owner access for archive/unarchive). For batch requests (`entries[]`), this field is at the top level and applies once to the conversation, not per-entry.
+	// ConversationPatch Optional inline conversation patch applied with the entry. PostgreSQL and SQLite commit both changes atomically in one transaction. MongoDB does the same when the outbox is enabled. Otherwise, MongoDB applies the entry and patch as separate operations. Supports `title`, `metadata` merge-patch (keys present are set, keys absent are left unchanged, keys explicitly set to `null` are removed), and `archived`. Setting `archived: false` allows the append on an archived conversation and unarchives it as part of the append; setting `archived: true` archives it after. Plain appends without this field are blocked on archived conversations — use `archived: false` here (or `PATCH /v1/conversations/{id}`) to unarchive first. Requires writer or higher access on the conversation (owner access for archive/unarchive). For batch requests (`entries[]`), this field is at the top level and applies once to the conversation, not per-entry.
 	ConversationPatch *UpdateConversationRequest `json:"conversationPatch,omitempty"`
 
 	// ForkedAtConversationId If the target conversation doesn't exist yet, auto-create it as a fork of this conversation. Ignored when the conversation already exists.
@@ -853,8 +853,10 @@ type CreateEntryRequest struct {
 
 	// Seq Optional client-assigned sequence number. Must be unique within the
 	// conversation. An exact retry returns the stored entry, including after
-	// later sequenced entries have been appended. A partial or conflicting
-	// duplicate returns 409 Conflict. Returns 400 Bad Request if the value is
+	// later sequenced entries have been appended. In a batch, the first
+	// sequenced entry anchors retries of the entire original batch. Matching
+	// partial batches can resume on MongoDB. A conflicting duplicate returns
+	// 409 Conflict. Returns 400 Bad Request if the value is
 	// negative or exceeds 4294967295.
 	Seq *int `json:"seq,omitempty"`
 
@@ -2115,7 +2117,19 @@ type ClientInterface interface {
 
 	// AppendConversationEntryWithBody Append an entry
 	//
-	// Appends a new entry to the conversation.
+	// Appends entries with strictly increasing server timestamps in request order.
+	// Later appends sort after previously committed entries in the conversation.
+	//
+	// A batch containing a sequence number uses its first sequenced entry as a
+	// conversation-scoped retry anchor. An identical retry returns the original
+	// entries in request order, including their IDs and timestamps. Changed
+	// content, order, or batch length returns 409 Conflict. PostgreSQL and SQLite
+	// commit the entire batch atomically. MongoDB also commits atomically when
+	// the outbox is enabled. Otherwise, it can resume missing positions and finish
+	// the original inline conversation patch from the saved batch definition.
+	// Completed batch retries do not emit append
+	// events or reapply conversation patches. Fully unsequenced batches have no
+	// retry guarantee. History projections can keep their sequence unset.
 	//
 	// This endpoint is used by both end-user clients and agents.
 	// The service determines whether the caller is a user or an agent
@@ -2129,7 +2143,19 @@ type ClientInterface interface {
 
 	// AppendConversationEntry Append an entry
 	//
-	// Appends a new entry to the conversation.
+	// Appends entries with strictly increasing server timestamps in request order.
+	// Later appends sort after previously committed entries in the conversation.
+	//
+	// A batch containing a sequence number uses its first sequenced entry as a
+	// conversation-scoped retry anchor. An identical retry returns the original
+	// entries in request order, including their IDs and timestamps. Changed
+	// content, order, or batch length returns 409 Conflict. PostgreSQL and SQLite
+	// commit the entire batch atomically. MongoDB also commits atomically when
+	// the outbox is enabled. Otherwise, it can resume missing positions and finish
+	// the original inline conversation patch from the saved batch definition.
+	// Completed batch retries do not emit append
+	// events or reapply conversation patches. Fully unsequenced batches have no
+	// retry guarantee. History projections can keep their sequence unset.
 	//
 	// This endpoint is used by both end-user clients and agents.
 	// The service determines whether the caller is a user or an agent
@@ -2898,7 +2924,19 @@ func (c *Client) ListConversationEntries(ctx context.Context, conversationId str
 
 // AppendConversationEntryWithBody Append an entry
 //
-// Appends a new entry to the conversation.
+// Appends entries with strictly increasing server timestamps in request order.
+// Later appends sort after previously committed entries in the conversation.
+//
+// A batch containing a sequence number uses its first sequenced entry as a
+// conversation-scoped retry anchor. An identical retry returns the original
+// entries in request order, including their IDs and timestamps. Changed
+// content, order, or batch length returns 409 Conflict. PostgreSQL and SQLite
+// commit the entire batch atomically. MongoDB also commits atomically when
+// the outbox is enabled. Otherwise, it can resume missing positions and finish
+// the original inline conversation patch from the saved batch definition.
+// Completed batch retries do not emit append
+// events or reapply conversation patches. Fully unsequenced batches have no
+// retry guarantee. History projections can keep their sequence unset.
 //
 // This endpoint is used by both end-user clients and agents.
 // The service determines whether the caller is a user or an agent
@@ -2922,7 +2960,19 @@ func (c *Client) AppendConversationEntryWithBody(ctx context.Context, conversati
 
 // AppendConversationEntry Append an entry
 //
-// Appends a new entry to the conversation.
+// Appends entries with strictly increasing server timestamps in request order.
+// Later appends sort after previously committed entries in the conversation.
+//
+// A batch containing a sequence number uses its first sequenced entry as a
+// conversation-scoped retry anchor. An identical retry returns the original
+// entries in request order, including their IDs and timestamps. Changed
+// content, order, or batch length returns 409 Conflict. PostgreSQL and SQLite
+// commit the entire batch atomically. MongoDB also commits atomically when
+// the outbox is enabled. Otherwise, it can resume missing positions and finish
+// the original inline conversation patch from the saved batch definition.
+// Completed batch retries do not emit append
+// events or reapply conversation patches. Fully unsequenced batches have no
+// retry guarantee. History projections can keep their sequence unset.
 //
 // This endpoint is used by both end-user clients and agents.
 // The service determines whether the caller is a user or an agent
@@ -6111,7 +6161,19 @@ type ClientWithResponsesInterface interface {
 
 	// AppendConversationEntryWithBodyWithResponse Append an entry
 	//
-	// Appends a new entry to the conversation.
+	// Appends entries with strictly increasing server timestamps in request order.
+	// Later appends sort after previously committed entries in the conversation.
+	//
+	// A batch containing a sequence number uses its first sequenced entry as a
+	// conversation-scoped retry anchor. An identical retry returns the original
+	// entries in request order, including their IDs and timestamps. Changed
+	// content, order, or batch length returns 409 Conflict. PostgreSQL and SQLite
+	// commit the entire batch atomically. MongoDB also commits atomically when
+	// the outbox is enabled. Otherwise, it can resume missing positions and finish
+	// the original inline conversation patch from the saved batch definition.
+	// Completed batch retries do not emit append
+	// events or reapply conversation patches. Fully unsequenced batches have no
+	// retry guarantee. History projections can keep their sequence unset.
 	//
 	// This endpoint is used by both end-user clients and agents.
 	// The service determines whether the caller is a user or an agent
@@ -6125,7 +6187,19 @@ type ClientWithResponsesInterface interface {
 
 	// AppendConversationEntryWithResponse Append an entry
 	//
-	// Appends a new entry to the conversation.
+	// Appends entries with strictly increasing server timestamps in request order.
+	// Later appends sort after previously committed entries in the conversation.
+	//
+	// A batch containing a sequence number uses its first sequenced entry as a
+	// conversation-scoped retry anchor. An identical retry returns the original
+	// entries in request order, including their IDs and timestamps. Changed
+	// content, order, or batch length returns 409 Conflict. PostgreSQL and SQLite
+	// commit the entire batch atomically. MongoDB also commits atomically when
+	// the outbox is enabled. Otherwise, it can resume missing positions and finish
+	// the original inline conversation patch from the saved batch definition.
+	// Completed batch retries do not emit append
+	// events or reapply conversation patches. Fully unsequenced batches have no
+	// retry guarantee. History projections can keep their sequence unset.
 	//
 	// This endpoint is used by both end-user clients and agents.
 	// The service determines whether the caller is a user or an agent
@@ -8849,7 +8923,19 @@ func (c *ClientWithResponses) ListConversationEntriesWithResponse(ctx context.Co
 
 // AppendConversationEntryWithBodyWithResponse Append an entry
 //
-// Appends a new entry to the conversation.
+// Appends entries with strictly increasing server timestamps in request order.
+// Later appends sort after previously committed entries in the conversation.
+//
+// A batch containing a sequence number uses its first sequenced entry as a
+// conversation-scoped retry anchor. An identical retry returns the original
+// entries in request order, including their IDs and timestamps. Changed
+// content, order, or batch length returns 409 Conflict. PostgreSQL and SQLite
+// commit the entire batch atomically. MongoDB also commits atomically when
+// the outbox is enabled. Otherwise, it can resume missing positions and finish
+// the original inline conversation patch from the saved batch definition.
+// Completed batch retries do not emit append
+// events or reapply conversation patches. Fully unsequenced batches have no
+// retry guarantee. History projections can keep their sequence unset.
 //
 // This endpoint is used by both end-user clients and agents.
 // The service determines whether the caller is a user or an agent
@@ -8869,7 +8955,19 @@ func (c *ClientWithResponses) AppendConversationEntryWithBodyWithResponse(ctx co
 
 // AppendConversationEntryWithResponse Append an entry
 //
-// Appends a new entry to the conversation.
+// Appends entries with strictly increasing server timestamps in request order.
+// Later appends sort after previously committed entries in the conversation.
+//
+// A batch containing a sequence number uses its first sequenced entry as a
+// conversation-scoped retry anchor. An identical retry returns the original
+// entries in request order, including their IDs and timestamps. Changed
+// content, order, or batch length returns 409 Conflict. PostgreSQL and SQLite
+// commit the entire batch atomically. MongoDB also commits atomically when
+// the outbox is enabled. Otherwise, it can resume missing positions and finish
+// the original inline conversation patch from the saved batch definition.
+// Completed batch retries do not emit append
+// events or reapply conversation patches. Fully unsequenced batches have no
+// retry guarantee. History projections can keep their sequence unset.
 //
 // This endpoint is used by both end-user clients and agents.
 // The service determines whether the caller is a user or an agent

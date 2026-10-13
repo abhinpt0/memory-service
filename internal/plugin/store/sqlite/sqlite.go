@@ -89,6 +89,9 @@ func (m *sqliteMigrator) Migrate(ctx context.Context) error {
 	if _, err := handle.sqlDB.ExecContext(ctx, schemaSQL); err != nil {
 		return fmt.Errorf("migration: failed to execute schema: %w", err)
 	}
+	if _, err := handle.sqlDB.ExecContext(ctx, "ALTER TABLE entries ADD COLUMN append_batch BLOB"); err != nil && !isSQLiteDuplicateColumnError(err) {
+		return fmt.Errorf("migration: add append batch definition: %w", err)
+	}
 	defaultKind, err := coreepisodic.BuiltinDefaultKindVersion(ctx)
 	if err != nil {
 		return fmt.Errorf("migration: load built-in default memory kind: %w", err)
@@ -132,6 +135,18 @@ func (m *sqliteMigrator) Migrate(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_entries_created_at_unix_ms ON entries(created_at_unix_ms)`); err != nil {
 		return fmt.Errorf("migration: failed to create idx_entries_created_at_unix_ms index: %w", err)
 	}
+	if _, err := handle.sqlDB.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_entries_group_created_at_unix_ms ON entries(conversation_group_id,created_at_unix_ms)`); err != nil {
+		return fmt.Errorf("migration: index append timestamp allocation: %w", err)
+	}
+	for _, statement := range []string{
+		`CREATE INDEX IF NOT EXISTS idx_entries_group_channel_unix_ms ON entries(conversation_group_id, channel, created_at_unix_ms)`,
+		`CREATE INDEX IF NOT EXISTS idx_entries_conversation_channel_unix_ms ON entries(conversation_id, channel, created_at_unix_ms)`,
+	} {
+		if _, err := handle.sqlDB.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("migration: create numeric entry ordering index: %w", err)
+		}
+	}
+
 	if handle.fts5Enabled {
 		if _, err := handle.sqlDB.ExecContext(ctx, ftsSchemaSQL); err != nil {
 			return fmt.Errorf("migration: failed to execute fts schema: %w", err)
@@ -1296,9 +1311,9 @@ func (s *SQLiteStore) listForks(ctx context.Context, userID string, conversation
 		firstEntryArgs = []any{conv.ConversationGroupID, model.ChannelHistory, model.ChannelJournal, *visibility.ClientID}
 	}
 	firstEntrySQL := fmt.Sprintf(`SELECT * FROM (
-		SELECT e.*, ROW_NUMBER() OVER (PARTITION BY e.conversation_id ORDER BY e.created_at ASC, CASE WHEN e.seq IS NULL THEN 0 ELSE 1 END ASC, e.seq ASC, e.id ASC) AS fork_row
+		SELECT e.*, ROW_NUMBER() OVER (PARTITION BY e.conversation_id ORDER BY %s) AS fork_row
 		FROM entries e WHERE e.conversation_group_id = ? AND %s
-	) ranked WHERE fork_row = 1`, firstEntryPredicate)
+	) ranked WHERE fork_row = 1`, sqlentry.EntryOrderSQL(db, "e", false), firstEntryPredicate)
 	if err := db.Raw(firstEntrySQL, firstEntryArgs...).Scan(&firstEntries).Error; err != nil {
 		return nil, err
 	}
@@ -1870,6 +1885,12 @@ func (s *SQLiteStore) AppendEntriesBeforeUnarchive(ctx context.Context, userID s
 }
 
 func (s *SQLiteStore) appendEntries(ctx context.Context, userID string, conversationID string, entries []registrystore.CreateEntryRequest, clientID *string, agentID *string, epoch *int64, allowArchived bool) ([]model.Entry, error) {
+	if len(entries) == 0 {
+		return []model.Entry{}, nil
+	}
+	if err := registrystore.ValidateAppendSequences(entries); err != nil {
+		return nil, err
+	}
 	if err := registrystore.ValidateEntryEpochChannels(entries, epoch); err != nil {
 		return nil, &registrystore.ValidationError{Field: "epoch", Message: err.Error()}
 	}
@@ -1967,7 +1988,26 @@ func (s *SQLiteStore) appendEntries(ctx context.Context, userID string, conversa
 		}
 	}
 
-	now := time.Now()
+	// Serialize allocation for the conversation group, including native forks.
+	var latest model.Entry
+	if err := db.Select("created_at").Where("conversation_group_id = ?", conv.ConversationGroupID).Order("created_at_unix_ms DESC").Limit(1).Find(&latest).Error; err != nil {
+		return nil, err
+	}
+	now := registrystore.NextAppendTime(time.Now(), latest.CreatedAt)
+	batch := registrystore.NewAppendBatch(registrystore.SequencedAppendRequest{Entries: entries, UserID: userID, ClientID: clientID, AgentID: agentID, Epoch: epoch}, now)
+	var batchData []byte
+	anchor := batch.Request.Anchor()
+	if len(entries) > 1 && anchor >= 0 {
+		data, err := registrystore.EncodeAppendBatch(ctx, s, batch)
+		if err != nil {
+			return nil, err
+		}
+		batchData, err = s.encryptEntryContent(batch.IDs[anchor], data)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	result := make([]model.Entry, len(entries))
 	for i, req := range entries {
 		ch := model.Channel(strings.ToLower(req.Channel))
@@ -1976,7 +2016,7 @@ func (s *SQLiteStore) appendEntries(ctx context.Context, userID string, conversa
 		}
 
 		entryEpoch := registrystore.EpochForChannel(ch, epoch)
-		entryID := uuid.New()
+		entryID := batch.IDs[i]
 
 		encContent, err := s.encryptEntryContent(entryID, req.Content)
 		if err != nil {
@@ -1995,7 +2035,10 @@ func (s *SQLiteStore) appendEntries(ctx context.Context, userID string, conversa
 			ContentType:         req.ContentType,
 			Content:             encContent,
 			IndexedContent:      req.IndexedContent,
-			CreatedAt:           now,
+			CreatedAt:           now.Add(time.Duration(i) * time.Millisecond),
+		}
+		if i == anchor {
+			entry.AppendBatch = batchData
 		}
 		if err := db.Create(&entry).Error; err != nil {
 			if _, ok := sqliteUniqueViolation(err); ok {
@@ -2029,7 +2072,7 @@ func (s *SQLiteStore) appendEntries(ctx context.Context, userID string, conversa
 	}
 
 	// Update conversation timestamp
-	db.Model(&model.Conversation{}).Where("id = ?", conversationID).Update("updated_at", now)
+	db.Model(&model.Conversation{}).Where("id = ?", conversationID).Update("updated_at", now.Add(time.Duration(len(entries)-1)*time.Millisecond))
 
 	// Keep memory latest-epoch cache warm after memory appends.
 	if clientID != nil {
@@ -2183,7 +2226,11 @@ func (s *SQLiteStore) SyncAgentEntry(ctx context.Context, userID string, convers
 		appendContent = marshalContentArray(incomingContent)
 	}
 
-	now := time.Now()
+	var latestCreated model.Entry
+	if err := db.Select("created_at").Where("conversation_group_id = ?", conv.ConversationGroupID).Order("created_at_unix_ms DESC").Limit(1).Find(&latestCreated).Error; err != nil {
+		return nil, err
+	}
+	now := registrystore.NextAppendTime(time.Now(), latestCreated.CreatedAt)
 	entryID := uuid.New()
 	encContent, err := s.encryptEntryContent(entryID, appendContent)
 	if err != nil {
@@ -2310,11 +2357,19 @@ func (s *SQLiteStore) IndexEntries(ctx context.Context, entries []registrystore.
 func (s *SQLiteStore) ListUnindexedEntries(ctx context.Context, limit int, afterCursor *string) ([]model.Entry, *string, error) {
 	tx := s.dbFor(ctx).
 		Where("channel = ? AND indexed_content IS NULL", model.ChannelHistory).
-		Order("created_at ASC").
+		Order(sqlentry.EntryOrderSQL(s.dbFor(ctx), "", false)).
 		Limit(limit + 1)
 
 	if afterCursor != nil {
-		tx = tx.Where("created_at > (SELECT MAX(e.created_at) FROM entries e WHERE e.id = ?)", *afterCursor)
+		var anchor model.Entry
+		found := s.dbFor(ctx).Where("id = ?", *afterCursor).Limit(1).Find(&anchor)
+		if found.Error != nil {
+			return nil, nil, found.Error
+		}
+		if found.RowsAffected == 0 {
+			return []model.Entry{}, nil, nil
+		}
+		tx = sqlentry.WhereEntryOrderStrictlyAfterAlias(tx, "", anchor, sqlentry.UUIDStringValue)
 	}
 
 	var entries []model.Entry
@@ -2348,7 +2403,7 @@ func (s *SQLiteStore) FindEntriesPendingVectorIndexing(ctx context.Context, limi
 	var entries []model.Entry
 	err := s.dbFor(ctx).
 		Where("indexed_content IS NOT NULL AND indexed_at IS NULL").
-		Order("created_at ASC").
+		Order(sqlentry.EntryOrderSQL(s.dbFor(ctx), "", false)).
 		Limit(limit).
 		Find(&entries).Error
 	if err != nil {
@@ -3653,7 +3708,7 @@ func (s *SQLiteStore) listEntriesForGroup(ctx context.Context, groupID uuid.UUID
 	var entries []model.Entry
 	if err := s.dbFor(ctx).
 		Where("conversation_group_id = ?", groupID).
-		Order("created_at ASC, seq ASC NULLS FIRST, id ASC").
+		Order(sqlentry.EntryOrderSQL(s.dbFor(ctx), "", false)).
 		Find(&entries).Error; err != nil {
 		return nil, fmt.Errorf("failed to list entries: %w", err)
 	}
@@ -3669,7 +3724,7 @@ func (s *SQLiteStore) listVisibleEntriesForConversation(ctx context.Context, con
 		Joins("LEFT JOIN entries boundary ON boundary.conversation_group_id = ca.conversation_group_id AND boundary.id = ca.before_entry_id").
 		Where("e.conversation_group_id = ?", conv.ConversationGroupID).
 		Where(visibleAncestryEntrySQL("e", "ca", "boundary")).
-		Order("e.created_at ASC, e.seq ASC NULLS FIRST, e.id ASC").
+		Order(sqlentry.EntryOrderSQL(s.dbFor(ctx), "e", false)).
 		Find(&entries).Error
 	if err != nil {
 		return nil, fmt.Errorf("failed to list visible entries: %w", err)
@@ -3745,7 +3800,7 @@ func (s *SQLiteStore) listLatestVisibleContextEntries(ctx context.Context, conv 
 	var entries []model.Entry
 	err := base.Session(&gorm.Session{}).
 		Where("COALESCE(e.epoch, 0) = ?", *epochRow.MaxEpoch).
-		Order("e.created_at ASC, e.seq ASC NULLS FIRST, e.id ASC").
+		Order(sqlentry.EntryOrderSQL(s.dbFor(ctx), "e", false)).
 		Find(&entries).Error
 	if err != nil {
 		return nil, fmt.Errorf("failed to list latest context entries: %w", err)
@@ -3759,9 +3814,9 @@ func visibleAncestryEntrySQL(entryAlias, ancestryAlias, boundaryAlias string) st
 		OR (
 			%s.before_entry_id IS NOT NULL
 			AND (
-				%s.created_at < %s.created_at
+				%s < %s
 				OR (
-					%s.created_at = %s.created_at
+					%s = %s
 					AND (
 						(%s.seq IS NULL AND %s.seq IS NULL AND %s.id < %s.id)
 						OR (
@@ -3778,8 +3833,8 @@ func visibleAncestryEntrySQL(entryAlias, ancestryAlias, boundaryAlias string) st
 		)
 	)`, ancestryAlias,
 		ancestryAlias,
-		entryAlias, boundaryAlias,
-		entryAlias, boundaryAlias,
+		sqlentry.SQLiteEntryTimeSQL(entryAlias), sqlentry.SQLiteEntryTimeSQL(boundaryAlias),
+		sqlentry.SQLiteEntryTimeSQL(entryAlias), sqlentry.SQLiteEntryTimeSQL(boundaryAlias),
 		entryAlias, boundaryAlias, entryAlias, boundaryAlias,
 		boundaryAlias,
 		entryAlias,
@@ -4082,7 +4137,7 @@ func (s *SQLiteStore) boundedHistoryBackward(ctx context.Context, ancestry []for
 
 		tx := s.dbFor(ctx).
 			Where("conversation_id = ? AND channel = ?", seg.ConversationID, model.ChannelHistory).
-			Order("created_at DESC, seq DESC NULLS LAST, id DESC")
+			Order(sqlentry.EntryOrderSQL(s.dbFor(ctx), "", true))
 
 		if !isTarget && seg.StopAtEntryID != nil {
 			var stopAt model.Entry
@@ -4168,16 +4223,7 @@ func entryOrderLess(left, right model.Entry) bool {
 }
 
 func whereEntryOrderBefore(tx *gorm.DB, bound model.Entry) *gorm.DB {
-	if bound.Seq == nil {
-		return tx.Where(
-			"created_at < ? OR (created_at = ? AND seq IS NULL AND id < ?)",
-			bound.CreatedAt, bound.CreatedAt, bound.ID.String(),
-		)
-	}
-	return tx.Where(
-		"created_at < ? OR (created_at = ? AND (seq IS NULL OR seq < ? OR (seq = ? AND id < ?)))",
-		bound.CreatedAt, bound.CreatedAt, *bound.Seq, *bound.Seq, bound.ID.String(),
-	)
+	return sqlentry.WhereEntryOrderBeforeAlias(tx, "", bound, sqlentry.UUIDStringValue)
 }
 
 func normalizeEpochFilter(filter *registrystore.MemoryEpochFilter) registrystore.MemoryEpochFilter {

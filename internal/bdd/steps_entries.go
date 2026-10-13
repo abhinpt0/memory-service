@@ -14,6 +14,7 @@ func init() {
 		e := &entrySteps{s: s}
 		// Given steps - conversation entry setup
 		ctx.Step(`^the conversation has no entries$`, e.theConversationHasNoEntries)
+		ctx.Step(`^the Mongo append batch stopped after anchor "([^"]*)"$`, e.theMongoAppendBatchStoppedAfterAnchor)
 		ctx.Step(`^the conversation has an entry "([^"]*)"$`, e.theConversationHasAnEntry)
 		ctx.Step(`^the conversation has (\d+) entry$`, e.theConversationHasEntries)
 		ctx.Step(`^the conversation has (\d+) entries$`, e.theConversationHasEntries)
@@ -349,4 +350,18 @@ func (e *entrySteps) iSearchEntriesForQuery(query string) error {
 func (e *entrySteps) iSearchConversationsForQuery(query string) error {
 	body := fmt.Sprintf(`{"query": %q}`, query)
 	return e.s.SendHTTPRequestWithJSONBodyAndStyle("POST", "/v1/conversations/search", &godog.DocString{Content: body}, false, false)
+}
+
+func (e *entrySteps) theMongoAppendBatchStoppedAfterAnchor(anchorID string) error {
+	expanded, err := e.s.Expand(anchorID)
+	if err != nil {
+		return err
+	}
+	db, ok := e.s.TestDB().(interface {
+		InterruptAppendBatch(context.Context, string) error
+	})
+	if !ok {
+		return fmt.Errorf("append interruption requires MongoDB")
+	}
+	return db.InterruptAppendBatch(context.Background(), expanded)
 }

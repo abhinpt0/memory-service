@@ -68,6 +68,7 @@ func setupPagerTestEntries(t *testing.T) (*gorm.DB, []model.Entry) {
 	require.NoError(t, err)
 	require.NoError(t, db.Exec(`
 		CREATE TABLE entries (
+			append_batch BLOB,
 			id TEXT NOT NULL,
 			conversation_id TEXT NOT NULL,
 			conversation_group_id TEXT NOT NULL,
@@ -82,6 +83,7 @@ func setupPagerTestEntries(t *testing.T) (*gorm.DB, []model.Entry) {
 			indexed_content TEXT,
 			indexed_at DATETIME,
 			created_at DATETIME NOT NULL,
+			created_at_unix_ms INTEGER,
 			PRIMARY KEY (id, conversation_group_id)
 		)
 	`).Error)
@@ -94,6 +96,9 @@ func setupPagerTestEntries(t *testing.T) (*gorm.DB, []model.Entry) {
 		pagerTestEntry(groupID, baseTime.Add(2*time.Second)),
 	}
 	require.NoError(t, db.Create(&entries).Error)
+	for _, entry := range entries {
+		require.NoError(t, db.Exec("UPDATE entries SET created_at_unix_ms = ? WHERE id = ?", entry.CreatedAt.UnixMilli(), entry.ID.String()).Error)
+	}
 	return db, entries
 }
 

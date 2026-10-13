@@ -401,6 +401,7 @@ type MongoStore struct {
 	enc                          *dataencryption.Service
 	entriesCache                 registrycache.MemoryEntriesCache
 	maxBSONDocumentSizeOverride  int
+	appendBatchPatchBeforeApply  func() error              // test-only patch failure hook; nil in production
 	metadataPatchBeforeUpdate    func()                    // test-only synchronization hook; nil in production
 	materializeBeforeTransaction func(bson.ObjectID) error // test-only fault-injection hook; nil in production
 }
@@ -413,10 +414,8 @@ func (s *MongoStore) InReadTx(ctx context.Context, fn func(context.Context) erro
 	return fn(txscope.WithIntent(ctx, txscope.IntentRead))
 }
 
-// InWriteTx only records write intent; it does not open a MongoDB session
-// transaction, so multi-write flows (conversationPatch, outbox appends) are not
-// atomic on Mongo (the episodic store opens its own session transactions).
-// See WORKAROUNDS.md.
+// InWriteTx opens a MongoDB transaction when the outbox is enabled. Otherwise
+// it records write intent only, allowing partial writes that batch retries recover.
 func (s *MongoStore) InWriteTx(ctx context.Context, fn func(context.Context) error) error {
 	if !s.OutboxEnabled() {
 		return fn(txscope.WithIntent(ctx, txscope.IntentWrite))
@@ -478,26 +477,30 @@ func (s *MongoStore) decryptEntryContent(entryID string, data []byte) ([]byte, e
 // --- MongoDB document types ---
 
 type groupDoc struct {
-	ID         string     `bson:"_id"`
-	CreatedAt  time.Time  `bson:"created_at"`
-	ArchivedAt *time.Time `bson:"archived_at,omitempty"`
+	AppendPatch   *appendPatchReceipt `bson:"append_patch,omitempty"`
+	PatchRevision int64               `bson:"patch_revision"`
+	ID            string              `bson:"_id"`
+	CreatedAt     time.Time           `bson:"created_at"`
+	ArchivedAt    *time.Time          `bson:"archived_at,omitempty"`
 }
 
 type convDoc struct {
-	ID                      string         `bson:"_id"`
-	Title                   []byte         `bson:"title"`
-	OwnerUserID             string         `bson:"owner_user_id"`
-	ClientID                string         `bson:"client_id"`
-	AgentID                 *string        `bson:"agent_id,omitempty"`
-	Metadata                map[string]any `bson:"metadata"`
-	ConversationGroupID     string         `bson:"conversation_group_id"`
-	ForkedAtConversationID  *string        `bson:"-"`
-	ForkedAtEntryID         *uuid.UUID     `bson:"-"`
-	StartedByConversationID *string        `bson:"started_by_conversation_id,omitempty"`
-	StartedByEntryID        *string        `bson:"started_by_entry_id,omitempty"`
-	CreatedAt               time.Time      `bson:"created_at"`
-	UpdatedAt               time.Time      `bson:"updated_at"`
-	ArchivedAt              *time.Time     `bson:"archived_at,omitempty"`
+	AppendPatch             *appendPatchReceipt `bson:"append_patch,omitempty"`
+	PatchRevision           int64               `bson:"patch_revision"`
+	ID                      string              `bson:"_id"`
+	Title                   []byte              `bson:"title"`
+	OwnerUserID             string              `bson:"owner_user_id"`
+	ClientID                string              `bson:"client_id"`
+	AgentID                 *string             `bson:"agent_id,omitempty"`
+	Metadata                map[string]any      `bson:"metadata"`
+	ConversationGroupID     string              `bson:"conversation_group_id"`
+	ForkedAtConversationID  *string             `bson:"-"`
+	ForkedAtEntryID         *uuid.UUID          `bson:"-"`
+	StartedByConversationID *string             `bson:"started_by_conversation_id,omitempty"`
+	StartedByEntryID        *string             `bson:"started_by_entry_id,omitempty"`
+	CreatedAt               time.Time           `bson:"created_at"`
+	UpdatedAt               time.Time           `bson:"updated_at"`
+	ArchivedAt              *time.Time          `bson:"archived_at,omitempty"`
 }
 
 type ancestryAncestorDoc struct {
@@ -522,21 +525,25 @@ type memberDoc struct {
 }
 
 type entryDoc struct {
-	ID                  string     `bson:"_id"`
-	ConversationID      string     `bson:"conversation_id"`
-	ConversationGroupID string     `bson:"conversation_group_id"`
-	UserID              *string    `bson:"user_id,omitempty"`
-	ClientID            *string    `bson:"client_id,omitempty"`
-	AgentID             *string    `bson:"agent_id,omitempty"`
-	Channel             string     `bson:"channel"`
-	Epoch               *int64     `bson:"epoch,omitempty"`
-	Seq                 *uint32    `bson:"seq,omitempty"`
-	ContentType         string     `bson:"content_type"`
-	Content             []byte     `bson:"content"`
-	IndexedContent      *string    `bson:"indexed_content,omitempty"`
-	IndexedAt           *time.Time `bson:"indexed_at,omitempty"`
-	Role                *string    `bson:"role,omitempty"`
-	CreatedAt           time.Time  `bson:"created_at"`
+	AppendBatchPatchChanged  bool       `bson:"append_batch_patch_changed,omitempty"`
+	AppendBatchPatchArchived *bool      `bson:"append_batch_patch_archived,omitempty"`
+	AppendBatchComplete      bool       `bson:"append_batch_complete,omitempty"`
+	AppendBatch              []byte     `bson:"append_batch,omitempty"`
+	ID                       string     `bson:"_id"`
+	ConversationID           string     `bson:"conversation_id"`
+	ConversationGroupID      string     `bson:"conversation_group_id"`
+	UserID                   *string    `bson:"user_id,omitempty"`
+	ClientID                 *string    `bson:"client_id,omitempty"`
+	AgentID                  *string    `bson:"agent_id,omitempty"`
+	Channel                  string     `bson:"channel"`
+	Epoch                    *int64     `bson:"epoch,omitempty"`
+	Seq                      *uint32    `bson:"seq,omitempty"`
+	ContentType              string     `bson:"content_type"`
+	Content                  []byte     `bson:"content"`
+	IndexedContent           *string    `bson:"indexed_content,omitempty"`
+	IndexedAt                *time.Time `bson:"indexed_at,omitempty"`
+	Role                     *string    `bson:"role,omitempty"`
+	CreatedAt                time.Time  `bson:"created_at"`
 }
 
 // entrySearchDoc is a flat struct (not using bson:",inline") to avoid mongo-driver v2
@@ -1694,12 +1701,27 @@ func (s *MongoStore) UpdateConversation(ctx context.Context, userID string, conv
 		s.metadataPatchBeforeUpdate()
 	}
 
+	pipeline, err := s.conversationPatchPipeline(conversationID, title, metadata)
+	if err != nil {
+		return nil, err
+	}
+	_, err = s.conversations().UpdateByID(ctx, conversationID, pipeline)
+	if err != nil {
+		return nil, fmt.Errorf("failed to update conversation: %w", err)
+	}
+	return s.GetConversation(ctx, userID, conversationID)
+}
+
+func (s *MongoStore) conversationPatchPipeline(conversationID string, title *string, metadata registrystore.MetadataPatch) (mongo.Pipeline, error) {
 	// Build atomic aggregation pipeline update with constant-depth metadata expression.
 	now := time.Now().UTC()
 
-	// Build the $set stage
+	// BACKWARD COMPATIBILITY: remove in a future breaking release.
+	// Missing revisions on existing schema-v2 documents initialize to zero.
+	// Build the $set stage.
 	setStage := bson.M{
-		"updated_at": now,
+		"updated_at":     now,
+		"patch_revision": bson.M{"$add": bson.A{bson.M{"$ifNull": bson.A{"$patch_revision", 0}}, 1}},
 	}
 
 	if title != nil {
@@ -1769,11 +1791,7 @@ func (s *MongoStore) UpdateConversation(ctx context.Context, userID string, conv
 		{{Key: "$set", Value: setStage}},
 	}
 
-	_, err = s.conversations().UpdateByID(ctx, string(conversationID), pipeline)
-	if err != nil {
-		return nil, fmt.Errorf("failed to update conversation: %w", err)
-	}
-	return s.GetConversation(ctx, userID, conversationID)
+	return pipeline, nil
 }
 
 func (s *MongoStore) ArchiveConversation(ctx context.Context, userID string, conversationID string) error {
@@ -1790,10 +1808,10 @@ func (s *MongoStore) ArchiveConversation(ctx context.Context, userID string, con
 	}
 
 	now := time.Now()
-	s.groups().UpdateByID(ctx, doc.ConversationGroupID, bson.M{"$set": bson.M{"archived_at": now}})
+	s.groups().UpdateByID(ctx, doc.ConversationGroupID, bson.M{"$set": bson.M{"archived_at": now}, "$inc": bson.M{"patch_revision": 1}})
 	s.conversations().UpdateMany(ctx,
 		bson.M{"conversation_group_id": doc.ConversationGroupID, "archived_at": bson.M{"$exists": false}},
-		bson.M{"$set": bson.M{"archived_at": now}},
+		bson.M{"$set": bson.M{"archived_at": now}, "$inc": bson.M{"patch_revision": 1}},
 	)
 
 	return nil
@@ -1808,7 +1826,7 @@ func (s *MongoStore) ArchiveConversationIfNeeded(ctx context.Context, userID str
 		return registrystore.ArchiveConversationResult{}, err
 	}
 	now := time.Now()
-	result, err := s.groups().UpdateOne(ctx, bson.M{"_id": doc.ConversationGroupID, "archived_at": bson.M{"$exists": false}}, bson.M{"$set": bson.M{"archived_at": now}})
+	result, err := s.groups().UpdateOne(ctx, bson.M{"_id": doc.ConversationGroupID, "archived_at": bson.M{"$exists": false}}, bson.M{"$set": bson.M{"archived_at": now}, "$inc": bson.M{"patch_revision": 1}})
 	if err != nil {
 		return registrystore.ArchiveConversationResult{}, err
 	}
@@ -1819,7 +1837,7 @@ func (s *MongoStore) ArchiveConversationIfNeeded(ctx context.Context, userID str
 	// The group timestamp is authoritative. Always converge conversation documents,
 	// including when a prior caller changed the group but failed before UpdateMany.
 	if group.ArchivedAt != nil {
-		if _, err := s.conversations().UpdateMany(ctx, bson.M{"conversation_group_id": doc.ConversationGroupID}, bson.M{"$set": bson.M{"archived_at": *group.ArchivedAt}}); err != nil {
+		if _, err := s.conversations().UpdateMany(ctx, bson.M{"conversation_group_id": doc.ConversationGroupID}, bson.M{"$set": bson.M{"archived_at": *group.ArchivedAt}, "$inc": bson.M{"patch_revision": 1}}); err != nil {
 			return registrystore.ArchiveConversationResult{}, err
 		}
 	}
@@ -1839,10 +1857,10 @@ func (s *MongoStore) UnarchiveConversation(ctx context.Context, userID string, c
 		return err
 	}
 
-	s.groups().UpdateByID(ctx, doc.ConversationGroupID, bson.M{"$unset": bson.M{"archived_at": ""}})
+	s.groups().UpdateByID(ctx, doc.ConversationGroupID, bson.M{"$unset": bson.M{"archived_at": ""}, "$inc": bson.M{"patch_revision": 1}})
 	s.conversations().UpdateMany(ctx,
 		bson.M{"conversation_group_id": doc.ConversationGroupID, "archived_at": bson.M{"$exists": true}},
-		bson.M{"$unset": bson.M{"archived_at": ""}},
+		bson.M{"$unset": bson.M{"archived_at": ""}, "$inc": bson.M{"patch_revision": 1}},
 	)
 
 	return nil
@@ -1856,11 +1874,11 @@ func (s *MongoStore) UnarchiveConversationIfNeeded(ctx context.Context, userID s
 	if _, err := s.requireAccess(ctx, userID, doc.ConversationGroupID, model.AccessLevelOwner); err != nil {
 		return registrystore.UnarchiveConversationResult{}, err
 	}
-	result, err := s.groups().UpdateOne(ctx, bson.M{"_id": doc.ConversationGroupID, "archived_at": bson.M{"$exists": true}}, bson.M{"$unset": bson.M{"archived_at": ""}})
+	result, err := s.groups().UpdateOne(ctx, bson.M{"_id": doc.ConversationGroupID, "archived_at": bson.M{"$exists": true}}, bson.M{"$unset": bson.M{"archived_at": ""}, "$inc": bson.M{"patch_revision": 1}})
 	if err != nil {
 		return registrystore.UnarchiveConversationResult{}, err
 	}
-	if _, err := s.conversations().UpdateMany(ctx, bson.M{"conversation_group_id": doc.ConversationGroupID, "archived_at": bson.M{"$exists": true}}, bson.M{"$unset": bson.M{"archived_at": ""}}); err != nil {
+	if _, err := s.conversations().UpdateMany(ctx, bson.M{"conversation_group_id": doc.ConversationGroupID, "archived_at": bson.M{"$exists": true}}, bson.M{"$unset": bson.M{"archived_at": ""}, "$inc": bson.M{"patch_revision": 1}}); err != nil {
 		return registrystore.UnarchiveConversationResult{}, err
 	}
 	return registrystore.UnarchiveConversationResult{ConversationGroupID: strToUUID(doc.ConversationGroupID), Changed: result.ModifiedCount > 0}, nil
@@ -2641,6 +2659,12 @@ func (s *MongoStore) AppendEntriesBeforeUnarchive(ctx context.Context, userID st
 }
 
 func (s *MongoStore) appendEntries(ctx context.Context, userID string, conversationID string, entries []registrystore.CreateEntryRequest, clientID *string, agentID *string, epoch *int64, allowArchived bool) ([]model.Entry, error) {
+	if len(entries) == 0 {
+		return []model.Entry{}, nil
+	}
+	if err := registrystore.ValidateAppendSequences(entries); err != nil {
+		return nil, err
+	}
 	if err := registrystore.ValidateEntryEpochChannels(entries, epoch); err != nil {
 		return nil, &registrystore.ValidationError{Field: "epoch", Message: err.Error()}
 	}
@@ -2693,61 +2717,69 @@ func (s *MongoStore) appendEntries(ctx context.Context, userID string, conversat
 		}
 	}
 
-	now := time.Now()
-	result := make([]model.Entry, len(entries))
-	for i, req := range entries {
-		ch := strings.ToLower(req.Channel)
-		if ch == "" {
-			ch = string(model.ChannelHistory)
-		}
-
-		entryEpoch := registrystore.EpochForChannel(model.Channel(ch), epoch)
-		entryID := uuidToStr(uuid.New())
-
-		encContent, err := s.encryptEntryContent(entryID, req.Content)
+	batch, err := s.reserveAppendBatch(ctx, conv, registrystore.SequencedAppendRequest{Entries: entries, UserID: userID, ClientID: clientID, AgentID: agentID, Epoch: epoch})
+	if err != nil {
+		return nil, err
+	}
+	now := batch.Start
+	anchor := batch.Request.Anchor()
+	var batchData []byte
+	if len(entries) > 1 && anchor >= 0 {
+		data, err := registrystore.EncodeAppendBatch(ctx, s, batch)
 		if err != nil {
-			return nil, fmt.Errorf("failed to encrypt entry content: %w", err)
+			return nil, err
 		}
-		doc := entryDoc{
-			ID:                  entryID,
-			ConversationID:      string(conversationID),
-			ConversationGroupID: conv.ConversationGroupID,
-			UserID:              &userID,
-			ClientID:            clientID,
-			AgentID:             agentID,
-			Channel:             ch,
-			Epoch:               entryEpoch,
-			Seq:                 req.Seq,
-			ContentType:         req.ContentType,
-			Content:             encContent,
-			IndexedContent:      req.IndexedContent,
-			Role:                req.Role,
-			CreatedAt:           now,
+		batchData, err = s.encryptEntryContent(batch.IDs[anchor].String(), data)
+		if err != nil {
+			return nil, err
+		}
+	}
+	result := make([]model.Entry, len(entries))
+	positions := make([]int, 0, len(entries))
+	// Persist the anchor before any unsequenced prefix so a crash always leaves
+	// the complete definition from which recovery can resume.
+	if len(batchData) > 0 {
+		positions = append(positions, anchor)
+	}
+	for i := range entries {
+		if len(batchData) == 0 || i != anchor {
+			positions = append(positions, i)
+		}
+	}
+	for _, i := range positions {
+		entry := batch.Entry(i, conversationID, strToUUID(conv.ConversationGroupID))
+		doc, err := s.appendBatchDoc(entry, entries[i].Role)
+		if err != nil {
+			return nil, err
+		}
+		if i == anchor {
+			doc.AppendBatch = batchData
 		}
 		if _, err := s.entries().InsertOne(ctx, doc); err != nil {
 			if mongo.IsDuplicateKeyError(err) {
-				if cleanupErr := s.removePartiallyAppendedEntries(ctx, result[:i]); cleanupErr != nil {
-					return nil, cleanupErr
+				// A duplicate aborts a MongoDB transaction. Return the domain conflict
+				// immediately so recovery runs in a fresh scope instead of querying it.
+				if session := mongo.SessionFromContext(ctx); session != nil && session.TransactionRunning() {
+					return nil, registrystore.NewDuplicateSequenceConflict()
 				}
+				var occupied entryDoc
+				lookupErr := s.entries().FindOne(ctx, bson.M{"_id": doc.ID}).Decode(&occupied)
+				if errors.Is(lookupErr, mongo.ErrNoDocuments) {
+					// An unrelated sequence conflict rejects the new batch. Remove only
+					// positions inserted by this attempt, retaining recoverable interrupted writes.
+					if cleanupErr := s.removePartiallyAppendedEntries(ctx, result); cleanupErr != nil {
+						return nil, cleanupErr
+					}
+				} else if lookupErr != nil {
+					return nil, lookupErr
+				}
+				// Recovery can fill this same reserved ID while the original writer runs.
+
 				return nil, registrystore.NewDuplicateSequenceConflict()
 			}
 			return nil, fmt.Errorf("failed to append entry: %w", err)
 		}
-		result[i] = model.Entry{
-			ID:                  strToUUID(doc.ID),
-			ConversationID:      conversationID,
-			ConversationGroupID: strToUUID(conv.ConversationGroupID),
-			UserID:              &userID,
-			ClientID:            clientID,
-			AgentID:             agentID,
-			Channel:             model.Channel(ch),
-			Epoch:               entryEpoch,
-			Seq:                 req.Seq,
-			ContentType:         req.ContentType,
-			Content:             req.Content,
-			IndexedContent:      req.IndexedContent,
-			CreatedAt:           now,
-		}
+		result[i] = entry
 	}
 
 	// Derive conversation title from first history entry if title is empty.
@@ -2760,7 +2792,7 @@ func (s *MongoStore) appendEntries(ctx context.Context, userID string, conversat
 					if err != nil {
 						return nil, fmt.Errorf("failed to encrypt title: %w", err)
 					}
-					if _, err := s.conversations().UpdateByID(ctx, string(conversationID), bson.M{"$set": bson.M{"title": encTitle, "updated_at": now}}); err != nil {
+					if _, err := s.conversations().UpdateByID(ctx, string(conversationID), bson.M{"$set": bson.M{"title": encTitle, "updated_at": now}, "$inc": bson.M{"patch_revision": 1}}); err != nil {
 						return nil, fmt.Errorf("failed to update derived title: %w", err)
 					}
 				}
@@ -2780,6 +2812,16 @@ func (s *MongoStore) appendEntries(ctx context.Context, userID string, conversat
 				}
 				break
 			}
+		}
+	}
+
+	if len(batchData) > 0 {
+		completed, err := s.finishAppendBatch(ctx, result[anchor], batch)
+		if err != nil {
+			return nil, err
+		}
+		if !completed {
+			return nil, registrystore.NewDuplicateSequenceConflict()
 		}
 	}
 
@@ -2904,7 +2946,11 @@ func (s *MongoStore) SyncAgentEntry(ctx context.Context, userID string, conversa
 		appendContent = marshalContentArray(incomingContent)
 	}
 
-	now := time.Now()
+	reservation, err := s.reserveAppendBatch(ctx, conv, registrystore.SequencedAppendRequest{Entries: []registrystore.CreateEntryRequest{entry}})
+	if err != nil {
+		return nil, err
+	}
+	now := reservation.Start
 	entryID := uuidToStr(uuid.New())
 	encContent, err := s.encryptEntryContent(entryID, appendContent)
 	if err != nil {
@@ -3429,20 +3475,20 @@ func (s *MongoStore) AdminSetConversationArchived(ctx context.Context, conversat
 	}
 	if archived {
 		now := time.Now()
-		s.groups().UpdateByID(ctx, doc.ConversationGroupID, bson.M{"$set": bson.M{"archived_at": now}})
+		s.groups().UpdateByID(ctx, doc.ConversationGroupID, bson.M{"$set": bson.M{"archived_at": now}, "$inc": bson.M{"patch_revision": 1}})
 		s.conversations().UpdateMany(ctx,
 			bson.M{"conversation_group_id": doc.ConversationGroupID, "archived_at": bson.M{"$exists": false}},
-			bson.M{"$set": bson.M{"archived_at": now}},
+			bson.M{"$set": bson.M{"archived_at": now}, "$inc": bson.M{"patch_revision": 1}},
 		)
 		return nil
 	}
 	if doc.ArchivedAt == nil {
 		return &registrystore.ConflictError{Message: "conversation is not archived"}
 	}
-	s.groups().UpdateByID(ctx, doc.ConversationGroupID, bson.M{"$unset": bson.M{"archived_at": ""}})
+	s.groups().UpdateByID(ctx, doc.ConversationGroupID, bson.M{"$unset": bson.M{"archived_at": ""}, "$inc": bson.M{"patch_revision": 1}})
 	s.conversations().UpdateMany(ctx,
 		bson.M{"conversation_group_id": doc.ConversationGroupID},
-		bson.M{"$unset": bson.M{"archived_at": ""}},
+		bson.M{"$unset": bson.M{"archived_at": ""}, "$inc": bson.M{"patch_revision": 1}},
 	)
 	return nil
 }
@@ -6187,6 +6233,8 @@ func extractHighlight(text string) string {
 
 func (s *MongoStore) entryDocToModel(d entryDoc) model.Entry {
 	return model.Entry{
+		AppendBatch:         d.AppendBatch,
+		AppendBatchComplete: d.AppendBatchComplete,
 		ID:                  strToUUID(d.ID),
 		ConversationID:      string(d.ConversationID),
 		ConversationGroupID: strToUUID(d.ConversationGroupID),

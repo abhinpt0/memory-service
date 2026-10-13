@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 
 	"github.com/chirino/memory-service/internal/model"
@@ -22,19 +23,32 @@ type SequencedAppendRequest struct {
 }
 
 type SequencedAppendMatch struct {
+	Created     []model.Entry
 	Entries     []model.Entry
 	Exact       bool
 	AnyExisting bool
 }
 
 func FindSequencedAppendMatch(ctx context.Context, store MemoryStore, conversationID string, request SequencedAppendRequest) (SequencedAppendMatch, error) {
-	sequences, eligible := request.Sequences()
-	if !eligible {
+	anchor := request.Anchor()
+	if anchor < 0 {
 		return SequencedAppendMatch{}, nil
 	}
-	stored, err := store.GetEntriesBySequence(ctx, request.UserID, conversationID, sequences)
+	stored, err := store.GetEntriesBySequence(ctx, request.UserID, conversationID, []uint32{*request.Entries[anchor].Seq})
 	if err != nil {
 		return SequencedAppendMatch{}, err
+	}
+	if len(stored) == 0 {
+		return SequencedAppendMatch{}, nil
+	}
+	if len(stored[0].AppendBatch) > 0 {
+		return store.RecoverAppendBatch(ctx, stored[0], request)
+	}
+
+	// Single entries retain field-based retry comparison. Batches require a
+	// durable definition to distinguish the original request from a subset.
+	if len(request.Entries) != 1 {
+		return SequencedAppendMatch{AnyExisting: true}, nil
 	}
 	matched, exact := request.MatchExistingEntries(stored)
 	if !exact && len(stored) == len(request.Entries) {
@@ -125,7 +139,7 @@ func (r SequencedAppendRequest) entryMatches(requested CreateEntryRequest, exist
 	if channel == "" {
 		channel = model.ChannelHistory
 	}
-	if existing.Seq == nil || requested.Seq == nil || *existing.Seq != *requested.Seq ||
+	if !reflect.DeepEqual(existing.Seq, requested.Seq) ||
 		existing.Channel != channel || existing.ContentType != requested.ContentType ||
 		!stringPointersEqual(existing.UserID, &r.UserID) ||
 		!stringPointersEqual(existing.ClientID, r.ClientID) ||
@@ -398,6 +412,20 @@ func EpochForChannel(channel model.Channel, requested *int64) *int64 {
 	}
 	one := int64(1)
 	return &one
+}
+
+// ValidateAppendSequences rejects duplicate positions before non-atomic writes.
+func ValidateAppendSequences(entries []CreateEntryRequest) error {
+	seen := make(map[uint32]bool, len(entries))
+	for _, entry := range entries {
+		if entry.Seq != nil {
+			if seen[*entry.Seq] {
+				return NewDuplicateSequenceConflict()
+			}
+			seen[*entry.Seq] = true
+		}
+	}
+	return nil
 }
 
 // ValidateEntryEpochChannels rejects request-level epochs on batches containing
