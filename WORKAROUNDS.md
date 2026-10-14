@@ -1,5 +1,11 @@
 # Workarounds
 
+## Godog tag filter operators
+
+- What: Site test commands use comma, `&&`, and `~` tag operators, and the suite rejects a run that selects scenarios but executes none.
+- Why: The scheduling parser accepts word-based `and`, `or`, and `not`, while Godog's executor uses legacy tag syntax. Forwarding a word-based filter can report success without executing the selected scenarios.
+- Proper fix: Share one tag parser between scheduling and execution, or translate the scheduling expression into syntax supported by Godog.
+
 ## Frontend brace-expansion override
 
 - What: Both frontend manifests override the brace-expansion 1.x dependency branch to 1.1.21.

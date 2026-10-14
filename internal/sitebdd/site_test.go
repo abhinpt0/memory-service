@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/chirino/memory-service/internal/cmd/serve"
@@ -203,10 +204,15 @@ func TestSiteDocs(t *testing.T) {
 		}
 	}
 
+	var executedScenarios atomic.Int64
 	status := godog.TestSuite{
 		Name:    "site-docs",
 		Options: &opts,
 		ScenarioInitializer: func(sc *godog.ScenarioContext) {
+			sc.Before(func(ctx context.Context, _ *godog.Scenario) (context.Context, error) {
+				executedScenarios.Add(1)
+				return ctx, nil
+			})
 			s := &SiteScenario{
 				ContextVars:          map[string]any{},
 				ProjectRoot:          projectRoot,
@@ -222,6 +228,9 @@ func TestSiteDocs(t *testing.T) {
 		},
 	}.Run()
 
+	if executedScenarios.Load() == 0 {
+		t.Fatalf("GODOG_TAGS=%q selected %d scenarios, but godog executed none; use comma, &&, and ~ tag operators", tagFilter, len(scheduled))
+	}
 	if status != 0 {
 		t.Fail()
 	}
