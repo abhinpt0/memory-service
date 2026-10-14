@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	gormsqlite "gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 )
 
 func TestTimestampSQLBoundary(t *testing.T) {
@@ -108,4 +110,124 @@ func TestLegacyTimestampPrecision(t *testing.T) {
 	}
 	_, err := legacyTime("invalid")
 	require.ErrorContains(t, err, "invalid legacy SQLite timestamp")
+}
+
+func TestNullableTimestampSQLBoundary(t *testing.T) {
+	instant := time.Date(2280, 4, 17, 2, 13, 20, 123456789, time.FixedZone("east", 19800))
+	valid := sql.NullTime{Time: instant, Valid: true}
+	invalid := sql.NullTime{Time: instant}
+	cases := []struct {
+		name  string
+		value any
+		valid bool
+	}{
+		{"pointer", &instant, true},
+		{"nil pointer", (*time.Time)(nil), false},
+		{"valid NullTime", valid, true},
+		{"invalid NullTime", invalid, false},
+		{"valid NullTime pointer", &valid, true},
+		{"invalid NullTime pointer", &invalid, false},
+		{"nil NullTime pointer", (*sql.NullTime)(nil), false},
+	}
+	for _, prepared := range []bool{false, true} {
+		t.Run(map[bool]string{false: "direct", true: "prepared"}[prepared], func(t *testing.T) {
+			db, err := sql.Open(DriverName, ":memory:")
+			require.NoError(t, err)
+			defer db.Close()
+			db.SetMaxOpenConns(1)
+			_, err = db.Exec(`CREATE TABLE nullable_timestamp(expires_at INTEGER_SECONDS,expires_at_ns INTEGER); INSERT INTO nullable_timestamp DEFAULT VALUES`)
+			require.NoError(t, err)
+			update := `UPDATE nullable_timestamp SET expires_at=?,expires_at_ns=?`
+			query := `SELECT expires_at,expires_at_ns,typeof(expires_at),typeof(expires_at_ns) FROM nullable_timestamp WHERE (expires_at,expires_at_ns) IS (?,?)`
+			exec := func(value any) error { _, err := db.Exec(update, value); return err }
+			queryRow := func(value any) *sql.Row { return db.QueryRow(query, value) }
+			if prepared {
+				stmt, err := db.Prepare(update)
+				require.NoError(t, err)
+				defer stmt.Close()
+				queryStmt, err := db.Prepare(query)
+				require.NoError(t, err)
+				defer queryStmt.Close()
+				exec = func(value any) error { _, err := stmt.Exec(value); return err }
+				queryRow = func(value any) *sql.Row { return queryStmt.QueryRow(value) }
+			}
+			for _, tc := range cases {
+				t.Run(tc.name, func(t *testing.T) {
+					require.NoError(t, exec(tc.value))
+					var got *time.Time
+					var secondsType, nanosType string
+					require.NoError(t, queryRow(tc.value).Scan(&got, &secondsType, &nanosType))
+					if tc.valid {
+						require.NotNil(t, got)
+						require.True(t, instant.Equal(*got))
+						require.Equal(t, "integer", secondsType)
+						require.Equal(t, "integer", nanosType)
+					} else {
+						require.Nil(t, got)
+						require.Equal(t, "null", secondsType)
+						require.Equal(t, "null", nanosType)
+					}
+				})
+			}
+			var isNull bool
+			for _, value := range []any{nil, sql.NullString{}, (*string)(nil)} {
+				require.NoError(t, db.QueryRow(`SELECT ? IS NULL`, value).Scan(&isNull))
+				require.True(t, isNull)
+			}
+			var number int
+			require.NoError(t, db.QueryRow(`SELECT :number`, sql.Named("number", 7)).Scan(&number))
+			require.Equal(t, 7, number)
+			require.ErrorContains(t, db.QueryRow(`SELECT :instant`, sql.Named("instant", invalid)).Scan(new(time.Time)), "positional parameters")
+		})
+	}
+}
+
+func TestNullableTimestampGORMBoundary(t *testing.T) {
+	db, err := gorm.Open(gormsqlite.Dialector{DriverName: DriverName, DSN: ":memory:"}, &gorm.Config{})
+	require.NoError(t, err)
+	Install(db)
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	defer sqlDB.Close()
+	sqlDB.SetMaxOpenConns(1)
+	require.NoError(t, db.Exec(`CREATE TABLE nullable_timestamp(id INTEGER PRIMARY KEY,expires_at INTEGER_SECONDS,expires_at_ns INTEGER)`).Error)
+	type row struct {
+		ID        int
+		ExpiresAt *time.Time
+	}
+	instant := time.Date(2280, 4, 17, 2, 13, 20, 123456789, time.UTC)
+	rows := []row{{ID: 1, ExpiresAt: &instant}, {ID: 2}}
+	require.NoError(t, db.Table("nullable_timestamp").Create(&rows).Error)
+	cases := []struct {
+		value any
+		valid bool
+	}{
+		{(*time.Time)(nil), false},
+		{sql.NullTime{Time: instant, Valid: true}, true},
+		{sql.NullTime{Time: instant}, false},
+		{(*sql.NullTime)(nil), false},
+		{&instant, true},
+	}
+	for _, tc := range cases {
+		require.NoError(t, db.Table("nullable_timestamp").Where("id=1").Update("expires_at", tc.value).Error)
+		var got row
+		require.NoError(t, db.Table("nullable_timestamp").Where("id=1").Take(&got).Error)
+		if !tc.valid {
+			require.Nil(t, got.ExpiresAt)
+		} else {
+			require.NotNil(t, got.ExpiresAt)
+			require.True(t, instant.Equal(*got.ExpiresAt))
+		}
+	}
+	for _, tc := range cases {
+		require.NoError(t, db.Exec(`UPDATE nullable_timestamp SET expires_at=?,expires_at_ns=? WHERE id=1`, tc.value).Error)
+		var got *time.Time
+		require.NoError(t, sqlDB.QueryRow(`SELECT expires_at,expires_at_ns FROM nullable_timestamp WHERE id=1`).Scan(&got))
+		if !tc.valid {
+			require.Nil(t, got)
+		} else {
+			require.NotNil(t, got)
+			require.True(t, instant.Equal(*got))
+		}
+	}
 }

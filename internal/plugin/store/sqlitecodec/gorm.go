@@ -1,6 +1,7 @@
 package sqlitecodec
 
 import (
+	"database/sql"
 	"strings"
 	"time"
 
@@ -19,6 +20,17 @@ func split(value any) (any, any) {
 		if v != nil {
 			return v.Unix(), int64(v.Nanosecond())
 		}
+		return nil, nil
+	case sql.NullTime:
+		if v.Valid {
+			return v.Time.Unix(), int64(v.Time.Nanosecond())
+		}
+		return nil, nil
+	case *sql.NullTime:
+		if v != nil {
+			return split(*v)
+		}
+		return nil, nil
 	case clause.Column:
 		n := v
 		n.Name += "_ns"

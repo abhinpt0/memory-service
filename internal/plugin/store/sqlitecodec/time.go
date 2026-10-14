@@ -81,19 +81,27 @@ func legacyTime(value any) (*time.Time, error) {
 	return &t, nil
 }
 
-// SQL using a time.Time parameter supplies two adjacent placeholders. Keep the
-// time value at call sites and bind its exact integer pair here.
+// SQL using time.Time, *time.Time, or sql.NullTime supplies two adjacent
+// placeholders. Bind exact integer pairs or two NULLs for absent timestamps.
 func encode(args []driver.NamedValue) ([]driver.NamedValue, error) {
 	result := make([]driver.NamedValue, 0, len(args)*2)
 	for _, arg := range args {
-		if t, ok := arg.Value.(time.Time); ok {
-			if arg.Name != "" {
-				return nil, fmt.Errorf("SQLite paired timestamps require positional parameters")
+		var seconds, nanos any
+		switch value := arg.Value.(type) {
+		case time.Time:
+			seconds, nanos = value.Unix(), int64(value.Nanosecond())
+		case sql.NullTime:
+			if value.Valid {
+				seconds, nanos = value.Time.Unix(), int64(value.Time.Nanosecond())
 			}
-			result = append(result, driver.NamedValue{Value: t.Unix()}, driver.NamedValue{Value: int64(t.Nanosecond())})
-		} else {
+		default:
 			result = append(result, arg)
+			continue
 		}
+		if arg.Name != "" {
+			return nil, fmt.Errorf("SQLite paired timestamps require positional parameters")
+		}
+		result = append(result, driver.NamedValue{Value: seconds}, driver.NamedValue{Value: nanos})
 	}
 	for i := range result {
 		result[i].Ordinal = i + 1
@@ -102,6 +110,31 @@ func encode(args []driver.NamedValue) ([]driver.NamedValue, error) {
 }
 
 type timestampConn struct{ *sqlite3.SQLiteConn }
+
+// Preserve nullable timestamp identity before database/sql converts nil pointers
+// and sql.NullTime values to untyped NULLs. Other values use its normal converter.
+func checkNamedValue(arg *driver.NamedValue) error {
+	switch value := arg.Value.(type) {
+	case *time.Time:
+		arg.Value = sql.NullTime{}
+		if value != nil {
+			arg.Value = sql.NullTime{Time: *value, Valid: true}
+		}
+	case sql.NullTime:
+	case *sql.NullTime:
+		arg.Value = sql.NullTime{}
+		if value != nil {
+			arg.Value = *value
+		}
+	default:
+		return driver.ErrSkip
+	}
+	return nil
+}
+
+func (c *timestampConn) CheckNamedValue(arg *driver.NamedValue) error {
+	return checkNamedValue(arg)
+}
 
 func validateBindings(count int, args []driver.NamedValue) error {
 	if count != len(args) {
@@ -156,6 +189,10 @@ func (c *timestampConn) PrepareContext(ctx context.Context, query string) (drive
 }
 
 type timestampStmt struct{ *sqlite3.SQLiteStmt }
+
+func (s *timestampStmt) CheckNamedValue(arg *driver.NamedValue) error {
+	return checkNamedValue(arg)
+}
 
 // A time.Time expands into two bound integers.
 func (s *timestampStmt) NumInput() int { return -1 }
