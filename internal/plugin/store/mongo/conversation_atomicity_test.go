@@ -43,6 +43,9 @@ func setupTestMongoStore(t *testing.T, outboxEnabled bool) (registrystore.Memory
 func TestMongoConversationAtomicityFaultBeforeConversationInsert_Root(t *testing.T) {
 	store, mongoStore, ctx := setupTestMongoStore(t, false)
 
+	initialGroups, err := mongoStore.groups().CountDocuments(ctx, bson.M{})
+	require.NoError(t, err)
+
 	convID := "root-fault-conv-" + uuid.NewString()
 	faultErr := errors.New("injected fault before conversation insert")
 
@@ -50,7 +53,7 @@ func TestMongoConversationAtomicityFaultBeforeConversationInsert_Root(t *testing
 		return faultErr
 	}
 
-	err := store.InWriteTx(ctx, func(txCtx context.Context) error {
+	err = store.InWriteTx(ctx, func(txCtx context.Context) error {
 		_, err := mongoStore.CreateConversationWithID(txCtx, "user1", "client1", convID, "Test Root", nil, nil, nil, nil)
 		return err
 	})
@@ -64,6 +67,10 @@ func TestMongoConversationAtomicityFaultBeforeConversationInsert_Root(t *testing
 	ancestryCount, err := mongoStore.conversationAncestry().CountDocuments(ctx, bson.M{"_id": convID})
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), ancestryCount, "ancestry doc must be rolled back")
+
+	groupCount, err := mongoStore.groups().CountDocuments(ctx, bson.M{})
+	require.NoError(t, err)
+	assert.Equal(t, initialGroups, groupCount, "conversation group must be rolled back")
 
 	// Retry without fault
 	mongoStore.beforeConversationInsert = nil
@@ -84,6 +91,10 @@ func TestMongoConversationAtomicityFaultBeforeConversationInsert_Root(t *testing
 	ancestryCount, err = mongoStore.conversationAncestry().CountDocuments(ctx, bson.M{"_id": convID})
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), ancestryCount)
+
+	groupCount, err = mongoStore.groups().CountDocuments(ctx, bson.M{})
+	require.NoError(t, err)
+	assert.Equal(t, initialGroups+1, groupCount, "conversation group must be created on retry")
 }
 
 func TestMongoConversationAtomicityFaultBeforeConversationInsert_StartedBy(t *testing.T) {
@@ -96,6 +107,10 @@ func TestMongoConversationAtomicityFaultBeforeConversationInsert_StartedBy(t *te
 		return err
 	})
 	require.NoError(t, err)
+
+	initialGroups, err := mongoStore.groups().CountDocuments(ctx, bson.M{})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), initialGroups)
 
 	startedByID := "started-by-fault-conv-" + uuid.NewString()
 	faultErr := errors.New("injected fault before conversation insert")
@@ -119,6 +134,10 @@ func TestMongoConversationAtomicityFaultBeforeConversationInsert_StartedBy(t *te
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), ancestryCount)
 
+	groupCount, err := mongoStore.groups().CountDocuments(ctx, bson.M{})
+	require.NoError(t, err)
+	assert.Equal(t, initialGroups, groupCount, "started-by conversation group must be rolled back")
+
 	// Retry without fault
 	mongoStore.beforeConversationInsert = nil
 	var result *registrystore.CreateConversationResult
@@ -130,10 +149,17 @@ func TestMongoConversationAtomicityFaultBeforeConversationInsert_StartedBy(t *te
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	assert.Equal(t, startedByID, result.Conversation.ID)
+
+	groupCount, err = mongoStore.groups().CountDocuments(ctx, bson.M{})
+	require.NoError(t, err)
+	assert.Equal(t, initialGroups+1, groupCount, "started-by conversation group must be created on retry")
 }
 
 func TestMongoConversationAtomicityFaultBeforeMembershipInsert(t *testing.T) {
 	store, mongoStore, ctx := setupTestMongoStore(t, false)
+
+	initialGroups, err := mongoStore.groups().CountDocuments(ctx, bson.M{})
+	require.NoError(t, err)
 
 	convID := "membership-fault-conv-" + uuid.NewString()
 	faultErr := errors.New("injected fault before membership insert")
@@ -142,7 +168,7 @@ func TestMongoConversationAtomicityFaultBeforeMembershipInsert(t *testing.T) {
 		return faultErr
 	}
 
-	err := store.InWriteTx(ctx, func(txCtx context.Context) error {
+	err = store.InWriteTx(ctx, func(txCtx context.Context) error {
 		_, err := mongoStore.CreateConversationWithID(txCtx, "user1", "client1", convID, "Test Membership Fault", nil, nil, nil, nil)
 		return err
 	})
@@ -152,6 +178,18 @@ func TestMongoConversationAtomicityFaultBeforeMembershipInsert(t *testing.T) {
 	convCount, err := mongoStore.conversations().CountDocuments(ctx, bson.M{"_id": convID})
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), convCount)
+
+	ancestryCount, err := mongoStore.conversationAncestry().CountDocuments(ctx, bson.M{"_id": convID})
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), ancestryCount)
+
+	groupCount, err := mongoStore.groups().CountDocuments(ctx, bson.M{})
+	require.NoError(t, err)
+	assert.Equal(t, initialGroups, groupCount, "conversation group must be rolled back")
+
+	membershipCount, err := mongoStore.memberships().CountDocuments(ctx, bson.M{})
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), membershipCount, "membership doc must not be created")
 
 	// Retry without fault
 	mongoStore.beforeMembershipInsert = nil
@@ -173,6 +211,9 @@ func TestMongoConversationAtomicityFaultBeforeMembershipInsert(t *testing.T) {
 
 func TestMongoConversationConcurrentLiveCreator(t *testing.T) {
 	store, mongoStore, ctx := setupTestMongoStore(t, false)
+ 
+	initialGroups, err := mongoStore.groups().CountDocuments(ctx, bson.M{})
+	require.NoError(t, err)
 
 	convID := "concurrent-live-conv-" + uuid.NewString()
 
@@ -231,6 +272,13 @@ func TestMongoConversationConcurrentLiveCreator(t *testing.T) {
 	ancestryCount, err := mongoStore.conversationAncestry().CountDocuments(ctx, bson.M{"_id": convID})
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), ancestryCount)
+
+	// Verify transaction rollback under write contention: the losing concurrent creator's
+	// transaction is retried by WithTransaction and its first-attempt group insert is rolled
+	// back, leaving exactly one group document.
+	groupCount, err := mongoStore.groups().CountDocuments(ctx, bson.M{})
+	require.NoError(t, err)
+	assert.Equal(t, initialGroups+1, groupCount, "losing concurrent creator's group must be rolled back by transaction retry")
 }
 
 func TestMongoStandaloneRejectedWithoutOutbox(t *testing.T) {
