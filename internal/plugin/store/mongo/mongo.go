@@ -47,10 +47,8 @@ func init() {
 			if err := client.Ping(ctx, nil); err != nil {
 				return nil, fmt.Errorf("failed to ping MongoDB: %w", err)
 			}
-			if cfg.OutboxEnabled {
-				if err := requireMongoTransactionTopology(ctx, client); err != nil {
-					return nil, err
-				}
+			if err := requireMongoTransactionTopology(ctx, client); err != nil {
+				return nil, err
 			}
 
 			dbName := "memory_service"
@@ -403,6 +401,8 @@ type MongoStore struct {
 	maxBSONDocumentSizeOverride  int
 	metadataPatchBeforeUpdate    func()                    // test-only synchronization hook; nil in production
 	materializeBeforeTransaction func(bson.ObjectID) error // test-only fault-injection hook; nil in production
+	beforeConversationInsert     func() error              // test-only fault-injection hook; nil in production
+	beforeMembershipInsert       func() error              // test-only fault-injection hook; nil in production
 }
 
 func (s *MongoStore) OutboxEnabled() bool {
@@ -413,14 +413,10 @@ func (s *MongoStore) InReadTx(ctx context.Context, fn func(context.Context) erro
 	return fn(txscope.WithIntent(ctx, txscope.IntentRead))
 }
 
-// InWriteTx only records write intent; it does not open a MongoDB session
-// transaction, so multi-write flows (conversationPatch, outbox appends) are not
-// atomic on Mongo (the episodic store opens its own session transactions).
-// See WORKAROUNDS.md.
+// InWriteTx executes fn inside a MongoDB session transaction for atomic write operations.
+// OutboxEnabled controls durable event streaming and change-stream relays, while
+// InWriteTx ensures datastore write atomicity independently.
 func (s *MongoStore) InWriteTx(ctx context.Context, fn func(context.Context) error) error {
-	if !s.OutboxEnabled() {
-		return fn(txscope.WithIntent(ctx, txscope.IntentWrite))
-	}
 	if session := mongo.SessionFromContext(ctx); session != nil && session.TransactionRunning() {
 		return fn(txscope.WithIntent(ctx, txscope.IntentWrite))
 	}
@@ -835,63 +831,6 @@ func (s *MongoStore) createConversationAncestryDoc(ctx context.Context, convID, 
 	return doc, nil
 }
 
-// claimConversationAncestry is the first step of the publish order: ancestry is
-// claimed before the conversation document is inserted last. A duplicate claim is
-// accepted only when its lineage matches; a matching orphan left by a failed
-// publish is deleted and the claim retried once.
-func (s *MongoStore) claimConversationAncestry(ctx context.Context, requested conversationAncestryDoc) (*registrystore.ConversationDetail, error) {
-	for attempt := 0; attempt < 2; attempt++ {
-		if _, err := s.conversationAncestry().InsertOne(ctx, requested); err == nil {
-			return nil, nil
-		} else if !mongo.IsDuplicateKeyError(err) {
-			return nil, fmt.Errorf("failed to create conversation ancestry: %w", err)
-		}
-
-		var existingAncestry conversationAncestryDoc
-		err := s.conversationAncestry().FindOne(ctx, bson.M{"_id": requested.ID}).Decode(&existingAncestry)
-		if errors.Is(err, mongo.ErrNoDocuments) {
-			continue
-		}
-		if err != nil {
-			return nil, fmt.Errorf("failed to load existing conversation ancestry: %w", err)
-		}
-		if !conversationAncestryDocsMatch(existingAncestry, requested) {
-			return nil, &registrystore.ConflictError{Message: "conversation id already exists with different ancestry"}
-		}
-
-		var existing convDoc
-		err = s.conversations().FindOne(ctx, bson.M{"_id": requested.ID}).Decode(&existing)
-		if err == nil {
-			summary, summaryErr := s.conversationSummaryFromDoc(ctx, existing, model.AccessLevelOwner)
-			if summaryErr != nil {
-				return nil, summaryErr
-			}
-			return &registrystore.ConversationDetail{ConversationSummary: summary}, nil
-		}
-		if !errors.Is(err, mongo.ErrNoDocuments) {
-			return nil, fmt.Errorf("failed to load existing conversation: %w", err)
-		}
-		// Matching ancestry without a conversation is an orphan from a failed
-		// publish-last attempt. Remove it and retry the ancestry claim once.
-		_, _ = s.conversationAncestry().DeleteOne(ctx, bson.M{"_id": requested.ID})
-	}
-	return nil, &registrystore.ConflictError{Message: "conversation ancestry claim is in progress"}
-}
-
-func conversationAncestryDocsMatch(left, right conversationAncestryDoc) bool {
-	return left.ID == right.ID &&
-		left.ConversationGroupID == right.ConversationGroupID &&
-		stringPtrEqual(left.ParentConversationID, right.ParentConversationID) &&
-		stringPtrEqual(left.ForkedAtEntryID, right.ForkedAtEntryID) &&
-		reflect.DeepEqual(left.Ancestors, right.Ancestors)
-}
-
-func stringPtrEqual(left, right *string) bool {
-	if left == nil || right == nil {
-		return left == right
-	}
-	return *left == *right
-}
 
 func (s *MongoStore) validateConversationAncestryDocSize(ctx context.Context, doc conversationAncestryDoc) error {
 	raw, err := bson.Marshal(doc)
@@ -1142,9 +1081,6 @@ func (s *MongoStore) createConversation(ctx context.Context, userID string, clie
 		}, nil
 	}
 
-	// Validate retries before allocating a group. MongoDB does not wrap this
-	// method in a transaction, so even a sequential retry would otherwise leak
-	// the provisional group.
 	var existing convDoc
 	findErr := s.conversations().FindOne(ctx, bson.M{"_id": string(convID)}).Decode(&existing)
 	if findErr == nil {
@@ -1168,19 +1104,6 @@ func (s *MongoStore) createConversation(ctx context.Context, userID string, clie
 			return nil, fmt.Errorf("failed to create conversation group: %w", err)
 		}
 	}
-	cleanupUnusedGroup := func() error {
-		if forkedAtConversationID != nil {
-			return nil
-		}
-		result, err := s.groups().DeleteOne(ctx, bson.M{"_id": actualGroupID})
-		if err != nil {
-			return fmt.Errorf("failed to remove unused conversation group: %w", err)
-		}
-		if result.DeletedCount != 1 {
-			return fmt.Errorf("failed to remove unused conversation group %s", actualGroupID)
-		}
-		return nil
-	}
 
 	doc := convDoc{
 		ID:                      string(convID),
@@ -1198,62 +1121,26 @@ func (s *MongoStore) createConversation(ctx context.Context, userID string, clie
 
 	ancestryDoc, err := s.createConversationAncestryDoc(ctx, string(convID), actualGroupID, sourceConv, forkedAtEntryID, anchorOwnerDepth)
 	if err != nil {
-		if cleanupErr := cleanupUnusedGroup(); cleanupErr != nil {
-			return nil, cleanupErr
-		}
 		return nil, err
 	}
-	existingDetail, err := s.claimConversationAncestry(ctx, ancestryDoc)
-	if err != nil {
-		if cleanupErr := cleanupUnusedGroup(); cleanupErr != nil {
-			return nil, cleanupErr
-		}
-		var conflict *registrystore.ConflictError
-		if errors.As(err, &conflict) {
-			// The ancestry winner publishes the conversation immediately after the
-			// claim. Wait briefly so an identical concurrent request can validate
-			// that record instead of returning a transient conflict.
-			for attempt := 0; attempt < 50; attempt++ {
-				var raced convDoc
-				findErr := s.conversations().FindOne(ctx, bson.M{"_id": string(convID)}).Decode(&raced)
-				if findErr == nil {
-					return validateExisting(raced)
-				}
-				if !errors.Is(findErr, mongo.ErrNoDocuments) {
-					return nil, fmt.Errorf("failed to load concurrent conversation: %w", findErr)
-				}
-				time.Sleep(20 * time.Millisecond)
-			}
-		}
-		return nil, err
+	if _, err := s.conversationAncestry().InsertOne(ctx, ancestryDoc); err != nil {
+		return nil, fmt.Errorf("failed to create conversation ancestry: %w", err)
 	}
-	if existingDetail != nil {
-		if cleanupErr := cleanupUnusedGroup(); cleanupErr != nil {
-			return nil, cleanupErr
+
+	if s.beforeConversationInsert != nil {
+		if err := s.beforeConversationInsert(); err != nil {
+			return nil, err
 		}
-		var existing convDoc
-		if findErr := s.conversations().FindOne(ctx, bson.M{"_id": string(convID)}).Decode(&existing); findErr != nil {
-			return nil, fmt.Errorf("ancestry exists but conversation not found: %s", convID)
-		}
-		return validateExisting(existing)
 	}
+
 	if _, err := s.conversations().InsertOne(ctx, doc); err != nil {
-		if mongo.IsDuplicateKeyError(err) {
-			if cleanupErr := cleanupUnusedGroup(); cleanupErr != nil {
-				return nil, cleanupErr
-			}
-			var existing convDoc
-			findErr := s.conversations().FindOne(ctx, bson.M{"_id": string(convID)}).Decode(&existing)
-			if findErr != nil {
-				return nil, fmt.Errorf("conflict on insert but existing record not found: %s", convID)
-			}
-			return validateExisting(existing)
-		}
-		_, _ = s.conversationAncestry().DeleteOne(ctx, bson.M{"_id": string(convID)})
-		if cleanupErr := cleanupUnusedGroup(); cleanupErr != nil {
-			return nil, cleanupErr
-		}
 		return nil, fmt.Errorf("failed to create conversation: %w", err)
+	}
+
+	if s.beforeMembershipInsert != nil {
+		if err := s.beforeMembershipInsert(); err != nil {
+			return nil, err
+		}
 	}
 
 	if forkedAtConversationID == nil {
@@ -3098,34 +2985,23 @@ func (s *MongoStore) autoCreateConversation(ctx context.Context, userID string, 
 	}
 	ancestryDoc, err := s.createConversationAncestryDoc(ctx, conv.ID, groupID, nil, nil, nil)
 	if err != nil {
-		_, _ = s.groups().DeleteOne(ctx, bson.M{"_id": groupID})
 		return convDoc{}, err
 	}
 	if _, err := s.conversationAncestry().InsertOne(ctx, ancestryDoc); err != nil {
-		_, _ = s.groups().DeleteOne(ctx, bson.M{"_id": groupID})
-		if mongo.IsDuplicateKeyError(err) {
-			// A concurrent request already claimed this conversation; fetch and return it.
-			var existing convDoc
-			if findErr := s.conversations().FindOne(ctx, bson.M{"_id": conv.ID}).Decode(&existing); findErr != nil {
-				return convDoc{}, fmt.Errorf("failed to fetch existing conversation: %w", findErr)
-			}
-			return existing, nil
-		}
 		return convDoc{}, fmt.Errorf("failed to create conversation ancestry: %w", err)
 	}
-	if _, err := s.conversations().InsertOne(ctx, conv); err != nil {
-		// Clean up the orphaned group before handling the error.
-		_, _ = s.conversationAncestry().DeleteOne(ctx, bson.M{"_id": conv.ID})
-		_, _ = s.groups().DeleteOne(ctx, bson.M{"_id": groupID})
-		if mongo.IsDuplicateKeyError(err) {
-			// A concurrent request already created this conversation; fetch and return it.
-			var existing convDoc
-			if findErr := s.conversations().FindOne(ctx, bson.M{"_id": conv.ID}).Decode(&existing); findErr != nil {
-				return convDoc{}, fmt.Errorf("failed to fetch existing conversation: %w", findErr)
-			}
-			return existing, nil
+	if s.beforeConversationInsert != nil {
+		if err := s.beforeConversationInsert(); err != nil {
+			return convDoc{}, err
 		}
+	}
+	if _, err := s.conversations().InsertOne(ctx, conv); err != nil {
 		return convDoc{}, fmt.Errorf("failed to create conversation: %w", err)
+	}
+	if s.beforeMembershipInsert != nil {
+		if err := s.beforeMembershipInsert(); err != nil {
+			return convDoc{}, err
+		}
 	}
 
 	member := memberDoc{
@@ -3135,9 +3011,6 @@ func (s *MongoStore) autoCreateConversation(ctx context.Context, userID string, 
 		CreatedAt:           now,
 	}
 	if _, err := s.memberships().InsertOne(ctx, member); err != nil {
-		_, _ = s.conversations().DeleteOne(ctx, bson.M{"_id": conv.ID})
-		_, _ = s.conversationAncestry().DeleteOne(ctx, bson.M{"_id": conv.ID})
-		_, _ = s.groups().DeleteOne(ctx, bson.M{"_id": groupID})
 		return convDoc{}, fmt.Errorf("failed to create membership: %w", err)
 	}
 
