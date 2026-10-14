@@ -50,7 +50,11 @@ func migrateSQLiteTimestamps(ctx context.Context, db *sql.DB) (returnErr error) 
 			rows.Close()
 			return err
 		}
-		if legacyTimestampType.MatchString(t.schema) || strings.Contains(t.schema, "created_at_unix_ms") {
+		originalSchema := t.schema
+		if t.name == "conversations" {
+			t.schema = legacyStartedByForeignKey.ReplaceAllString(t.schema, "${1}")
+		}
+		if t.schema != originalSchema || legacyTimestampType.MatchString(t.schema) || strings.Contains(t.schema, "created_at_unix_ms") {
 			tables = append(tables, t)
 		}
 	}
@@ -89,6 +93,11 @@ func migrateSQLiteTimestamps(ctx context.Context, db *sql.DB) (returnErr error) 
 var legacyTimestampType = regexp.MustCompile(`(?i)\b(DATETIME|TIMESTAMP|DATE)\b`)
 
 // BACKWARD COMPATIBILITY: remove in a future breaking release.
+// Historical schema-v2 lineage references must survive deletion of the parent.
+// Remove the old inline cascade constraint during the same timestamp rebuild.
+var legacyStartedByForeignKey = regexp.MustCompile(`(?i)(\bstarted_by_conversation_id\s+TEXT)\s+REFERENCES\s+conversations\s*\(\s*id\s*\)\s+ON\s+DELETE\s+CASCADE`)
+
+// BACKWARD COMPATIBILITY: remove in a future breaking release.
 func rebuildSQLiteTimestampTable(ctx context.Context, tx *sql.Tx, name, schema string) error {
 	quote := func(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }
 	rows, err := tx.QueryContext(ctx, `PRAGMA table_info(`+quote(name)+`)`)
@@ -96,6 +105,7 @@ func rebuildSQLiteTimestampTable(ctx context.Context, tx *sql.Tx, name, schema s
 		return err
 	}
 	var columns, values []string
+	convertedTimestamps := map[string]bool{}
 	for rows.Next() {
 		var cid, notNull, pk int
 		var col, typ string
@@ -110,6 +120,7 @@ func rebuildSQLiteTimestampTable(ctx context.Context, tx *sql.Tx, name, schema s
 		columns = append(columns, quote(col))
 		value := quote(col)
 		if legacyTimestampType.MatchString(typ) {
+			convertedTimestamps[col] = true
 			values = append(values, "legacy_time_seconds("+value+")", "legacy_time_nanos("+value+")")
 			columns = append(columns, quote(col+"_ns"))
 			continue
@@ -196,7 +207,15 @@ func rebuildSQLiteTimestampTable(ctx context.Context, tx *sql.Tx, name, schema s
 			open := strings.IndexByte(statement, '(')
 			close := strings.IndexByte(statement, ')')
 			if open >= 0 && close > open {
-				statement = statement[:open+1] + regexp.MustCompile(`\b(\w+_at)(?:\s+(ASC|DESC))?\b`).ReplaceAllString(statement[open+1:close], `${1} ${2}, ${1}_ns ${2}`) + statement[close:]
+				pattern := regexp.MustCompile(`\b(\w+_at)(?:\s+(ASC|DESC))?\b`)
+				columns := pattern.ReplaceAllStringFunc(statement[open+1:close], func(column string) string {
+					match := pattern.FindStringSubmatch(column)
+					if !convertedTimestamps[match[1]] {
+						return column
+					}
+					return match[1] + " " + match[2] + ", " + match[1] + "_ns " + match[2]
+				})
+				statement = statement[:open+1] + columns + statement[close:]
 			}
 		}
 		if _, err := tx.ExecContext(ctx, statement); err != nil {

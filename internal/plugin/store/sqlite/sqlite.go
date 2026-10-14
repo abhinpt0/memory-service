@@ -82,9 +82,6 @@ func (m *sqliteMigrator) Migrate(ctx context.Context) error {
 	if err := sqliteRequireCurrentSchemaOrEmpty(ctx, handle.sqlDB); err != nil {
 		return err
 	}
-	if err := sqliteDropStartedByConversationForeignKey(ctx, handle.sqlDB); err != nil {
-		return err
-	}
 	if err := migrateSQLiteTimestamps(ctx, handle.sqlDB); err != nil {
 		return err
 	}
@@ -133,97 +130,6 @@ func (m *sqliteMigrator) Migrate(ctx context.Context) error {
 		}
 	}
 	log.Info("SQLite schema migration complete", "fts5Enabled", handle.fts5Enabled)
-	return nil
-}
-
-// BACKWARD COMPATIBILITY: remove in a future breaking release.
-// sqliteDropStartedByConversationForeignKey reconciles schema-v2 databases
-// created while started_by_conversation_id was a cascading foreign key. The
-// lineage value is a soft reference and must survive deletion of its target.
-func sqliteDropStartedByConversationForeignKey(ctx context.Context, db *sql.DB) (returnErr error) {
-	rows, err := db.QueryContext(ctx, `PRAGMA foreign_key_list(conversations)`)
-	if err != nil {
-		return fmt.Errorf("migration: inspect conversation foreign keys: %w", err)
-	}
-	hasStartedByForeignKey := false
-	for rows.Next() {
-		var id, seq int
-		var table, from, to, onUpdate, onDelete, match string
-		if err := rows.Scan(&id, &seq, &table, &from, &to, &onUpdate, &onDelete, &match); err != nil {
-			_ = rows.Close()
-			return fmt.Errorf("migration: scan conversation foreign key: %w", err)
-		}
-		if from == "started_by_conversation_id" {
-			hasStartedByForeignKey = true
-		}
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return fmt.Errorf("migration: iterate conversation foreign keys: %w", err)
-	}
-	if err := rows.Close(); err != nil {
-		return fmt.Errorf("migration: close conversation foreign keys: %w", err)
-	}
-	if !hasStartedByForeignKey {
-		return nil
-	}
-
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		return fmt.Errorf("migration: acquire connection for conversation lineage reconciliation: %w", err)
-	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
-		return fmt.Errorf("migration: disable foreign keys for conversation lineage reconciliation: %w", err)
-	}
-	defer func() {
-		if _, err := conn.ExecContext(context.WithoutCancel(ctx), `PRAGMA foreign_keys = ON`); err != nil && returnErr == nil {
-			returnErr = fmt.Errorf("migration: re-enable foreign keys after conversation lineage reconciliation: %w", err)
-		}
-	}()
-
-	tx, err := conn.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("migration: begin conversation lineage reconciliation: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-	statements := []string{
-		`CREATE TABLE conversations_without_started_by_fk (
-			id TEXT PRIMARY KEY,
-			title BLOB,
-			owner_user_id TEXT NOT NULL,
-			client_id TEXT NOT NULL,
-			agent_id TEXT,
-			metadata TEXT NOT NULL DEFAULT '{}',
-			conversation_group_id TEXT NOT NULL REFERENCES conversation_groups(id) ON DELETE CASCADE,
-			started_by_conversation_id TEXT,
-			started_by_entry_id TEXT,
-			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			vectorized_at DATETIME,
-			archived_at DATETIME
-		)`,
-		`INSERT INTO conversations_without_started_by_fk (
-			id, title, owner_user_id, client_id, agent_id, metadata,
-			conversation_group_id, started_by_conversation_id, started_by_entry_id,
-			created_at, updated_at, vectorized_at, archived_at
-		) SELECT
-			id, title, owner_user_id, client_id, agent_id, metadata,
-			conversation_group_id, started_by_conversation_id, started_by_entry_id,
-			created_at, updated_at, vectorized_at, archived_at
-		FROM conversations`,
-		`DROP TABLE conversations`,
-		`ALTER TABLE conversations_without_started_by_fk RENAME TO conversations`,
-		`CREATE UNIQUE INDEX idx_conversations_group_id_id ON conversations(conversation_group_id, id)`,
-	}
-	for _, statement := range statements {
-		if _, err := tx.ExecContext(ctx, statement); err != nil {
-			return fmt.Errorf("migration: reconcile started-by soft reference: %w", err)
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("migration: commit conversation lineage reconciliation: %w", err)
-	}
 	return nil
 }
 

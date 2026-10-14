@@ -269,3 +269,112 @@ func TestSQLiteTimestampUpgradePreservesValidLongTTL(t *testing.T) {
 		require.Equal(t, payload, gotPayload)
 	}
 }
+
+func TestSQLiteLineageAndTimestampUpgradePreservesConversation(t *testing.T) {
+	for _, numeric := range []bool{false, true} {
+		t.Run(fmt.Sprintf("numeric=%t", numeric), func(t *testing.T) {
+			cfg := &config.Config{DatastoreType: "sqlite", DBURL: filepath.Join(t.TempDir(), "lineage.db"), DatastoreMigrateAtStart: true}
+			ctx := config.WithContext(context.Background(), cfg)
+			legacy, err := sql.Open("sqlite3", cfg.DBURL)
+			require.NoError(t, err)
+			legacy.SetMaxOpenConns(1)
+			defer legacy.Close()
+			schema := legacyTextSchemaSQL
+			if numeric {
+				schema = schemaSQL
+			}
+			lineageSchema := strings.Replace(schema, "started_by_conversation_id TEXT,", "started_by_conversation_id TEXT REFERENCES conversations(id) ON DELETE CASCADE,", 1)
+			require.NotEqual(t, schema, lineageSchema)
+			_, err = legacy.Exec(lineageSchema)
+			require.NoError(t, err)
+			_, err = legacy.Exec(`
+				ALTER TABLE conversations ADD COLUMN extra_payload BLOB;
+				INSERT INTO conversation_groups(id) VALUES ('parent-group'),('child-group');
+				INSERT INTO conversations(id,owner_user_id,client_id,conversation_group_id) VALUES ('parent','alice','client','parent-group');
+				INSERT INTO conversations(rowid,id,owner_user_id,client_id,conversation_group_id,started_by_conversation_id,extra_payload) VALUES (42,'child','alice','client','child-group','parent',X'123456');
+				CREATE TABLE conversation_audit(title BLOB);
+				CREATE TRIGGER conversation_title_audit AFTER UPDATE OF title ON conversations BEGIN INSERT INTO conversation_audit(title) VALUES(new.title); END;
+			`)
+			require.NoError(t, err)
+			indexColumns := "created_at DESC"
+			if numeric {
+				indexColumns += ",created_at_ns DESC"
+			}
+			_, err = legacy.Exec("CREATE INDEX custom_conversation_time ON conversations(" + indexColumns + ")")
+			require.NoError(t, err)
+			instant := time.Date(2280, 4, 17, 2, 13, 20, 123456789, time.FixedZone("east", 19800))
+			if numeric {
+				_, err = legacy.Exec(`UPDATE conversations SET created_at=?,created_at_ns=?,updated_at=?,updated_at_ns=?,vectorized_at=?,vectorized_at_ns=? WHERE id='child'`, instant.Unix(), instant.Nanosecond(), instant.Unix(), instant.Nanosecond(), instant.Unix(), instant.Nanosecond())
+			} else {
+				_, err = legacy.Exec(`UPDATE conversations SET created_at=?,updated_at=?,vectorized_at=? WHERE id='child'`, instant, instant, instant)
+			}
+			require.NoError(t, err)
+			require.NoError(t, legacy.Close())
+			for iteration := 0; iteration < 2; iteration++ {
+				require.NoError(t, (&sqliteMigrator{}).Migrate(ctx))
+				_, db, err := SharedDB(ctx)
+				require.NoError(t, err)
+				var rowid int
+				var payload []byte
+				var created, updated, vectorized time.Time
+				var archived *time.Time
+				require.NoError(t, db.QueryRow(`SELECT rowid,extra_payload,created_at,created_at_ns,updated_at,updated_at_ns,vectorized_at,vectorized_at_ns,archived_at,archived_at_ns FROM conversations WHERE id='child'`).Scan(&rowid, &payload, &created, &updated, &vectorized, &archived))
+				require.Equal(t, 42, rowid)
+				require.Equal(t, []byte{0x12, 0x34, 0x56}, payload)
+				for _, got := range []time.Time{created, updated, vectorized} {
+					require.True(t, instant.Equal(got))
+				}
+				require.Nil(t, archived)
+				var fkCount int
+				require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM pragma_foreign_key_list('conversations') WHERE "from"='started_by_conversation_id'`).Scan(&fkCount))
+				require.Zero(t, fkCount)
+				var indexColumns int
+				require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM pragma_index_info('custom_conversation_time')`).Scan(&indexColumns))
+				require.Equal(t, 2, indexColumns)
+			}
+			_, db, err := SharedDB(ctx)
+			require.NoError(t, err)
+			_, err = db.Exec(`UPDATE conversations SET title=X'abcdef' WHERE id='child'; DELETE FROM conversation_groups WHERE id='parent-group'`)
+			require.NoError(t, err)
+			var title []byte
+			require.NoError(t, db.QueryRow(`SELECT title FROM conversation_audit`).Scan(&title))
+			require.Equal(t, []byte{0xab, 0xcd, 0xef}, title)
+			var parent string
+			require.NoError(t, db.QueryRow(`SELECT started_by_conversation_id FROM conversations WHERE id='child'`).Scan(&parent))
+			require.Equal(t, "parent", parent)
+		})
+	}
+}
+
+func TestSQLiteLineageAndTimestampUpgradeRollBackTogether(t *testing.T) {
+	cfg := &config.Config{DatastoreType: "sqlite", DBURL: filepath.Join(t.TempDir(), "invalid-lineage.db"), DatastoreMigrateAtStart: true}
+	ctx := config.WithContext(context.Background(), cfg)
+	legacy, err := sql.Open("sqlite3", cfg.DBURL)
+	require.NoError(t, err)
+	defer legacy.Close()
+	schema := strings.Replace(legacyTextSchemaSQL, "started_by_conversation_id TEXT,", "started_by_conversation_id TEXT REFERENCES conversations(id) ON DELETE CASCADE,", 1)
+	_, err = legacy.Exec(schema)
+	require.NoError(t, err)
+	_, err = legacy.Exec(`
+		INSERT INTO conversation_groups(id) VALUES ('g');
+		INSERT INTO conversations(rowid,id,owner_user_id,client_id,conversation_group_id) VALUES (42,'c','alice','client','g');
+		INSERT INTO memory_kind_versions(name) VALUES ('default/v1');
+		INSERT INTO memories(id,namespace,key,value_encrypted,created_at) VALUES ('m','ns','key',X'123456','invalid-date');
+	`)
+	require.NoError(t, err)
+	var before string
+	require.NoError(t, legacy.QueryRow(`SELECT sql FROM sqlite_master WHERE name='conversations'`).Scan(&before))
+	require.NoError(t, legacy.Close())
+	require.ErrorContains(t, (&sqliteMigrator{}).Migrate(ctx), "invalid legacy SQLite timestamp")
+	_, db, err := SharedDB(ctx)
+	require.NoError(t, err)
+	var after string
+	require.NoError(t, db.QueryRow(`SELECT sql FROM sqlite_master WHERE name='conversations'`).Scan(&after))
+	require.Equal(t, before, after)
+	var rowid int
+	require.NoError(t, db.QueryRow(`SELECT rowid FROM conversations WHERE id='c'`).Scan(&rowid))
+	require.Equal(t, 42, rowid)
+	var count int
+	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM pragma_foreign_key_list('conversations') WHERE "from"='started_by_conversation_id'`).Scan(&count))
+	require.Equal(t, 1, count)
+}
