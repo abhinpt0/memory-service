@@ -1,5 +1,17 @@
 # Workarounds
 
+## Godog tag filter operators
+
+- What: Site test commands use comma, `&&`, and `~` tag operators, and the suite rejects a run that selects scenarios but executes none.
+- Why: The scheduling parser accepts word-based `and`, `or`, and `not`, while Godog's executor uses legacy tag syntax. Forwarding a word-based filter can report success without executing the selected scenarios.
+- Proper fix: Share one tag parser between scheduling and execution, or translate the scheduling expression into syntax supported by Godog.
+
+## Frontend brace-expansion override
+
+- What: Both frontend manifests override the brace-expansion 1.x dependency branch to 1.1.21.
+- Why: The existing override kept transitive consumers on vulnerable 1.1.18. Version 1.1.21 fixes [CVE-2026-102277](https://github.com/advisories/GHSA-q2hr-2g5m-vwhr).
+- Proper fix: Remove the override when the upstream dependency constraints and lockfiles resolve a fixed version without it, then run both frontend verification tasks.
+
 ## SQLite legacy entry timestamp precision
 
 - What: Entry ordering uses numeric Unix milliseconds and extracts a numeric sub-millisecond remainder from legacy `created_at` text.

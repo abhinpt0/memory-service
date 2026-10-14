@@ -1,6 +1,6 @@
 FROM mcr.microsoft.com/devcontainers/base:bookworm
 
-ARG GO_VERSION=1.27.1
+ARG GO_VERSION=1.27.2
 ARG NODE_VERSION=22
 ARG USERNAME=vscode
 
