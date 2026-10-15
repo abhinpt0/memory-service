@@ -840,7 +840,6 @@ func (s *MongoStore) createConversationAncestryDoc(ctx context.Context, convID, 
 	return doc, nil
 }
 
-
 func (s *MongoStore) validateConversationAncestryDocSize(ctx context.Context, doc conversationAncestryDoc) error {
 	raw, err := bson.Marshal(doc)
 	if err != nil {

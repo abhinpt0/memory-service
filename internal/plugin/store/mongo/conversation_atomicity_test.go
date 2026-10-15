@@ -211,7 +211,7 @@ func TestMongoConversationAtomicityFaultBeforeMembershipInsert(t *testing.T) {
 
 func TestMongoConversationConcurrentLiveCreator(t *testing.T) {
 	store, mongoStore, ctx := setupTestMongoStore(t, false)
- 
+
 	initialGroups, err := mongoStore.groups().CountDocuments(ctx, bson.M{})
 	require.NoError(t, err)
 
