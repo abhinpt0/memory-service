@@ -16,10 +16,49 @@ import (
 	"testing"
 )
 
-// These tests lint the MDX sources directly. They need neither Docker nor a
-// site build, so run them with -run to avoid starting TestSiteDocs:
+// These tests lint documentation sources and checkpoint metadata directly.
+// They need neither Docker nor a site build, so run them with -run to avoid
+// starting TestSiteDocs:
 //
 //	go test -tags='site_tests sqlite_fts5' ./internal/sitebdd/ -run 'TestDocs' -count=1
+
+func TestDocsPythonLockfilesPortable(t *testing.T) {
+	root := mustProjectRoot(t)
+	cmd := exec.Command("git", "ls-files", "-z", "--", "python/**/uv.lock", "python/uv.lock")
+	cmd.Dir = root
+	output, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("list Python lockfiles: %v", err)
+	}
+	paths := strings.Split(strings.TrimSuffix(string(output), "\x00"), "\x00")
+	if len(paths) == 0 || paths[0] == "" {
+		t.Fatal("no tracked Python lockfiles found")
+	}
+	locations := regexp.MustCompile(`\b(?:registry|path|directory|editable|virtual)\s*=\s*("(?:[^"\\]|\\.)*"|'[^']*')`)
+	windowsAbsolute := regexp.MustCompile(`^[A-Za-z]:[\\/]`)
+	for _, path := range paths {
+		t.Run(path, func(t *testing.T) {
+			for _, match := range locations.FindAllStringSubmatch(readFile(t, filepath.Join(root, path)), -1) {
+				location := match[1]
+				if strings.HasPrefix(location, `"`) {
+					decoded, err := strconv.Unquote(location)
+					if err != nil {
+						t.Fatalf("decode lockfile location: %v", err)
+					}
+					location = decoded
+				} else {
+					location = location[1 : len(location)-1]
+				}
+				if strings.HasPrefix(location, "https://") || strings.HasPrefix(location, "http://") {
+					continue
+				}
+				if filepath.IsAbs(location) || windowsAbsolute.MatchString(location) || strings.HasPrefix(location, "file://") {
+					t.Errorf("local lockfile location %q must be relative so checkpoints work in another checkout", location)
+				}
+			}
+		})
+	}
+}
 
 // TestDocsCurlUUIDsUniqueAcrossScenarios fails when two different doc
 // scenarios send the same UUID in a curl request. At runtime the shared

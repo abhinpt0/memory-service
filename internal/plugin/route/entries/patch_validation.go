@@ -132,3 +132,10 @@ func validateConversationPatchForOwnerOnly(patch *validatedConversationPatch, ha
 	}
 	return nil
 }
+
+func (v *validatedConversationPatch) appendPatch() *registrystore.AppendConversationPatch {
+	if v == nil {
+		return nil
+	}
+	return &registrystore.AppendConversationPatch{Title: v.title, Metadata: v.metadataPatch, Archived: v.archived}
+}

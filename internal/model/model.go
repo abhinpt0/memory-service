@@ -125,6 +125,8 @@ func (ConversationMembership) TableName() string { return "conversation_membersh
 
 // Entry represents a message or context entry in a conversation.
 type Entry struct {
+	AppendBatchComplete bool       `json:"-"                        gorm:"-"`
+	AppendBatch         []byte     `json:"-"                        gorm:"type:bytea"`
 	ID                  uuid.UUID  `json:"id"                       gorm:"primaryKey;type:uuid"`
 	ConversationID      string     `json:"conversationId"           gorm:"not null;type:text"`
 	ConversationGroupID uuid.UUID  `json:"-"                        gorm:"primaryKey;type:uuid"`

@@ -108,3 +108,10 @@ func validateGRPCConversationPatchForOwnerOnly(patch *validatedGRPCConversationP
 	}
 	return nil
 }
+
+func (v *validatedGRPCConversationPatch) appendPatch() *registrystore.AppendConversationPatch {
+	if v == nil {
+		return nil
+	}
+	return &registrystore.AppendConversationPatch{Title: v.title, Metadata: v.metadataPatch, Archived: v.archived}
+}

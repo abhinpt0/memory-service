@@ -20,12 +20,12 @@ Tutorial pages are executable. Each `<TestScenario checkpoint="...">` builds and
 ```bash
 task test:site > site-test.log 2>&1                   # everything; grep the log for failures
 GODOG_TAGS='@quarkus' task test:site -- -count=1       # args after -- go to go test
-GODOG_TAGS='@python-langchain and @checkpoint_python_examples_langchain_doc_checkpoints_05_response_resumption' task test:site -- -count=1
+GODOG_TAGS='@python-langchain && @checkpoint_python_examples_langchain_doc_checkpoints_05_response_resumption' task test:site -- -count=1
 go build -tags='site_tests sqlite_fts5' ./internal/sitebdd/                      # compile check, no Docker
 go test -tags='site_tests sqlite_fts5' ./internal/sitebdd/ -run 'TestDocs' -count=1  # MDX lint only, no Docker
 ```
 
-- Tags: `@<framework>` is `concepts`, `quarkus`, `spring`, `python-langchain`, `python-langgraph`, or `typescript-vecelai` (from the page route, `deriveFramework`). `@checkpoint_<path>` is the checkpoint path lowercased with `/`, `-`, `.` replaced by `_`. `GODOG_TAGS` supports `and`, `or`, `not`, and parentheses.
+- Tags: `@<framework>` is `concepts`, `quarkus`, `spring`, `python-langchain`, `python-langgraph`, or `typescript-vecelai` (from the page route, `deriveFramework`). `@checkpoint_<path>` is the checkpoint path lowercased with `/`, `-`, `.` replaced by `_`. Use Godog's comma for OR, `&&` for AND, and `~` for NOT in `GODOG_TAGS`. The scheduler also understands word-based operators, but the Godog executor does not; the suite fails if a filter selects scenarios without executing any.
 - If you call `go test` yourself, pass `-timeout 20m` or more. The task already does (plus `-race`, `CGO_ENABLED=1`, and gotestsum).
 - `TestSiteDocs` only builds the site when `site/dist/test-scenarios.json` is missing. After MDX edits, run `cd site && npm run build` or `rm -f site/dist/test-scenarios.json`, or the run uses stale scenarios.
 - Devcontainer: `wt exec -- bash -c 'task test:site'`.

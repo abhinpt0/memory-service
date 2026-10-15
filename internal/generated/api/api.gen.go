@@ -849,7 +849,7 @@ type CreateEntryRequest struct {
 	// agent context entries.
 	ContentType string `json:"contentType"`
 
-	// ConversationPatch Optional inline conversation patch applied with the entry. PostgreSQL and SQLite commit both changes atomically in one transaction. MongoDB currently applies the entry and patch as separate operations. Supports `title`, `metadata` merge-patch (keys present are set, keys absent are left unchanged, keys explicitly set to `null` are removed), and `archived`. Setting `archived: false` unarchives the conversation before appending the entry; setting `archived: true` archives it after. Plain appends without this field are blocked on archived conversations — use `archived: false` here (or `PATCH /v1/conversations/{id}`) to unarchive first. Requires writer or higher access on the conversation (owner access for archive/unarchive). For batch requests (`entries[]`), this field is at the top level and applies once to the conversation, not per-entry.
+	// ConversationPatch Optional inline conversation patch applied with the entry. PostgreSQL and SQLite commit both changes atomically in one transaction. MongoDB does the same when the outbox is enabled. Otherwise, MongoDB applies the entry and patch as separate operations. Supports `title`, `metadata` merge-patch (keys present are set, keys absent are left unchanged, keys explicitly set to `null` are removed), and `archived`. Setting `archived: false` allows the append on an archived conversation and unarchives it as part of the append; setting `archived: true` archives it after. Plain appends without this field are blocked on archived conversations — use `archived: false` here (or `PATCH /v1/conversations/{id}`) to unarchive first. Requires writer or higher access on the conversation (owner access for archive/unarchive). For batch requests (`entries[]`), this field is at the top level and applies once to the conversation, not per-entry.
 	ConversationPatch *UpdateConversationRequest `json:"conversationPatch,omitempty"`
 
 	// ForkedAtConversationId If the target conversation doesn't exist yet, auto-create it as a fork of this conversation. Ignored when the conversation already exists.
@@ -865,8 +865,10 @@ type CreateEntryRequest struct {
 
 	// Seq Optional client-assigned sequence number. Must be unique within the
 	// conversation. An exact retry returns the stored entry, including after
-	// later sequenced entries have been appended. A partial or conflicting
-	// duplicate returns 409 Conflict. Returns 400 Bad Request if the value is
+	// later sequenced entries have been appended. In a batch, the first
+	// sequenced entry anchors retries of the entire original batch. Matching
+	// partial batches can resume on MongoDB. A conflicting duplicate returns
+	// 409 Conflict. Returns 400 Bad Request if the value is
 	// negative or exceeds 4294967295.
 	Seq *int `json:"seq,omitempty"`
 

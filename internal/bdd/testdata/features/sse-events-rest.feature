@@ -367,3 +367,27 @@ Feature: SSE Event Stream
     Then the response status should be 200
     And "bob" should receive an SSE event with kind "membership" and event "updated"
     And the SSE event data should contain "role"
+
+  Scenario: A completed mixed batch retry emits no additional entry events
+    Given I have a conversation with title "Batch retry events"
+    And "alice" is connected to the SSE event stream with query "kinds=entry&entry_channels=history"
+    And I am authenticated as agent with API key "test-agent-key"
+    When I call POST "/v1/conversations/${conversationId}/entries" with body:
+    """
+    {"entries":[
+      {"channel":"HISTORY","contentType":"history","seq":640,"content":[{"role":"USER","text":"Anchor"}]},
+      {"channel":"HISTORY","contentType":"history","content":[{"role":"USER","text":"Projection"}]}
+    ]}
+    """
+    Then the response status should be 201
+    And "alice" should receive an SSE event with kind "entry" and event "created"
+    And "alice" should receive an SSE event with kind "entry" and event "created"
+    When I call POST "/v1/conversations/${conversationId}/entries" with body:
+    """
+    {"entries":[
+      {"channel":"HISTORY","contentType":"history","seq":640,"content":[{"role":"USER","text":"Anchor"}]},
+      {"channel":"HISTORY","contentType":"history","content":[{"role":"USER","text":"Projection"}]}
+    ]}
+    """
+    Then the response status should be 201
+    And "alice" should not receive an SSE event with kind "entry" and event "created" within 2 seconds

@@ -21,6 +21,7 @@ const protocVersion = "34.0"
 
 func main() {
 	root := findProjectRoot()
+	useModuleToolchain(root)
 
 	// Ensure tools are installed
 	installTools(root)
@@ -43,6 +44,28 @@ func main() {
 	run("go", "fmt", ".", "./internal/...")
 
 	fmt.Println("Code generation complete.")
+}
+
+func useModuleToolchain(root string) {
+	cmd := exec.Command("go", "list", "-m", "-f", "{{.GoVersion}}")
+	cmd.Dir = root
+	output, err := cmd.Output()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cannot read module Go version: %v\n", err)
+		os.Exit(1)
+	}
+	version := strings.TrimSpace(string(output))
+	if version == "" {
+		fmt.Fprintln(os.Stderr, "go.mod must declare a Go version for code generation")
+		os.Exit(1)
+	}
+	// Compression and formatting output can change between Go releases.
+	// Match CI's go.mod toolchain even when the developer's installed Go is newer.
+	if err := os.Setenv("GOTOOLCHAIN", "go"+version); err != nil {
+		fmt.Fprintf(os.Stderr, "cannot select generation toolchain: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("Using Go %s for code generation...\n", version)
 }
 
 func installTools(root string) {

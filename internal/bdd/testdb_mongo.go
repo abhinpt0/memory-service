@@ -538,3 +538,31 @@ func (m *MongoTestDB) CountTasks(ctx context.Context) (int, error) {
 	count, err := db.Collection("tasks").CountDocuments(ctx, bson.M{})
 	return int(count), err
 }
+
+// InterruptAppendBatch leaves only the durable sequence anchor, as after a crash.
+func (m *MongoTestDB) InterruptAppendBatch(ctx context.Context, anchorID string) error {
+	client, db, err := m.db(ctx)
+	if err != nil {
+		return err
+	}
+	defer client.Disconnect(ctx)
+	var anchor struct {
+		Batch []byte `bson:"append_batch"`
+	}
+	entries := db.Collection("entries")
+	if err := entries.FindOne(ctx, bson.M{"_id": anchorID}).Decode(&anchor); err != nil {
+		return err
+	}
+	var batch struct{ IDs []string }
+	if err := json.Unmarshal(anchor.Batch, &batch); err != nil {
+		return err
+	}
+	if len(batch.IDs) < 2 {
+		return fmt.Errorf("anchor has no multi-entry append batch")
+	}
+	if _, err := entries.UpdateByID(ctx, anchorID, bson.M{"$unset": bson.M{"append_batch_complete": ""}}); err != nil {
+		return err
+	}
+	_, err = entries.DeleteMany(ctx, bson.M{"_id": bson.M{"$in": batch.IDs, "$ne": anchorID}})
+	return err
+}

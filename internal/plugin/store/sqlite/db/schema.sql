@@ -98,6 +98,7 @@ CREATE INDEX IF NOT EXISTS idx_conversation_groups_archived
     ON conversation_groups(archived_at) WHERE archived_at IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS entries (
+    append_batch BLOB,
     id TEXT NOT NULL,
     conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
     conversation_group_id TEXT NOT NULL REFERENCES conversation_groups(id) ON DELETE CASCADE,

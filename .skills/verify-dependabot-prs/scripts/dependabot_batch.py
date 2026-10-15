@@ -16,10 +16,10 @@ from typing import Any, Iterable
 
 RUNNER_VERSION = 1
 REQUIRED_CHECKS = {
-    "build (verify-generated)",
-    "build (test-go)",
-    "build (test-java)",
-    "build (test-site)",
+    "verify-generated",
+    "test-go",
+    "test-java",
+    "test-site",
 }
 FAILURE_CONCLUSIONS = {
     "ACTION_REQUIRED",
