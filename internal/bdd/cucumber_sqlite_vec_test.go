@@ -25,6 +25,9 @@ func TestFeaturesSQLiteVec(t *testing.T) {
 	cfg.SearchFulltextEnabled = true
 	cfg.EncryptionDBDisabled = true
 	cfg.EncryptionAttachmentsDisabled = true
+	cfg.APIKeys = map[string]string{
+		"test-agent-key": "test-agent-key",
+	}
 	cfg.AdminUsers = bddAdminUsers()
 	cfg.AuditorUsers = bddAuditorUsers()
 	cfg.IndexerUsers = bddIndexerUsers()
