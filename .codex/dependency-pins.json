@@ -6,22 +6,22 @@
       "pinnedVersion": "0.12.13",
       "location": ".github/workflows/ci.yml test-site setup-uv version",
       "class": "temporary cooldown",
-      "reason": "setup-uv otherwise installs the latest uv release; 0.12.20 was published inside the seven-day cooldown.",
+      "reason": "setup-uv otherwise installs the latest uv release; 0.12.20 was published inside the seven-day cooldown. The prior cooldown has expired; this security PR batch preserves the existing Go, image, and CI tool versions.",
       "introducedBy": "dependency-update",
       "introducedAt": "2026-09-29",
       "blockedVersion": "0.12.20",
       "blockedPublishedAt": "2026-09-28T23:20:35Z",
-      "reviewAfter": "after 2026-10-05T23:20:35Z"
+      "reviewAfter": "next general dependency update"
     },
     {
       "ecosystem": "python",
       "name": "uv exclude-newer",
-      "pinnedVersion": "2026-09-22T00:00:00Z",
-      "location": "python/uv.lock and python/examples/**/doc-checkpoints/**/uv.lock",
+      "pinnedVersion": "2026-10-07T13:08:05.687960Z",
+      "location": "python/uv.lock and Python doc-checkpoint uv.lock files",
       "class": "temporary cooldown",
-      "reason": "Keep the Python example lock refresh on packages published at least seven full days before 2026-09-29.",
+      "reason": "Keep security lockfile resolution on releases published at least seven full days before the 2026-10-14 update.",
       "introducedBy": "dependency-update",
-      "introducedAt": "2026-09-29",
+      "introducedAt": "2026-10-14",
       "reviewAfter": "next dependency update"
     },
     {
@@ -36,54 +36,15 @@
     },
     {
       "ecosystem": "npm",
-      "name": "@tanstack/react-query",
-      "pinnedVersion": "5.103.0",
-      "location": "frontends/developer/package.json dependencies, frontends/chat-frontend/package.json dependencies",
-      "class": "temporary cooldown",
-      "reason": "5.104.0 was published 2026-09-26 and remains inside the seven-day cooldown.",
-      "introducedBy": "dependency-update",
-      "introducedAt": "2026-09-25",
-      "blockedVersion": "5.104.0",
-      "blockedPublishedAt": "2026-09-26T03:56:26Z",
-      "reviewAfter": "after 2026-10-03"
-    },
-    {
-      "ecosystem": "npm",
-      "name": "@tanstack/react-router",
-      "pinnedVersion": "1.170.38",
-      "location": "frontends/developer/package.json dependencies",
-      "class": "temporary cooldown",
-      "reason": "1.170.40 was published 2026-09-27 and remains inside the seven-day cooldown.",
-      "introducedBy": "dependency-update",
-      "introducedAt": "2026-09-25",
-      "blockedVersion": "1.170.40",
-      "blockedPublishedAt": "2026-09-27T14:11:47Z",
-      "reviewAfter": "after 2026-10-04"
-    },
-    {
-      "ecosystem": "npm",
-      "name": "@tanstack/router-plugin",
-      "pinnedVersion": "1.168.40",
-      "location": "frontends/developer/package.json devDependencies",
-      "class": "temporary cooldown",
-      "reason": "1.168.41 was published 2026-09-27 and remains inside the seven-day cooldown.",
-      "introducedBy": "dependency-update",
-      "introducedAt": "2026-09-25",
-      "blockedVersion": "1.168.41",
-      "blockedPublishedAt": "2026-09-27T14:08:45Z",
-      "reviewAfter": "after 2026-10-04"
-    },
-    {
-      "ecosystem": "npm",
       "name": "astro",
       "pinnedVersion": "5.x (range ^5.7.10 in site/package.json)",
       "location": "site/package.json",
       "class": "user-defined",
-      "reason": "astro 7.x upgrade backed out: build fails with breaking Sätteri markdown processor change — @astrojs/markdown-remark was removed from astro 7.x default markdown pipeline and the site's astro.config.mjs uses the old remarkPlugins API. Not a cooldown hold; this is a compatibility hold requiring site config migration.",
+      "reason": "astro 7.x upgrade backed out: build fails with breaking S\u00e4tteri markdown processor change \u2014 @astrojs/markdown-remark was removed from astro 7.x default markdown pipeline and the site's astro.config.mjs uses the old remarkPlugins API. Not a cooldown hold; this is a compatibility hold requiring site config migration.",
       "introducedBy": "dependency-update",
       "introducedAt": "2026-09-25",
       "blockedVersion": "7.x",
-      "reviewAfter": "when site/astro.config.mjs is migrated to astro 7 Sätteri markdown API",
+      "reviewAfter": "when site/astro.config.mjs is migrated to astro 7 S\u00e4tteri markdown API",
       "verification": "cd site && npm run build"
     },
     {
@@ -115,10 +76,10 @@
       "pinnedVersion": "9.8@sha256:5e68f09a652ac6627a83c57655e42e24575efb278b54336039c9308607fc6b21",
       "location": "Dockerfile",
       "class": "temporary cooldown",
-      "reason": "The replacement 9.8 digest was built 2026-09-23 and remains inside the seven-day cooldown.",
+      "reason": "The replacement 9.8 digest was built 2026-09-23 and remains inside the seven-day cooldown. The prior cooldown has expired; this security PR batch preserves the existing Go, image, and CI tool versions.",
       "introducedBy": "dependency-update",
       "introducedAt": "2026-09-25",
-      "reviewAfter": "next dependency update"
+      "reviewAfter": "next general dependency update"
     },
     {
       "ecosystem": "docker",
@@ -137,12 +98,12 @@
       "pinnedVersion": "v1.1.0",
       "location": "go.mod",
       "class": "temporary cooldown",
-      "reason": "v1.1.1 was published 2026-09-23 and remains inside the seven-day cooldown.",
+      "reason": "v1.1.1 was published 2026-09-23 and remains inside the seven-day cooldown. The prior cooldown has expired; this security PR batch preserves the existing Go, image, and CI tool versions.",
       "introducedBy": "dependency-update",
       "introducedAt": "2026-09-25",
       "blockedVersion": "v1.1.1",
       "blockedPublishedAt": "2026-09-23T13:14:55Z",
-      "reviewAfter": "next dependency update"
+      "reviewAfter": "next general dependency update"
     },
     {
       "ecosystem": "go",
@@ -150,12 +111,12 @@
       "pinnedVersion": "v1.25.1",
       "location": "go.mod",
       "class": "temporary cooldown",
-      "reason": "v1.25.3 was published 2026-09-25 and remains inside the seven-day cooldown.",
+      "reason": "v1.25.3 was published 2026-09-25 and remains inside the seven-day cooldown. The prior cooldown has expired; this security PR batch preserves the existing Go, image, and CI tool versions.",
       "introducedBy": "dependency-update",
       "introducedAt": "2026-09-25",
       "blockedVersion": "v1.25.3",
       "blockedPublishedAt": "2026-09-25T17:14:49Z",
-      "reviewAfter": "next dependency update"
+      "reviewAfter": "next general dependency update"
     },
     {
       "ecosystem": "go",
@@ -163,12 +124,12 @@
       "pinnedVersion": "v1.19.2",
       "location": "go.mod (transitive, selected by go mod tidy)",
       "class": "temporary cooldown",
-      "reason": "v1.20.1 was published 2026-09-25 and remains inside the seven-day cooldown.",
+      "reason": "v1.20.1 was published 2026-09-25 and remains inside the seven-day cooldown. The prior cooldown has expired; this security PR batch preserves the existing Go, image, and CI tool versions.",
       "introducedBy": "dependency-update",
       "introducedAt": "2026-09-25",
       "blockedVersion": "v1.20.1",
       "blockedPublishedAt": "2026-09-25T08:00:35Z",
-      "reviewAfter": "next dependency update"
+      "reviewAfter": "next general dependency update"
     },
     {
       "ecosystem": "pypi",
@@ -176,12 +137,12 @@
       "pinnedVersion": "0.53.0",
       "location": "python/uv.lock (--upgrade-package pin)",
       "class": "temporary cooldown",
-      "reason": "0.54.0 was published 2026-09-25 and remains inside the seven-day cooldown.",
+      "reason": "Existing lockfile resolution retained because this batch targets security fixes and expired frontend pins. The prior version-specific cooldown has expired.",
       "introducedBy": "dependency-update",
       "introducedAt": "2026-09-25",
       "blockedVersion": "0.54.0",
       "blockedPublishedAt": "2026-09-25T06:52:35Z",
-      "reviewAfter": "next dependency update"
+      "reviewAfter": "next general dependency update"
     },
     {
       "ecosystem": "pypi",
@@ -334,6 +295,253 @@
       "blockedVersion": "v0.299.0",
       "reviewAfter": "when Go vulnerability database corrects the range or a newer stable gRPC passes govulncheck",
       "verification": "go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./..."
+    },
+    {
+      "ecosystem": "npm",
+      "name": "dompurify",
+      "pinnedVersion": "3.4.16",
+      "blockedVersion": "3.4.17",
+      "blockedPublishedAt": "2026-10-12T12:41:28.880Z",
+      "location": "frontends/chat-frontend/package-lock.json, frontends/developer/package-lock.json",
+      "class": "temporary cooldown",
+      "reason": "The newer Dependabot target is inside the seven-day cooldown and has no qualifying fixed-release CVE evidence. The retained version satisfies the relevant security advisory.",
+      "introducedBy": "dependency-update",
+      "introducedAt": "2026-10-14",
+      "reviewAfter": "next dependency update"
+    },
+    {
+      "ecosystem": "npm",
+      "name": "smol-toml",
+      "pinnedVersion": "1.9.0",
+      "blockedVersion": "1.9.1",
+      "blockedPublishedAt": "2026-10-09T10:21:39.612Z",
+      "location": "site/package-lock.json",
+      "class": "temporary cooldown",
+      "reason": "The newer Dependabot target is inside the seven-day cooldown and has no qualifying fixed-release CVE evidence. The retained version satisfies the relevant security advisory.",
+      "introducedBy": "dependency-update",
+      "introducedAt": "2026-10-14",
+      "reviewAfter": "next dependency update"
+    },
+    {
+      "ecosystem": "pypi",
+      "name": "langgraph-sdk",
+      "pinnedVersion": "0.4.6",
+      "blockedVersion": "0.4.7",
+      "blockedPublishedAt": "2026-10-12T22:54:04.224404Z",
+      "location": "python/uv.lock and Python doc-checkpoint uv.lock files",
+      "class": "temporary cooldown",
+      "reason": "The newer Dependabot target is inside the seven-day cooldown and has no qualifying fixed-release CVE evidence. The retained version satisfies the relevant security advisory.",
+      "introducedBy": "dependency-update",
+      "introducedAt": "2026-10-14",
+      "reviewAfter": "next dependency update"
+    },
+    {
+      "ecosystem": "pypi",
+      "name": "langgraph-checkpoint",
+      "pinnedVersion": "4.2.0",
+      "blockedVersion": "4.3.0",
+      "blockedPublishedAt": "2026-10-12T22:26:30.429712Z",
+      "location": "python/uv.lock and Python doc-checkpoint uv.lock files",
+      "class": "temporary cooldown",
+      "reason": "The newer Dependabot target is inside the seven-day cooldown and has no qualifying fixed-release CVE evidence. The retained version satisfies the relevant security advisory.",
+      "introducedBy": "dependency-update",
+      "introducedAt": "2026-10-14",
+      "reviewAfter": "next dependency update"
+    },
+    {
+      "ecosystem": "pypi",
+      "name": "langsmith",
+      "pinnedVersion": "0.14.4",
+      "blockedVersion": "0.14.8",
+      "blockedPublishedAt": "2026-10-13T00:42:23.530703Z",
+      "location": "python/uv.lock and Python doc-checkpoint uv.lock files",
+      "class": "temporary cooldown",
+      "reason": "The newer Dependabot target is inside the seven-day cooldown and has no qualifying fixed-release CVE evidence. The retained version satisfies the relevant security advisory.",
+      "introducedBy": "dependency-update",
+      "introducedAt": "2026-10-14",
+      "reviewAfter": "next dependency update"
+    },
+    {
+      "ecosystem": "pypi",
+      "name": "truststore",
+      "pinnedVersion": "0.10.4",
+      "blockedVersion": "0.10.5",
+      "blockedPublishedAt": "2026-10-12T22:27:30.377491Z",
+      "location": "python/uv.lock and Python doc-checkpoint uv.lock files",
+      "class": "temporary cooldown",
+      "reason": "The newer transitive dependency selected by the LangSmith PR is inside the seven-day cooldown. Resolve LangSmith with the older eligible truststore release.",
+      "introducedBy": "dependency-update",
+      "introducedAt": "2026-10-14",
+      "reviewAfter": "next dependency update"
+    },
+    {
+      "ecosystem": "npm",
+      "name": "js-yaml",
+      "pinnedVersion": "4.3.2",
+      "location": "frontends/chat-frontend/package.json overrides",
+      "class": "unknown legacy",
+      "reason": "Existing project override; retained during this security update.",
+      "introducedBy": "project",
+      "reviewAfter": "explicit project review"
+    },
+    {
+      "ecosystem": "npm",
+      "name": "brace-expansion@^1",
+      "pinnedVersion": "1.1.21",
+      "location": "frontends/chat-frontend/package.json overrides",
+      "class": "user-defined",
+      "reason": "Require the CVE-2026-102277 fix on the 1.x dependency branch.",
+      "introducedBy": "dependency-update",
+      "reviewAfter": "when upstream dependency constraints resolve the security fix without an override"
+    },
+    {
+      "ecosystem": "npm",
+      "name": "brace-expansion@^4",
+      "pinnedVersion": "5.0.12",
+      "location": "frontends/chat-frontend/package.json overrides",
+      "class": "unknown legacy",
+      "reason": "Existing project override; retained during this security update.",
+      "introducedBy": "project",
+      "reviewAfter": "explicit project review"
+    },
+    {
+      "ecosystem": "npm",
+      "name": "brace-expansion@^5",
+      "pinnedVersion": "5.0.12",
+      "location": "frontends/chat-frontend/package.json overrides",
+      "class": "unknown legacy",
+      "reason": "Existing project override; retained during this security update.",
+      "introducedBy": "project",
+      "reviewAfter": "explicit project review"
+    },
+    {
+      "ecosystem": "npm",
+      "name": "picomatch",
+      "pinnedVersion": ">=2.3.2",
+      "location": "frontends/chat-frontend/package.json overrides",
+      "class": "unknown legacy",
+      "reason": "Existing project override; retained during this security update.",
+      "introducedBy": "project",
+      "reviewAfter": "explicit project review"
+    },
+    {
+      "ecosystem": "npm",
+      "name": "js-yaml",
+      "pinnedVersion": "4.3.2",
+      "location": "frontends/developer/package.json overrides",
+      "class": "unknown legacy",
+      "reason": "Existing project override; retained during this security update.",
+      "introducedBy": "project",
+      "reviewAfter": "explicit project review"
+    },
+    {
+      "ecosystem": "npm",
+      "name": "brace-expansion@^1",
+      "pinnedVersion": "1.1.21",
+      "location": "frontends/developer/package.json overrides",
+      "class": "user-defined",
+      "reason": "Require the CVE-2026-102277 fix on the 1.x dependency branch.",
+      "introducedBy": "dependency-update",
+      "reviewAfter": "when upstream dependency constraints resolve the security fix without an override"
+    },
+    {
+      "ecosystem": "npm",
+      "name": "@babel/parser",
+      "pinnedVersion": "7.29.9",
+      "location": "frontends/developer/package.json overrides",
+      "class": "unknown legacy",
+      "reason": "Existing project override; retained during this security update.",
+      "introducedBy": "project",
+      "reviewAfter": "explicit project review"
+    },
+    {
+      "ecosystem": "npm",
+      "name": "unplugin",
+      "pinnedVersion": "3.4.0",
+      "location": "frontends/developer/package.json overrides",
+      "class": "unknown legacy",
+      "reason": "Existing project override; retained during this security update.",
+      "introducedBy": "project",
+      "reviewAfter": "explicit project review"
+    }
+  ],
+  "securityExceptions": [
+    {
+      "ecosystem": "go",
+      "name": "golang.org/x/net",
+      "version": "v0.60.0",
+      "publishedAt": "2026-10-08T17:22:58Z",
+      "vulnerabilityIds": [
+        "GO-2026-6617",
+        "GO-2026-6612",
+        "GO-2026-6611",
+        "GO-2026-6610",
+        "GO-2026-6603"
+      ],
+      "evidenceUrls": [
+        "https://pkg.go.dev/vuln/GO-2026-6617",
+        "https://pkg.go.dev/vuln/GO-2026-6612",
+        "https://pkg.go.dev/vuln/GO-2026-6611",
+        "https://pkg.go.dev/vuln/GO-2026-6610",
+        "https://pkg.go.dev/vuln/GO-2026-6603"
+      ],
+      "reason": "Pre-update govulncheck identifies v0.60.0 as the fixed version for reachable HTTP/2 vulnerabilities.",
+      "cveIds": [
+        "CVE-2026-78659",
+        "CVE-2026-78660",
+        "CVE-2026-78663",
+        "CVE-2026-78669",
+        "CVE-2026-97032"
+      ]
+    },
+    {
+      "ecosystem": "docker",
+      "name": "golang",
+      "version": "1.27.2-alpine@sha256:f92b6ef800e499660581efdabdf25d9d817a9d124eaf900924f0504e7e27e12d",
+      "publishedAt": "2026-10-10T10:23:34.989280Z",
+      "vulnerabilityIds": [
+        "GO-2026-6617",
+        "GO-2026-6613",
+        "GO-2026-6612",
+        "GO-2026-6611",
+        "GO-2026-6610",
+        "GO-2026-6609",
+        "GO-2026-6608",
+        "GO-2026-6607",
+        "GO-2026-6605",
+        "GO-2026-6603",
+        "GO-2026-6600",
+        "GO-2026-6599"
+      ],
+      "evidenceUrls": [
+        "https://pkg.go.dev/vuln/GO-2026-6617",
+        "https://pkg.go.dev/vuln/GO-2026-6613",
+        "https://pkg.go.dev/vuln/GO-2026-6612",
+        "https://pkg.go.dev/vuln/GO-2026-6611",
+        "https://pkg.go.dev/vuln/GO-2026-6610",
+        "https://pkg.go.dev/vuln/GO-2026-6609",
+        "https://pkg.go.dev/vuln/GO-2026-6608",
+        "https://pkg.go.dev/vuln/GO-2026-6607",
+        "https://pkg.go.dev/vuln/GO-2026-6605",
+        "https://pkg.go.dev/vuln/GO-2026-6603",
+        "https://pkg.go.dev/vuln/GO-2026-6600",
+        "https://pkg.go.dev/vuln/GO-2026-6599"
+      ],
+      "reason": "Official Go builder image contains Go 1.27.2, the fixed toolchain identified by pre-update govulncheck.",
+      "cveIds": [
+        "CVE-2026-56866",
+        "CVE-2026-78659",
+        "CVE-2026-78660",
+        "CVE-2026-78663",
+        "CVE-2026-78667",
+        "CVE-2026-78669",
+        "CVE-2026-94439",
+        "CVE-2026-94440",
+        "CVE-2026-94448",
+        "CVE-2026-97030",
+        "CVE-2026-97031",
+        "CVE-2026-97032"
+      ]
     }
   ]
 }

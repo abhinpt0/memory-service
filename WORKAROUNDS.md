@@ -1,5 +1,17 @@
 # Workarounds
 
+## Godog tag filter operators
+
+- What: Site test commands use comma, `&&`, and `~` tag operators, and the suite rejects a run that selects scenarios but executes none.
+- Why: The scheduling parser accepts word-based `and`, `or`, and `not`, while Godog's executor uses legacy tag syntax. Forwarding a word-based filter can report success without executing the selected scenarios.
+- Proper fix: Share one tag parser between scheduling and execution, or translate the scheduling expression into syntax supported by Godog.
+
+## Frontend brace-expansion override
+
+- What: Both frontend manifests override the brace-expansion 1.x dependency branch to 1.1.21.
+- Why: The existing override kept transitive consumers on vulnerable 1.1.18. Version 1.1.21 fixes [CVE-2026-102277](https://github.com/advisories/GHSA-q2hr-2g5m-vwhr).
+- Proper fix: Remove the override when the upstream dependency constraints and lockfiles resolve a fixed version without it, then run both frontend verification tasks.
+
 ## SQLite timestamp pairs
 
 - What: SQLite stores each timestamp as integer Unix seconds in `*_at` and normalized nanoseconds in `*_at_ns`. SQLite-only GORM builders expand model writes and projections. Raw SQL supplies both columns and two adjacent placeholders for each timestamp argument. The driver expands that argument, validates the resulting parameter count, and merges paired result columns into UTC dates. Nullable raw SQL timestamps accept `*time.Time` and `sql.NullTime`. Nil pointers and invalid `sql.NullTime` values bind two NULL parameters. Named timestamp parameters are unsupported. Bound parameters must belong to the first statement in a SQL batch.
