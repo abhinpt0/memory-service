@@ -11,7 +11,9 @@ import (
 
 	"github.com/chirino/memory-service/internal/model"
 	registryepisodic "github.com/chirino/memory-service/internal/registry/episodic"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.mongodb.org/mongo-driver/v2/mongo"
 )
 
 func TestMongoWriteTransactionRollsBackAllEpisodicWrites(t *testing.T) {
@@ -42,6 +44,22 @@ func TestMongoWriteTransactionRollsBackAllEpisodicWrites(t *testing.T) {
 		}
 		return nil
 	}))
+}
+
+func TestMongoEpisodicWriteTransactionDoesNotRetryCallback(t *testing.T) {
+	store, ctx := setupMongoEpisodicStore(t)
+
+	attempts := 0
+	err := store.InWriteTx(ctx, func(context.Context) error {
+		attempts++
+		return mongo.CommandError{
+			Message: "retry transaction",
+			Labels:  []string{"TransientTransactionError"},
+		}
+	})
+
+	require.Error(t, err)
+	assert.Equal(t, 1, attempts)
 }
 
 func TestMongoTransactionKeepsKindAndContentOnOneSnapshot(t *testing.T) {

@@ -876,7 +876,7 @@ func adminGetAttachment(c *gin.Context, store registrystore.MemoryStore) {
 	}
 }
 
-func adminDeleteAttachment(c *gin.Context, store registrystore.MemoryStore, attachStore registryattach.AttachmentStore) {
+func adminDeleteAttachment(c *gin.Context, store registrystore.MemoryStore, _ registryattach.AttachmentStore) {
 	attachmentID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "attachment not found"})
@@ -884,22 +884,14 @@ func adminDeleteAttachment(c *gin.Context, store registrystore.MemoryStore, atta
 	}
 
 	if err := routetx.MemoryWrite(c, store, func(ctx context.Context) error {
-		attachment, err := store.AdminGetAttachment(ctx, attachmentID)
-		if err != nil {
-			return err
-		}
-
 		if err := store.AdminDeleteAttachment(ctx, attachmentID); err != nil {
 			return err
-		}
-
-		if attachStore != nil && attachment.StorageKey != nil && attachment.RefCount <= 1 {
-			_ = attachStore.Delete(ctx, *attachment.StorageKey)
 		}
 		c.Status(http.StatusNoContent)
 		return nil
 	}); err != nil {
 		handleError(c, err)
+		return
 	}
 }
 
@@ -1143,6 +1135,8 @@ func adminEvict(c *gin.Context, store registrystore.MemoryStore, eventBus regist
 			var eventsToPublish []registryeventbus.Event
 			var batchCount int
 			if err := routetx.MemoryWrite(c, store, func(ctx context.Context) error {
+				batchCount = 0
+				eventsToPublish = nil
 				ids, err := store.FindEvictableGroupIDs(ctx, cutoff, batchSize)
 				if err != nil || len(ids) == 0 {
 					return err
@@ -1182,6 +1176,7 @@ func adminEvict(c *gin.Context, store registrystore.MemoryStore, eventBus regist
 		for {
 			var deleted int64
 			if err := routetx.MemoryWrite(c, store, func(ctx context.Context) error {
+				deleted = 0
 				var err error
 				deleted, err = outboxStore.EvictOutboxEventsBefore(ctx, cutoff, batchSize)
 				return err

@@ -84,6 +84,9 @@ func putMemoryWithEvents(c *gin.Context, store registryepisodic.EpisodicStore, m
 	// Resolve write kind, authorize, project, and persist — all inside one InWriteTx so the kind
 	// resolved for authz is the same kind projected and persisted. No second ResolveKindForWrite.
 	if err := routetx.EpisodicWrite(c, store, func(ctx context.Context) error {
+		responseStatus = 0
+		responseBody = nil
+		events = nil
 		// 1. Load and authorize the active row before replacing it, then carry its
 		// identity/revision into the store for optimistic predecessor validation.
 		var predecessorExpectation *registryepisodic.MemoryPredecessorExpectation
@@ -231,6 +234,8 @@ func getMemoryWithParams(c *gin.Context, store registryepisodic.EpisodicStore, p
 	var responseStatus int
 	var responseBody interface{}
 	if err := routetx.EpisodicWrite(c, store, func(ctx context.Context) error {
+		responseStatus = 0
+		responseBody = nil
 		// 1. Look up exact kind without loading/decrypting the value.
 		// If the row does not exist we still run authz with kind="" so that
 		// callers without access get 403 (not 404), preventing existence leakage.
@@ -331,6 +336,9 @@ func updateMemoryWithParams(c *gin.Context, store registryepisodic.EpisodicStore
 	var responseBody interface{}
 	var events []registryeventbus.Event
 	if err := routetx.EpisodicWrite(c, store, func(ctx context.Context) error {
+		responseStatus = 0
+		responseBody = nil
+		events = nil
 		if policy != nil {
 			// 1. Look up exact kind without loading value. Use ArchiveFilterExclude so archived rows
 			// are treated as absent for update purposes (consistent with ArchiveMemory semantics).
@@ -1370,6 +1378,7 @@ func HandleAdminCreateMemoryKindVersion(c *gin.Context, store registryepisodic.E
 	}
 	var result *model.MemoryKindVersion
 	if err := routetx.EpisodicWrite(c, store, func(ctx context.Context) error {
+		result = nil
 		var err error
 		result, err = store.CreateMemoryKindVersion(ctx, version)
 		if err != nil {
@@ -1527,6 +1536,7 @@ func HandleAdminCreateMemoryKindMigration(c *gin.Context, store registryepisodic
 	}
 	var result *model.MemoryKindMigration
 	if err := routetx.EpisodicWrite(c, store, func(ctx context.Context) error {
+		result = nil
 		var err error
 		result, err = store.CreateMemoryKindMigrationAndTask(ctx, m)
 		return err
@@ -1692,6 +1702,7 @@ func HandleAdminDeleteMemory(c *gin.Context, store registryepisodic.EpisodicStor
 	}
 	var events []registryeventbus.Event
 	if err := routetx.EpisodicWrite(c, store, func(ctx context.Context) error {
+		events = nil
 		if err := store.AdminForceDeleteMemory(ctx, memID); err != nil {
 			return err
 		}
@@ -2835,6 +2846,8 @@ func HandleAdminPutMemory(c *gin.Context, store registryepisodic.EpisodicStore, 
 	var result *registryepisodic.MemoryWriteResult
 	var events []registryeventbus.Event
 	if err := routetx.EpisodicWrite(c, store, func(ctx context.Context) error {
+		result = nil
+		events = nil
 		policyAttrs, resolvedKind, err := resolveKindProjection(ctx, store, kindSel, req.Namespace, req.Key, req.Value, index)
 		if err != nil {
 			return err
@@ -2903,6 +2916,7 @@ func HandleAdminUpdateMemory(c *gin.Context, store registryepisodic.EpisodicStor
 	// archive is an administrative operation across namespaces.
 	var events []registryeventbus.Event
 	if err := routetx.EpisodicWrite(c, store, func(ctx context.Context) error {
+		events = nil
 		item, err := store.GetMemory(ctx, params.Ns, params.Key, registryepisodic.ArchiveFilterExclude)
 		if err != nil {
 			return err

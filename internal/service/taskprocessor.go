@@ -13,6 +13,7 @@ import (
 	"github.com/chirino/memory-service/internal/episodic"
 	"github.com/chirino/memory-service/internal/model"
 	"github.com/chirino/memory-service/internal/operationevent"
+	registryattach "github.com/chirino/memory-service/internal/registry/attach"
 	registryepisodic "github.com/chirino/memory-service/internal/registry/episodic"
 	registrystore "github.com/chirino/memory-service/internal/registry/store"
 	registryvector "github.com/chirino/memory-service/internal/registry/vector"
@@ -48,6 +49,16 @@ func (e *migErrStateUpdateFailed) Unwrap() error { return e.cause }
 // (processClaimedTask) detects this to emit ResultFailed rather than ResultSuccess.
 var errMigrationTerminalFailed = errors.New("migration marked failed")
 
+// Attachment delete attempts must finish before the five-minute task claim
+// lease expires. This prevents a reclaimed task from overlapping an older
+// provider call while its per-storage-key guard is being finalized.
+const attachmentBlobDeleteAttemptTimeout = 4 * time.Minute
+
+type attachmentBlobDeleteCompletionError struct{ cause error }
+
+func (e *attachmentBlobDeleteCompletionError) Error() string { return e.cause.Error() }
+func (e *attachmentBlobDeleteCompletionError) Unwrap() error { return e.cause }
+
 // Stable error codes for terminal migration failures.  These are sanitized, provider-text-free
 // strings safe for API exposure.  Never derive a terminal code from error.Error() string content.
 const (
@@ -61,11 +72,13 @@ const (
 )
 
 // TaskProcessor polls for ready tasks and executes them. It processes
-// vector_store_delete tasks by calling the vector store's delete method,
-// and memory_kind_migration tasks by executing schema migration batches.
+// vector_store_delete and attachment_blob_delete tasks by calling their
+// configured providers, and memory_kind_migration tasks by executing schema
+// migration batches.
 type TaskProcessor struct {
 	store         registrystore.MemoryStore
 	vector        registryvector.VectorStore
+	attachment    registryattach.AttachmentStore
 	episodicStore registryepisodic.EpisodicStore
 	encSvc        *dataencryption.Service
 	interval      time.Duration
@@ -89,6 +102,12 @@ func NewTaskProcessor(store registrystore.MemoryStore, vector registryvector.Vec
 func (p *TaskProcessor) SetEpisodicStore(store registryepisodic.EpisodicStore, enc *dataencryption.Service) {
 	p.episodicStore = store
 	p.encSvc = enc
+}
+
+// SetAttachmentStore wires the provider used by attachment_blob_delete tasks.
+// A queued task remains retryable when no provider is configured.
+func (p *TaskProcessor) SetAttachmentStore(store registryattach.AttachmentStore) {
+	p.attachment = store
 }
 
 // Start begins the periodic task processing loop. Returns when ctx is cancelled.
@@ -122,17 +141,20 @@ func (p *TaskProcessor) processBatch(ctx context.Context) {
 // ProcessOnce claims and processes one batch of ready tasks. It is also used by
 // deterministic integration tests that should not wait for the periodic ticker.
 func (p *TaskProcessor) ProcessOnce(ctx context.Context) error {
-	var tasks []model.Task
-	err := p.store.InWriteTx(ctx, func(writeCtx context.Context) error {
-		var err error
-		tasks, err = p.store.ClaimReadyTasks(writeCtx, p.batchSize)
-		return err
-	})
-	if err != nil {
-		return err
-	}
-	for _, task := range tasks {
-		p.processClaimedTask(ctx, task)
+	for i := 0; i < p.batchSize; i++ {
+		var tasks []model.Task
+		err := p.store.InWriteTx(ctx, func(writeCtx context.Context) error {
+			var err error
+			tasks, err = p.store.ClaimReadyTasks(writeCtx, 1)
+			return err
+		})
+		if err != nil {
+			return err
+		}
+		if len(tasks) == 0 {
+			return nil
+		}
+		p.processClaimedTask(ctx, tasks[0])
 	}
 	return nil
 }
@@ -151,7 +173,13 @@ func (p *TaskProcessor) processClaimedTask(ctx context.Context, task model.Task)
 		event.EmitStart()
 	}
 	taskCtx := operationevent.WithContext(ctx, event)
-	execErr := p.executeTask(taskCtx, task.TaskType, task.TaskBody)
+	retainTask := false
+	var execErr error
+	if task.TaskType == registrystore.AttachmentBlobDeleteTaskType {
+		retainTask, execErr = p.executeAttachmentBlobDelete(taskCtx, task)
+	} else {
+		execErr = p.executeTask(taskCtx, task.TaskType, task.TaskBody)
+	}
 	if execErr != nil {
 		if result, interrupted := jobContextResult(ctx, execErr); interrupted {
 			if result == operationevent.ResultTimedOut {
@@ -175,6 +203,14 @@ func (p *TaskProcessor) processClaimedTask(ctx context.Context, task model.Task)
 				event.SetReason("migration_failed")
 			}
 			event.EmitTerminal(operationevent.ResultFailed)
+			return
+		}
+		var completionErr *attachmentBlobDeleteCompletionError
+		if errors.As(execErr, &completionErr) {
+			p.logErr(ctx, "TaskProcessor: attachment delete completion persistence failed", "taskId", task.ID, "err", execErr)
+			event.SetReason("completion_persistence_failed")
+			event.EnrichError(execErr)
+			event.EmitTerminal(operationevent.ResultRetrying)
 			return
 		}
 		p.logErr(ctx, "TaskProcessor: task failed", "taskId", task.ID, "type", task.TaskType, "err", execErr)
@@ -205,6 +241,10 @@ func (p *TaskProcessor) processClaimedTask(ctx context.Context, task model.Task)
 			event.EnrichError(execErr)
 			event.EmitTerminal(operationevent.ResultRetrying)
 		}
+		return
+	}
+	if retainTask {
+		event.EmitTerminal(operationevent.ResultSuccess)
 		return
 	}
 	if dErr := p.store.InWriteTx(ctx, func(writeCtx context.Context) error {
@@ -286,6 +326,8 @@ func taskOperationName(taskType string) string {
 		return "job.vector_store_delete"
 	case "memory_kind_migration":
 		return "job.memory_kind_migration"
+	case registrystore.AttachmentBlobDeleteTaskType:
+		return "job.attachment_blob_delete"
 	}
 	return "job.task"
 }
@@ -299,6 +341,38 @@ func (p *TaskProcessor) executeTask(ctx context.Context, taskType string, body m
 	default:
 		return fmt.Errorf("unknown task type: %s", taskType)
 	}
+}
+
+func (p *TaskProcessor) executeAttachmentBlobDelete(ctx context.Context, task model.Task) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, attachmentBlobDeleteAttemptTimeout)
+	defer cancel()
+	storageKey, ok := task.TaskBody[registrystore.AttachmentBlobDeleteStorageKeyField].(string)
+	if !ok || storageKey == "" {
+		return false, fmt.Errorf("missing or invalid %s in task body", registrystore.AttachmentBlobDeleteStorageKeyField)
+	}
+	var referenced bool
+	if err := p.store.InWriteTx(ctx, func(writeCtx context.Context) error {
+		var err error
+		referenced, err = p.store.PrepareAttachmentBlobDelete(writeCtx, task.ID, storageKey)
+		return err
+	}); err != nil {
+		return false, err
+	}
+	if referenced {
+		return true, nil
+	}
+	if p.attachment == nil {
+		return false, fmt.Errorf("attachment store is not configured")
+	}
+	if err := p.attachment.Delete(ctx, storageKey); err != nil {
+		return false, err
+	}
+	if err := p.store.InWriteTx(ctx, func(writeCtx context.Context) error {
+		return p.store.CompleteAttachmentBlobDelete(writeCtx, task.ID)
+	}); err != nil {
+		return false, &attachmentBlobDeleteCompletionError{cause: err}
+	}
+	return true, nil
 }
 
 func (p *TaskProcessor) executeVectorStoreDelete(ctx context.Context, body map[string]any) error {

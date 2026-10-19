@@ -4,7 +4,7 @@ status: implemented
 
 # Enhancement 091: Mongo Transactional Event Outbox
 
-> **Status**: Implemented — outbox-enabled writes use MongoDB session transactions and a change-stream relay supplies ordered live and replay cursors.
+> **Status**: Implemented — all MongoDB writes use session transactions; outbox-enabled deployments also use a change-stream relay for ordered live and replay cursors.
 
 ## Summary
 

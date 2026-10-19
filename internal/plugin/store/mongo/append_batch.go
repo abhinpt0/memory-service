@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/charmbracelet/log"
 	"github.com/chirino/memory-service/internal/model"
 	registrystore "github.com/chirino/memory-service/internal/registry/store"
+	"github.com/chirino/memory-service/internal/txscope"
 	"github.com/google/uuid"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -133,9 +135,12 @@ func (s *MongoStore) RecoverAppendBatch(ctx context.Context, anchor model.Entry,
 		if s.entriesCache != nil && s.entriesCache.Available() {
 			for _, entry := range result.Entries {
 				if entry.Channel == model.ChannelContext && entry.ClientID != nil {
-					if err := s.entriesCache.Remove(ctx, anchor.ConversationID, scopedAgentCacheKey(*entry.ClientID, valueOrEmpty(entry.AgentID))); err != nil {
-						return mismatch, fmt.Errorf("invalidate recovered context cache: %w", err)
-					}
+					cacheKey := scopedAgentCacheKey(*entry.ClientID, valueOrEmpty(entry.AgentID))
+					txscope.AfterCommit(ctx, func(commitCtx context.Context) {
+						if err := s.entriesCache.Remove(commitCtx, anchor.ConversationID, cacheKey); err != nil {
+							log.Warn("Failed to invalidate recovered context cache", "conversationId", anchor.ConversationID, "err", err)
+						}
+					})
 					break
 				}
 			}

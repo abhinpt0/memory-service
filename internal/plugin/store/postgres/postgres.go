@@ -193,11 +193,14 @@ func postgresRequireCurrentSchemaOrEmpty(ctx context.Context, db *sql.DB) error 
 
 // PostgresStore implements MemoryStore using GORM + PostgreSQL.
 type PostgresStore struct {
-	db                        *gorm.DB
-	cfg                       *config.Config
-	enc                       *dataencryption.Service
-	entriesCache              registrycache.MemoryEntriesCache
-	metadataPatchBeforeUpdate func() // test-only synchronization hook; nil in production
+	db                         *gorm.DB
+	cfg                        *config.Config
+	enc                        *dataencryption.Service
+	entriesCache               registrycache.MemoryEntriesCache
+	metadataPatchBeforeUpdate  func() // test-only synchronization hook; nil in production
+	afterAttachmentCloneRead   func() error
+	afterAttachmentDeleteCount func() error // test-only synchronization hook; nil in production
+	afterAttachmentDeleteRead  func() error // test-only synchronization hook; nil in production
 }
 
 func (s *PostgresStore) OutboxEnabled() bool {
@@ -3349,7 +3352,7 @@ func (s *PostgresStore) AdminGetAttachment(ctx context.Context, attachmentID uui
 	}
 
 	var r row
-	err := s.db.WithContext(ctx).Table("attachments AS a").
+	err := s.dbFor(ctx).Table("attachments AS a").
 		Select("a.*, (SELECT COUNT(*) FROM attachments a2 WHERE a2.storage_key = a.storage_key AND a2.archived_at IS NULL) AS ref_count").
 		Where("a.id = ?", attachmentID).
 		Take(&r).Error
@@ -3367,12 +3370,27 @@ func (s *PostgresStore) AdminGetAttachment(ctx context.Context, attachmentID uui
 }
 
 func (s *PostgresStore) AdminDeleteAttachment(ctx context.Context, attachmentID uuid.UUID) error {
-	result := s.db.WithContext(ctx).Where("id = ?", attachmentID).Delete(&model.Attachment{})
+	db, err := s.writeDBFor(ctx, "postgres store admin delete attachment")
+	if err != nil {
+		return err
+	}
+	var attachment model.Attachment
+	result := db.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", attachmentID).Limit(1).Find(&attachment)
+	if result.Error != nil {
+		return fmt.Errorf("admin get attachment for delete failed: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return &registrystore.NotFoundError{Resource: "attachment", ID: attachmentID.String()}
+	}
+	result = db.Where("id = ?", attachmentID).Delete(&model.Attachment{})
 	if result.Error != nil {
 		return fmt.Errorf("admin delete attachment failed: %w", result.Error)
 	}
 	if result.RowsAffected == 0 {
 		return &registrystore.NotFoundError{Resource: "attachment", ID: attachmentID.String()}
+	}
+	if attachment.StorageKey != nil {
+		return s.QueueAttachmentBlobDelete(ctx, *attachment.StorageKey)
 	}
 	return nil
 }
@@ -3506,35 +3524,166 @@ func (s *PostgresStore) CreateTask(ctx context.Context, taskType string, taskBod
 
 func (s *PostgresStore) ClaimReadyTasks(ctx context.Context, limit int) ([]model.Task, error) {
 	var tasks []model.Task
-	err := s.db.WithContext(ctx).Raw(`
+	err := s.dbFor(ctx).Raw(`
 		WITH claimed AS (
 			SELECT id
 			FROM tasks
 			WHERE retry_at <= NOW()
+			  AND (
+			      task_type <> 'attachment_blob_delete'
+			      OR COALESCE(task_body->>'state', 'queued') IN ('queued', 'claimed')
+			  )
 			ORDER BY retry_at, created_at
 			LIMIT ?
 			FOR UPDATE SKIP LOCKED
 		)
 		UPDATE tasks t
-		SET retry_at = NOW() + INTERVAL '5 minutes'
+		SET retry_at = NOW() + (? * INTERVAL '1 microsecond'),
+		    task_body = CASE
+		        WHEN t.task_type = 'attachment_blob_delete'
+		        THEN jsonb_set(t.task_body, '{state}', '"claimed"'::jsonb, true)
+		        ELSE t.task_body
+		    END
 		FROM claimed
 		WHERE t.id = claimed.id
 		RETURNING t.*
-	`, limit).
+	`, limit, registrystore.TaskClaimLease.Microseconds()).
 		Scan(&tasks).Error
 	return tasks, err
 }
 
 func (s *PostgresStore) DeleteTask(ctx context.Context, taskID uuid.UUID) error {
-	return s.db.WithContext(ctx).Where("id = ?", taskID).Delete(&model.Task{}).Error
+	return s.dbFor(ctx).Where("id = ?", taskID).Delete(&model.Task{}).Error
 }
 
 func (s *PostgresStore) FailTask(ctx context.Context, taskID uuid.UUID, errMsg string, retryDelay time.Duration) error {
-	return s.db.WithContext(ctx).Model(&model.Task{}).Where("id = ?", taskID).Updates(map[string]interface{}{
+	return s.dbFor(ctx).Model(&model.Task{}).Where("id = ?", taskID).Updates(map[string]interface{}{
 		"retry_count": gorm.Expr("retry_count + 1"),
 		"retry_at":    time.Now().Add(retryDelay),
 		"last_error":  errMsg,
 	}).Error
+}
+
+func postgresAttachmentBlobTask(storageKey, state string) model.Task {
+	taskName := registrystore.AttachmentBlobDeleteTaskName(storageKey)
+	return model.Task{
+		ID:       uuid.New(),
+		TaskName: &taskName,
+		TaskType: registrystore.AttachmentBlobDeleteTaskType,
+		TaskBody: map[string]any{
+			"taskName": taskName,
+			registrystore.AttachmentBlobDeleteStorageKeyField: storageKey,
+			registrystore.AttachmentBlobDeleteStateField:      state,
+		},
+	}
+}
+
+func (s *PostgresStore) RegisterAttachmentBlobReference(ctx context.Context, storageKey string) error {
+	task := postgresAttachmentBlobTask(storageKey, registrystore.AttachmentBlobDeleteStateReferenced)
+	task.RetryAt = time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
+	body, err := json.Marshal(task.TaskBody)
+	if err != nil {
+		return err
+	}
+	result := s.dbFor(ctx).Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "task_name"}},
+		DoUpdates: clause.Assignments(map[string]any{
+			"task_body":  gorm.Expr("?::jsonb", string(body)),
+			"retry_at":   task.RetryAt,
+			"last_error": nil,
+		}),
+		Where: clause.Where{Exprs: []clause.Expression{clause.Expr{
+			SQL:  "COALESCE(tasks.task_body->>'state', ?) IN (?, ?)",
+			Vars: []any{registrystore.AttachmentBlobDeleteStateQueued, registrystore.AttachmentBlobDeleteStateQueued, registrystore.AttachmentBlobDeleteStateReferenced},
+		}}},
+	}).Create(&task)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return registrystore.NewAttachmentBlobDeleteConflict()
+	}
+	return nil
+}
+
+func (s *PostgresStore) QueueAttachmentBlobDelete(ctx context.Context, storageKey string) error {
+	task := postgresAttachmentBlobTask(storageKey, registrystore.AttachmentBlobDeleteStateQueued)
+	queuedBody, err := json.Marshal(task.TaskBody)
+	if err != nil {
+		return err
+	}
+	return s.dbFor(ctx).Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "task_name"}},
+		DoUpdates: clause.Assignments(map[string]any{
+			"task_body": gorm.Expr(
+				"CASE WHEN tasks.task_body->>'state' = ? THEN ?::jsonb ELSE tasks.task_body END",
+				registrystore.AttachmentBlobDeleteStateReferenced, string(queuedBody)),
+			"retry_at": gorm.Expr(
+				"CASE WHEN tasks.task_body->>'state' = ? THEN NOW() ELSE tasks.retry_at END",
+				registrystore.AttachmentBlobDeleteStateReferenced),
+			"last_error": gorm.Expr(
+				"CASE WHEN tasks.task_body->>'state' = ? THEN NULL ELSE tasks.last_error END",
+				registrystore.AttachmentBlobDeleteStateReferenced),
+		}),
+	}).Create(&task).Error
+}
+
+func (s *PostgresStore) PrepareAttachmentBlobDelete(ctx context.Context, taskID uuid.UUID, storageKey string) (bool, error) {
+	db := s.dbFor(ctx)
+	var task model.Task
+	result := db.Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("id = ? AND task_type = ?", taskID, registrystore.AttachmentBlobDeleteTaskType).
+		Limit(1).
+		Find(&task)
+	if result.Error != nil {
+		return false, result.Error
+	}
+	if result.RowsAffected == 0 {
+		return false, &registrystore.NotFoundError{Resource: "task", ID: taskID.String()}
+	}
+	if registrystore.AttachmentBlobDeleteTaskState(task.TaskBody) != registrystore.AttachmentBlobDeleteStateClaimed ||
+		task.TaskBody[registrystore.AttachmentBlobDeleteStorageKeyField] != storageKey {
+		return false, fmt.Errorf("attachment blob delete task is not claimed for its storage key")
+	}
+	var count int64
+	if err := db.Model(&model.Attachment{}).
+		Where("storage_key = ? AND archived_at IS NULL", storageKey).
+		Count(&count).Error; err != nil {
+		return false, err
+	}
+	if s.afterAttachmentDeleteCount != nil {
+		if err := s.afterAttachmentDeleteCount(); err != nil {
+			return false, err
+		}
+	}
+	if count == 0 {
+		return false, nil
+	}
+	task.TaskBody[registrystore.AttachmentBlobDeleteStateField] = registrystore.AttachmentBlobDeleteStateReferenced
+	body, err := json.Marshal(task.TaskBody)
+	if err != nil {
+		return false, err
+	}
+	if err := db.Model(&model.Task{}).Where("id = ?", taskID).Updates(map[string]any{
+		"task_body":  gorm.Expr("?::jsonb", string(body)),
+		"retry_at":   time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC),
+		"last_error": nil,
+	}).Error; err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *PostgresStore) CompleteAttachmentBlobDelete(ctx context.Context, taskID uuid.UUID) error {
+	db := s.dbFor(ctx)
+	result := db.Where("id = ? AND task_type = ?", taskID, registrystore.AttachmentBlobDeleteTaskType).Delete(&model.Task{})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return &registrystore.NotFoundError{Resource: "task", ID: taskID.String()}
+	}
+	return nil
 }
 
 func (s *PostgresStore) entryVisibleInConversationAncestry(ctx context.Context, conv model.Conversation, entryID uuid.UUID) (bool, error) {
@@ -4428,6 +4577,10 @@ func isPrefixContent(existing, incoming []any) bool {
 // --- Attachments ---
 
 func (s *PostgresStore) CreateAttachment(ctx context.Context, userID string, conversationID string, attachment model.Attachment) (*model.Attachment, error) {
+	db, err := s.writeDBFor(ctx, "postgres store create attachment")
+	if err != nil {
+		return nil, err
+	}
 	// conversationID is optional; when not provided, create an unlinked attachment
 	// owned by the uploader.
 	if conversationID != "" {
@@ -4440,19 +4593,62 @@ func (s *PostgresStore) CreateAttachment(ctx context.Context, userID string, con
 	if strings.TrimSpace(attachment.Status) == "" {
 		attachment.Status = "ready"
 	}
-	if err := s.db.WithContext(ctx).Create(&attachment).Error; err != nil {
+	if attachment.StorageKey != nil {
+		if err := s.RegisterAttachmentBlobReference(ctx, *attachment.StorageKey); err != nil {
+			return nil, err
+		}
+	}
+	if err := db.Create(&attachment).Error; err != nil {
 		return nil, fmt.Errorf("create attachment failed: %w", err)
 	}
 	return &attachment, nil
 }
 
+func (s *PostgresStore) CloneAttachment(ctx context.Context, userID string, sourceAttachmentID uuid.UUID) (*model.Attachment, error) {
+	source, err := s.GetAttachment(ctx, userID, "", sourceAttachmentID)
+	if err != nil {
+		return nil, err
+	}
+	if source.StorageKey == nil {
+		return nil, &registrystore.ConflictError{Message: "attachment content is not available"}
+	}
+	if s.afterAttachmentCloneRead != nil {
+		if err := s.afterAttachmentCloneRead(); err != nil {
+			return nil, err
+		}
+	}
+	if err := s.RegisterAttachmentBlobReference(ctx, *source.StorageKey); err != nil {
+		return nil, err
+	}
+	// READ COMMITTED revalidation happens after the guard upsert. A concurrent
+	// delete either remains visible until this transaction commits or is
+	// observed here and prevents a stale clone.
+	source, err = s.GetAttachment(ctx, userID, "", sourceAttachmentID)
+	if err != nil {
+		return nil, err
+	}
+	return s.CreateAttachment(ctx, userID, "", model.Attachment{
+		StorageKey: source.StorageKey, Filename: source.Filename, ContentType: source.ContentType,
+		Size: source.Size, SHA256: source.SHA256, Status: "ready", ExpiresAt: source.ExpiresAt,
+	})
+}
+
 func (s *PostgresStore) UpdateAttachment(ctx context.Context, userID string, attachmentID uuid.UUID, update registrystore.AttachmentUpdate) (*model.Attachment, error) {
+	db, err := s.writeDBFor(ctx, "postgres store update attachment")
+	if err != nil {
+		return nil, err
+	}
 	var attachment model.Attachment
-	if err := s.db.WithContext(ctx).Where("id = ? AND archived_at IS NULL", attachmentID).First(&attachment).Error; err != nil {
+	if err := db.Where("id = ? AND archived_at IS NULL", attachmentID).First(&attachment).Error; err != nil {
 		return nil, &registrystore.NotFoundError{Resource: "attachment", ID: attachmentID.String()}
 	}
 	if attachment.UserID != userID {
 		return nil, &registrystore.ForbiddenError{}
+	}
+	if update.StorageKey != nil {
+		if err := s.RegisterAttachmentBlobReference(ctx, *update.StorageKey); err != nil {
+			return nil, err
+		}
 	}
 
 	values := map[string]any{}
@@ -4485,12 +4681,12 @@ func (s *PostgresStore) UpdateAttachment(ctx context.Context, userID string, att
 	}
 
 	if len(values) > 0 {
-		if err := s.db.WithContext(ctx).Model(&model.Attachment{}).Where("id = ?", attachmentID).Updates(values).Error; err != nil {
+		if err := db.Model(&model.Attachment{}).Where("id = ?", attachmentID).Updates(values).Error; err != nil {
 			return nil, fmt.Errorf("update attachment failed: %w", err)
 		}
 	}
 
-	if err := s.db.WithContext(ctx).Where("id = ? AND archived_at IS NULL", attachmentID).First(&attachment).Error; err != nil {
+	if err := db.Where("id = ? AND archived_at IS NULL", attachmentID).First(&attachment).Error; err != nil {
 		return nil, &registrystore.NotFoundError{Resource: "attachment", ID: attachmentID.String()}
 	}
 	return &attachment, nil
@@ -4519,8 +4715,9 @@ func (s *PostgresStore) LinkAttachmentToEntry(ctx context.Context, userID string
 }
 
 func (s *PostgresStore) GetAttachment(ctx context.Context, userID string, conversationID string, attachmentID uuid.UUID) (*model.Attachment, error) {
+	db := s.dbFor(ctx)
 	var attachment model.Attachment
-	if err := s.db.WithContext(ctx).Where("id = ? AND archived_at IS NULL", attachmentID).First(&attachment).Error; err != nil {
+	if err := db.Where("id = ? AND archived_at IS NULL", attachmentID).First(&attachment).Error; err != nil {
 		return nil, &registrystore.NotFoundError{Resource: "attachment", ID: attachmentID.String()}
 	}
 
@@ -4532,7 +4729,7 @@ func (s *PostgresStore) GetAttachment(ctx context.Context, userID string, conver
 		return &attachment, nil
 	}
 
-	tx := s.db.WithContext(ctx).Where("id = ?", *attachment.EntryID)
+	tx := db.Where("id = ?", *attachment.EntryID)
 	if conversationID != "" {
 		tx = tx.Where("conversation_id = ?", conversationID)
 	}
@@ -4568,9 +4765,27 @@ func (s *PostgresStore) GetAttachment(ctx context.Context, userID string, conver
 }
 
 func (s *PostgresStore) DeleteAttachment(ctx context.Context, userID string, conversationID string, attachmentID uuid.UUID) error {
+	db, err := s.writeDBFor(ctx, "postgres store delete attachment")
+	if err != nil {
+		return err
+	}
 	attachment, err := s.GetAttachment(ctx, userID, conversationID, attachmentID)
 	if err != nil {
 		return err
+	}
+	if s.afterAttachmentDeleteRead != nil {
+		if err := s.afterAttachmentDeleteRead(); err != nil {
+			return err
+		}
+	}
+	// Re-read while locking the row. The authorization lookup above may have
+	// observed a nil storage key before an upload finalizer committed one.
+	result := db.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND archived_at IS NULL", attachmentID).Limit(1).Find(attachment)
+	if result.Error != nil {
+		return fmt.Errorf("get attachment for delete failed: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return &registrystore.NotFoundError{Resource: "attachment", ID: attachmentID.String()}
 	}
 
 	// Only the uploader can delete, and only before attachment is linked to an entry.
@@ -4581,12 +4796,15 @@ func (s *PostgresStore) DeleteAttachment(ctx context.Context, userID string, con
 		return &registrystore.ConflictError{Message: "linked attachments cannot be deleted"}
 	}
 
-	result := s.db.WithContext(ctx).Where("id = ?", attachmentID).Delete(&model.Attachment{})
+	result = db.Where("id = ?", attachmentID).Delete(&model.Attachment{})
 	if result.Error != nil {
 		return fmt.Errorf("delete attachment failed: %w", result.Error)
 	}
 	if result.RowsAffected == 0 {
 		return &registrystore.NotFoundError{Resource: "attachment", ID: attachmentID.String()}
+	}
+	if attachment.StorageKey != nil {
+		return s.QueueAttachmentBlobDelete(ctx, *attachment.StorageKey)
 	}
 	return nil
 }

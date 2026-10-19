@@ -181,6 +181,11 @@ CREATE TABLE IF NOT EXISTS tasks (
 CREATE INDEX IF NOT EXISTS idx_tasks_ready
     ON tasks(task_type, retry_at, retry_at_ns);
 
+-- Keep ready scans bounded by the number of currently ready rows. Attachment
+-- reference guards share this table but have retry_at far in the future.
+CREATE INDEX IF NOT EXISTS idx_tasks_ready_v2
+    ON tasks(retry_at, retry_at_ns, created_at, created_at_ns);
+
 CREATE TABLE IF NOT EXISTS admin_checkpoints (
     client_id TEXT PRIMARY KEY,
     content_type TEXT NOT NULL,

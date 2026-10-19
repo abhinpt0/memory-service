@@ -5,17 +5,22 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/charmbracelet/log"
 	"github.com/chirino/memory-service/internal/model"
+	registryattach "github.com/chirino/memory-service/internal/registry/attach"
 	registryepisodic "github.com/chirino/memory-service/internal/registry/episodic"
 	registrystore "github.com/chirino/memory-service/internal/registry/store"
 	registryvector "github.com/chirino/memory-service/internal/registry/vector"
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/require"
 )
 
 func TestTaskProcessorEmitsOneTerminalEventPerClaimedAttempt(t *testing.T) {
@@ -112,7 +117,12 @@ func (s *taskProcessorTestStore) InWriteTx(ctx context.Context, fn func(context.
 }
 
 func (s *taskProcessorTestStore) ClaimReadyTasks(context.Context, int) ([]model.Task, error) {
-	return s.tasks, nil
+	if len(s.tasks) == 0 {
+		return nil, nil
+	}
+	task := s.tasks[0]
+	s.tasks = s.tasks[1:]
+	return []model.Task{task}, nil
 }
 
 func (s *taskProcessorTestStore) FailTask(context.Context, uuid.UUID, string, time.Duration) error {
@@ -142,6 +152,235 @@ func (v *taskProcessorTestVector) DeleteByConversationGroupID(context.Context, u
 }
 func (v *taskProcessorTestVector) IsEnabled() bool { return true }
 func (v *taskProcessorTestVector) Name() string    { return "test" }
+
+type attachmentDeleteTestStore struct {
+	registrystore.MemoryStore
+	task        model.Task
+	failed      bool
+	deleted     bool
+	lastFailure string
+	referenced  bool
+	prepared    bool
+	completed   bool
+	completeErr error
+	claimed     bool
+}
+
+func (s *attachmentDeleteTestStore) InWriteTx(ctx context.Context, fn func(context.Context) error) error {
+	return fn(ctx)
+}
+
+func (s *attachmentDeleteTestStore) ClaimReadyTasks(context.Context, int) ([]model.Task, error) {
+	if s.claimed {
+		return nil, nil
+	}
+	s.claimed = true
+	return []model.Task{s.task}, nil
+}
+
+func (s *attachmentDeleteTestStore) FailTask(_ context.Context, _ uuid.UUID, errMsg string, _ time.Duration) error {
+	s.failed = true
+	s.lastFailure = errMsg
+	return nil
+}
+
+func (s *attachmentDeleteTestStore) DeleteTask(context.Context, uuid.UUID) error {
+	s.deleted = true
+	return nil
+}
+
+func (s *attachmentDeleteTestStore) PrepareAttachmentBlobDelete(context.Context, uuid.UUID, string) (bool, error) {
+	s.prepared = true
+	return s.referenced, nil
+}
+
+func (s *attachmentDeleteTestStore) CompleteAttachmentBlobDelete(context.Context, uuid.UUID) error {
+	s.completed = true
+	return s.completeErr
+}
+
+type attachmentDeleteTestProvider struct {
+	deleteCalls int
+	err         error
+	deadline    time.Time
+}
+
+func (s *attachmentDeleteTestProvider) Store(context.Context, io.Reader, int64, string) (*registryattach.FileStoreResult, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (s *attachmentDeleteTestProvider) Retrieve(context.Context, string) (io.ReadCloser, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (s *attachmentDeleteTestProvider) Delete(ctx context.Context, _ string) error {
+	s.deleteCalls++
+	s.deadline, _ = ctx.Deadline()
+	return s.err
+}
+
+func (s *attachmentDeleteTestProvider) GetSignedURL(context.Context, string, time.Duration, *registryattach.SignedURLOptions) (*url.URL, error) {
+	return nil, errors.New("not implemented")
+}
+
+func TestTaskProcessorAttachmentBlobDeleteRetriesUntilSuccess(t *testing.T) {
+	providerErr := errors.New("attachment provider unavailable")
+	for _, tt := range []struct {
+		name         string
+		provider     registryattach.AttachmentStore
+		wantFailed   bool
+		wantDeleted  bool
+		wantCalls    int
+		referenced   bool
+		completeErr  error
+		wantComplete bool
+	}{
+		{name: "success", provider: &attachmentDeleteTestProvider{}, wantCalls: 1, wantComplete: true},
+		{name: "provider failure", provider: &attachmentDeleteTestProvider{err: providerErr}, wantFailed: true, wantCalls: 1},
+		{name: "unconfigured provider", wantFailed: true},
+		{name: "live reference", provider: &attachmentDeleteTestProvider{}, referenced: true},
+		{name: "completion persistence failure", provider: &attachmentDeleteTestProvider{}, wantCalls: 1, completeErr: errors.New("database unavailable"), wantComplete: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Less(t, attachmentBlobDeleteAttemptTimeout, registrystore.TaskClaimLease)
+			store := &attachmentDeleteTestStore{task: model.Task{
+				ID:       uuid.New(),
+				TaskType: "attachment_blob_delete",
+				TaskBody: map[string]any{"storageKey": "stored-key"},
+			}, referenced: tt.referenced, completeErr: tt.completeErr}
+			processor := NewTaskProcessor(store, nil)
+			processor.SetAttachmentStore(tt.provider)
+			require.NoError(t, processor.ProcessOnce(context.Background()))
+			require.Equal(t, tt.wantFailed, store.failed)
+			require.Equal(t, tt.wantDeleted, store.deleted)
+			require.True(t, store.prepared)
+			require.Equal(t, tt.wantComplete, store.completed)
+			if provider, ok := tt.provider.(*attachmentDeleteTestProvider); ok {
+				require.Equal(t, tt.wantCalls, provider.deleteCalls)
+				if tt.wantCalls > 0 {
+					require.False(t, provider.deadline.IsZero())
+					require.LessOrEqual(t, time.Until(provider.deadline), attachmentBlobDeleteAttemptTimeout)
+				}
+			}
+			if tt.wantFailed {
+				require.NotEmpty(t, store.lastFailure)
+			}
+		})
+	}
+}
+
+type perExecutionClaimStore struct {
+	registrystore.MemoryStore
+	mu          sync.Mutex
+	ready       []model.Task
+	claimed     map[uuid.UUID]bool
+	completed   map[uuid.UUID]bool
+	claimLimits []int
+}
+
+func (s *perExecutionClaimStore) InWriteTx(ctx context.Context, fn func(context.Context) error) error {
+	return fn(ctx)
+}
+
+func (s *perExecutionClaimStore) ClaimReadyTasks(_ context.Context, limit int) ([]model.Task, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.claimLimits = append(s.claimLimits, limit)
+	result := make([]model.Task, 0, limit)
+	for _, task := range s.ready {
+		if !s.claimed[task.ID] && !s.completed[task.ID] {
+			s.claimed[task.ID] = true
+			result = append(result, task)
+			if len(result) == limit {
+				break
+			}
+		}
+	}
+	return result, nil
+}
+
+func (s *perExecutionClaimStore) PrepareAttachmentBlobDelete(context.Context, uuid.UUID, string) (bool, error) {
+	return false, nil
+}
+
+func (s *perExecutionClaimStore) CompleteAttachmentBlobDelete(_ context.Context, taskID uuid.UUID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.completed[taskID] = true
+	return nil
+}
+
+type blockingAttachmentDeleteProvider struct {
+	firstKey     string
+	firstStarted chan struct{}
+	releaseFirst chan struct{}
+	secondDone   chan struct{}
+	firstOnce    sync.Once
+	secondOnce   sync.Once
+}
+
+func (p *blockingAttachmentDeleteProvider) Store(context.Context, io.Reader, int64, string) (*registryattach.FileStoreResult, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (p *blockingAttachmentDeleteProvider) Retrieve(context.Context, string) (io.ReadCloser, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (p *blockingAttachmentDeleteProvider) Delete(_ context.Context, storageKey string) error {
+	if storageKey == p.firstKey {
+		p.firstOnce.Do(func() { close(p.firstStarted) })
+		<-p.releaseFirst
+		return nil
+	}
+	p.secondOnce.Do(func() { close(p.secondDone) })
+	return nil
+}
+
+func (p *blockingAttachmentDeleteProvider) GetSignedURL(context.Context, string, time.Duration, *registryattach.SignedURLOptions) (*url.URL, error) {
+	return nil, errors.New("not implemented")
+}
+
+func TestTaskProcessorClaimsAttachmentImmediatelyBeforeExecution(t *testing.T) {
+	firstID, secondID := uuid.New(), uuid.New()
+	store := &perExecutionClaimStore{
+		ready: []model.Task{
+			{ID: firstID, TaskType: registrystore.AttachmentBlobDeleteTaskType, TaskBody: map[string]any{registrystore.AttachmentBlobDeleteStorageKeyField: "first"}},
+			{ID: secondID, TaskType: registrystore.AttachmentBlobDeleteTaskType, TaskBody: map[string]any{registrystore.AttachmentBlobDeleteStorageKeyField: "second"}},
+		},
+		claimed:   map[uuid.UUID]bool{},
+		completed: map[uuid.UUID]bool{},
+	}
+	provider := &blockingAttachmentDeleteProvider{
+		firstKey: "first", firstStarted: make(chan struct{}), releaseFirst: make(chan struct{}), secondDone: make(chan struct{}),
+	}
+	firstWorker := NewTaskProcessor(store, nil)
+	firstWorker.SetAttachmentStore(provider)
+	secondWorker := NewTaskProcessor(store, nil)
+	secondWorker.SetAttachmentStore(provider)
+
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- firstWorker.ProcessOnce(context.Background()) }()
+	<-provider.firstStarted
+
+	secondWorkerDone := make(chan error, 1)
+	go func() { secondWorkerDone <- secondWorker.ProcessOnce(context.Background()) }()
+	select {
+	case <-provider.secondDone:
+	case <-time.After(time.Second):
+		close(provider.releaseFirst)
+		t.Fatal("second worker could not claim the second task while the first provider call was blocked")
+	}
+	require.NoError(t, <-secondWorkerDone)
+
+	close(provider.releaseFirst)
+	require.NoError(t, <-firstDone)
+	require.True(t, store.completed[firstID])
+	require.True(t, store.completed[secondID])
+	for _, limit := range store.claimLimits {
+		require.Equal(t, 1, limit)
+	}
+}
 
 // --- Bug 6: classifyMigrationError uses typed sentinels, not string matching ---
 
@@ -392,7 +631,12 @@ func (s *migTestTaskStore) InWriteTx(_ context.Context, fn func(context.Context)
 	return fn(context.Background())
 }
 func (s *migTestTaskStore) ClaimReadyTasks(context.Context, int) ([]model.Task, error) {
-	return s.tasks, nil
+	if len(s.tasks) == 0 {
+		return nil, nil
+	}
+	task := s.tasks[0]
+	s.tasks = s.tasks[1:]
+	return []model.Task{task}, nil
 }
 func (s *migTestTaskStore) CreateTask(_ context.Context, _ string, _ map[string]any) error {
 	s.createCalled = true
@@ -820,7 +1064,12 @@ func (s *testTaskStoreWithCreateTask) InWriteTx(_ context.Context, fn func(conte
 	return fn(context.Background())
 }
 func (s *testTaskStoreWithCreateTask) ClaimReadyTasks(context.Context, int) ([]model.Task, error) {
-	return s.tasks, nil
+	if len(s.tasks) == 0 {
+		return nil, nil
+	}
+	task := s.tasks[0]
+	s.tasks = s.tasks[1:]
+	return []model.Task{task}, nil
 }
 func (s *testTaskStoreWithCreateTask) CreateTask(_ context.Context, _ string, _ map[string]any) error {
 	s.createCalled = true

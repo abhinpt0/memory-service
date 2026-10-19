@@ -383,13 +383,11 @@ export class ConversationsService {
    * A batch containing a sequence number uses its first sequenced entry as a
    * conversation-scoped retry anchor. An identical retry returns the original
    * entries in request order, including their IDs and timestamps. Changed
-   * content, order, or batch length returns 409 Conflict. PostgreSQL and SQLite
-   * commit the entire batch atomically. MongoDB also commits atomically when
-   * the outbox is enabled. Otherwise, it can resume missing positions and finish
-   * the original inline conversation patch from the saved batch definition.
-   * Completed batch retries do not emit append
-   * events or reapply conversation patches. Fully unsequenced batches have no
-   * retry guarantee. History projections can keep their sequence unset.
+   * content, order, or batch length returns 409 Conflict. Every supported
+   * datastore commits the entire batch atomically. Completed batch retries do
+   * not emit append events or reapply conversation patches. Fully unsequenced
+   * batches have no retry guarantee. History projections can keep their sequence
+   * unset.
    *
    * This endpoint is used by both end-user clients and agents.
    * The service determines whether the caller is a user or an agent

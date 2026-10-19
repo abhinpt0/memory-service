@@ -3224,12 +3224,24 @@ func (s *SQLiteStore) AdminGetAttachment(ctx context.Context, attachmentID uuid.
 }
 
 func (s *SQLiteStore) AdminDeleteAttachment(ctx context.Context, attachmentID uuid.UUID) error {
-	result := s.writeDBFor(ctx, "sqlite store admin delete attachment").Where("id = ?", attachmentID).Delete(&model.Attachment{})
+	db := s.writeDBFor(ctx, "sqlite store admin delete attachment")
+	var attachment model.Attachment
+	result := db.Where("id = ?", attachmentID).Limit(1).Find(&attachment)
+	if result.Error != nil {
+		return fmt.Errorf("admin get attachment for delete failed: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return &registrystore.NotFoundError{Resource: "attachment", ID: attachmentID.String()}
+	}
+	result = db.Where("id = ?", attachmentID).Delete(&model.Attachment{})
 	if result.Error != nil {
 		return fmt.Errorf("admin delete attachment failed: %w", result.Error)
 	}
 	if result.RowsAffected == 0 {
 		return &registrystore.NotFoundError{Resource: "attachment", ID: attachmentID.String()}
+	}
+	if attachment.StorageKey != nil {
+		return s.QueueAttachmentBlobDelete(ctx, *attachment.StorageKey)
 	}
 	return nil
 }
@@ -3351,10 +3363,15 @@ func (s *SQLiteStore) CreateTask(ctx context.Context, taskType string, taskBody 
 func (s *SQLiteStore) ClaimReadyTasks(ctx context.Context, limit int) ([]model.Task, error) {
 	tx := s.writeDBFor(ctx, "sqlite store claim ready tasks")
 	now := time.Now().UTC()
-	retryAt := now.Add(5 * time.Minute)
+	retryAt := now.Add(registrystore.TaskClaimLease)
 
 	var tasks []model.Task
 	if err := tx.
+		Where("task_type <> ? OR COALESCE(json_extract(task_body, '$.state'), ?) IN (?, ?)",
+			registrystore.AttachmentBlobDeleteTaskType,
+			registrystore.AttachmentBlobDeleteStateQueued,
+			registrystore.AttachmentBlobDeleteStateQueued,
+			registrystore.AttachmentBlobDeleteStateClaimed).
 		Where("(retry_at, retry_at_ns) <= (?, ?)", now).
 		Order("retry_at ASC, retry_at_ns ASC, created_at ASC, created_at_ns ASC").
 		Limit(limit).
@@ -3368,6 +3385,16 @@ func (s *SQLiteStore) ClaimReadyTasks(ctx context.Context, limit int) ([]model.T
 	ids := make([]uuid.UUID, len(tasks))
 	for i, task := range tasks {
 		ids[i] = task.ID
+		if task.TaskType == registrystore.AttachmentBlobDeleteTaskType {
+			tasks[i].TaskBody[registrystore.AttachmentBlobDeleteStateField] = registrystore.AttachmentBlobDeleteStateClaimed
+			body, err := json.Marshal(tasks[i].TaskBody)
+			if err != nil {
+				return nil, err
+			}
+			if err := tx.Model(&model.Task{}).Where("id = ?", task.ID).Update("task_body", string(body)).Error; err != nil {
+				return nil, err
+			}
+		}
 	}
 	if err := tx.Model(&model.Task{}).
 		Where("id IN ?", ids).
@@ -3387,6 +3414,129 @@ func (s *SQLiteStore) FailTask(ctx context.Context, taskID uuid.UUID, errMsg str
 		"retry_at":    time.Now().Add(retryDelay),
 		"last_error":  errMsg,
 	}).Error
+}
+
+func attachmentBlobTask(storageKey, state string) model.Task {
+	taskName := registrystore.AttachmentBlobDeleteTaskName(storageKey)
+	return model.Task{
+		ID:       uuid.New(),
+		TaskName: &taskName,
+		TaskType: registrystore.AttachmentBlobDeleteTaskType,
+		TaskBody: map[string]any{
+			"taskName": taskName,
+			registrystore.AttachmentBlobDeleteStorageKeyField: storageKey,
+			registrystore.AttachmentBlobDeleteStateField:      state,
+		},
+	}
+}
+
+func (s *SQLiteStore) RegisterAttachmentBlobReference(ctx context.Context, storageKey string) error {
+	db := s.writeDBFor(ctx, "sqlite store register attachment blob reference")
+	taskName := registrystore.AttachmentBlobDeleteTaskName(storageKey)
+	var task model.Task
+	result := db.Where("task_name = ?", taskName).Limit(1).Find(&task)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		task = attachmentBlobTask(storageKey, registrystore.AttachmentBlobDeleteStateReferenced)
+		task.RetryAt = time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
+		return db.Create(&task).Error
+	}
+	switch registrystore.AttachmentBlobDeleteTaskState(task.TaskBody) {
+	case registrystore.AttachmentBlobDeleteStateReferenced:
+		return nil
+	case registrystore.AttachmentBlobDeleteStateQueued:
+		task.TaskBody[registrystore.AttachmentBlobDeleteStateField] = registrystore.AttachmentBlobDeleteStateReferenced
+		body, err := json.Marshal(task.TaskBody)
+		if err != nil {
+			return err
+		}
+		return db.Model(&model.Task{}).Where("id = ?", task.ID).Updates(map[string]any{
+			"task_body":  string(body),
+			"retry_at":   time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC),
+			"last_error": nil,
+		}).Error
+	default:
+		return registrystore.NewAttachmentBlobDeleteConflict()
+	}
+}
+
+func (s *SQLiteStore) QueueAttachmentBlobDelete(ctx context.Context, storageKey string) error {
+	db := s.writeDBFor(ctx, "sqlite store queue attachment blob delete")
+	taskName := registrystore.AttachmentBlobDeleteTaskName(storageKey)
+	var task model.Task
+	result := db.Where("task_name = ?", taskName).Limit(1).Find(&task)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		task = attachmentBlobTask(storageKey, registrystore.AttachmentBlobDeleteStateQueued)
+		return db.Create(&task).Error
+	}
+	if registrystore.AttachmentBlobDeleteTaskState(task.TaskBody) != registrystore.AttachmentBlobDeleteStateReferenced {
+		return nil
+	}
+	task.TaskBody[registrystore.AttachmentBlobDeleteStateField] = registrystore.AttachmentBlobDeleteStateQueued
+	body, err := json.Marshal(task.TaskBody)
+	if err != nil {
+		return err
+	}
+	return db.Model(&model.Task{}).Where("id = ?", task.ID).Updates(map[string]any{
+		"task_body":  string(body),
+		"retry_at":   time.Now(),
+		"last_error": nil,
+	}).Error
+}
+
+func (s *SQLiteStore) PrepareAttachmentBlobDelete(ctx context.Context, taskID uuid.UUID, storageKey string) (bool, error) {
+	db := s.writeDBFor(ctx, "sqlite store prepare attachment blob delete")
+	var task model.Task
+	result := db.Where("id = ? AND task_type = ?", taskID, registrystore.AttachmentBlobDeleteTaskType).Limit(1).Find(&task)
+	if result.Error != nil {
+		return false, result.Error
+	}
+	if result.RowsAffected == 0 {
+		return false, &registrystore.NotFoundError{Resource: "task", ID: taskID.String()}
+	}
+	if registrystore.AttachmentBlobDeleteTaskState(task.TaskBody) != registrystore.AttachmentBlobDeleteStateClaimed ||
+		task.TaskBody[registrystore.AttachmentBlobDeleteStorageKeyField] != storageKey {
+		return false, fmt.Errorf("attachment blob delete task is not claimed for its storage key")
+	}
+	var count int64
+	if err := db.Model(&model.Attachment{}).
+		Where("storage_key = ? AND archived_at IS NULL", storageKey).
+		Count(&count).Error; err != nil {
+		return false, err
+	}
+	if count == 0 {
+		return false, nil
+	}
+	task.TaskBody[registrystore.AttachmentBlobDeleteStateField] = registrystore.AttachmentBlobDeleteStateReferenced
+	body, err := json.Marshal(task.TaskBody)
+	if err != nil {
+		return false, err
+	}
+	if err := db.Model(&model.Task{}).Where("id = ?", taskID).Updates(map[string]any{
+		"task_body":  string(body),
+		"retry_at":   time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC),
+		"last_error": nil,
+	}).Error; err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *SQLiteStore) CompleteAttachmentBlobDelete(ctx context.Context, taskID uuid.UUID) error {
+	db := s.writeDBFor(ctx, "sqlite store complete attachment blob delete")
+	result := db.Where("id = ? AND task_type = ?", taskID, registrystore.AttachmentBlobDeleteTaskType).Delete(&model.Task{})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return &registrystore.NotFoundError{Resource: "task", ID: taskID.String()}
+	}
+	return nil
 }
 
 func (s *SQLiteStore) AdminGetAttachmentByStorageKey(ctx context.Context, storageKey string) (*registrystore.AdminAttachment, error) {
@@ -4488,10 +4638,38 @@ func (s *SQLiteStore) CreateAttachment(ctx context.Context, userID string, conve
 	if strings.TrimSpace(attachment.Status) == "" {
 		attachment.Status = "ready"
 	}
+	if attachment.StorageKey != nil {
+		if err := s.RegisterAttachmentBlobReference(ctx, *attachment.StorageKey); err != nil {
+			return nil, err
+		}
+	}
 	if err := db.Create(&attachment).Error; err != nil {
 		return nil, fmt.Errorf("create attachment failed: %w", err)
 	}
 	return &attachment, nil
+}
+
+func (s *SQLiteStore) CloneAttachment(ctx context.Context, userID string, sourceAttachmentID uuid.UUID) (*model.Attachment, error) {
+	source, err := s.GetAttachment(ctx, userID, "", sourceAttachmentID)
+	if err != nil {
+		return nil, err
+	}
+	if source.StorageKey == nil {
+		return nil, &registrystore.ConflictError{Message: "attachment content is not available"}
+	}
+	if err := s.RegisterAttachmentBlobReference(ctx, *source.StorageKey); err != nil {
+		return nil, err
+	}
+	// Revalidate after acquiring the per-key guard so a source deleted before
+	// guard acquisition cannot be resurrected by a stale clone operation.
+	source, err = s.GetAttachment(ctx, userID, "", sourceAttachmentID)
+	if err != nil {
+		return nil, err
+	}
+	return s.CreateAttachment(ctx, userID, "", model.Attachment{
+		StorageKey: source.StorageKey, Filename: source.Filename, ContentType: source.ContentType,
+		Size: source.Size, SHA256: source.SHA256, Status: "ready", ExpiresAt: source.ExpiresAt,
+	})
 }
 
 func (s *SQLiteStore) UpdateAttachment(ctx context.Context, userID string, attachmentID uuid.UUID, update registrystore.AttachmentUpdate) (*model.Attachment, error) {
@@ -4502,6 +4680,11 @@ func (s *SQLiteStore) UpdateAttachment(ctx context.Context, userID string, attac
 	}
 	if attachment.UserID != userID {
 		return nil, &registrystore.ForbiddenError{}
+	}
+	if update.StorageKey != nil {
+		if err := s.RegisterAttachmentBlobReference(ctx, *update.StorageKey); err != nil {
+			return nil, err
+		}
 	}
 
 	values := map[string]any{}
@@ -4631,13 +4814,25 @@ func (s *SQLiteStore) DeleteAttachment(ctx context.Context, userID string, conve
 	if attachment.EntryID != nil {
 		return &registrystore.ConflictError{Message: "linked attachments cannot be deleted"}
 	}
+	// SQLite serializes write transactions, but re-read from the writer so the
+	// cleanup key is the exact state removed by this transaction.
+	result := db.Where("id = ? AND archived_at IS NULL", attachmentID).Limit(1).Find(attachment)
+	if result.Error != nil {
+		return fmt.Errorf("get attachment for delete failed: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return &registrystore.NotFoundError{Resource: "attachment", ID: attachmentID.String()}
+	}
 
-	result := db.Where("id = ?", attachmentID).Delete(&model.Attachment{})
+	result = db.Where("id = ?", attachmentID).Delete(&model.Attachment{})
 	if result.Error != nil {
 		return fmt.Errorf("delete attachment failed: %w", result.Error)
 	}
 	if result.RowsAffected == 0 {
 		return &registrystore.NotFoundError{Resource: "attachment", ID: attachmentID.String()}
+	}
+	if attachment.StorageKey != nil {
+		return s.QueueAttachmentBlobDelete(ctx, *attachment.StorageKey)
 	}
 	return nil
 }

@@ -154,6 +154,8 @@ func createConversation(c *gin.Context, store registrystore.MemoryStore, eventBu
 	var createdConv *registrystore.ConversationDetail
 	var eventsToPublish []registryeventbus.Event
 	if err := routetx.MemoryWrite(c, store, func(ctx context.Context) error {
+		createdConv = nil
+		eventsToPublish = nil
 		var (
 			result *registrystore.CreateConversationResult
 			conv   *registrystore.ConversationDetail
@@ -289,6 +291,8 @@ func updateConversation(c *gin.Context, store registrystore.MemoryStore, eventBu
 	var updatedConv *registrystore.ConversationDetail
 	var eventsToPublish []registryeventbus.Event
 	if err := routetx.MemoryWrite(c, store, func(ctx context.Context) error {
+		updatedConv = nil
+		eventsToPublish = nil
 		var (
 			conv          *registrystore.ConversationDetail
 			err           error

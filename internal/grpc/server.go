@@ -293,6 +293,8 @@ func withMemoryWrite[T any](ctx context.Context, store registrystore.MemoryStore
 	security.MarkGRPCOperationResourcesValidated(ctx)
 	var out T
 	err := store.InWriteTx(ctx, func(txCtx context.Context) error {
+		var zero T
+		out = zero
 		var err error
 		out, err = fn(txCtx)
 		return err
@@ -328,6 +330,8 @@ func withEpisodicWrite[T any](ctx context.Context, store registryepisodic.Episod
 	security.MarkGRPCOperationResourcesValidated(ctx)
 	var out T
 	err := store.InWriteTx(ctx, func(txCtx context.Context) error {
+		var zero T
+		out = zero
 		var err error
 		out, err = fn(txCtx)
 		return err
@@ -625,6 +629,7 @@ func (s *ConversationsServer) CreateConversation(ctx context.Context, req *pb.Cr
 
 	var eventsToPublish []registryeventbus.Event
 	conv, err := withMemoryWrite(ctx, s.Store, func(txCtx context.Context) (*registrystore.ConversationDetail, error) {
+		eventsToPublish = nil
 		clientID := getClientID(ctx)
 		var conv *registrystore.ConversationDetail
 		var isExactRetry bool
@@ -730,6 +735,7 @@ func (s *ConversationsServer) UpdateConversation(ctx context.Context, req *pb.Up
 
 	var eventsToPublish []registryeventbus.Event
 	conv, err := withMemoryWrite(ctx, s.Store, func(txCtx context.Context) (*registrystore.ConversationDetail, error) {
+		eventsToPublish = nil
 		var conv *registrystore.ConversationDetail
 		var err error
 		var eventData map[string]any
@@ -1917,6 +1923,7 @@ func (s *EntriesServer) appendEntries(ctx context.Context, conversationID string
 	var retryCreatedAttachmentIDs []uuid.UUID
 	var entries []model.Entry
 	entries, err = withMemoryWrite(ctx, s.Store, func(txCtx context.Context) ([]model.Entry, error) {
+		eventsToPublish = nil
 		existing, _ := s.Store.GetConversation(txCtx, userID, convID)
 		convExistedBefore := existing != nil
 
@@ -1968,18 +1975,19 @@ func (s *EntriesServer) appendEntries(ctx context.Context, conversationID string
 		}
 
 		txCtx, storedPatch := registrystore.WithAppendConversationPatch(txCtx, validatedPatch.appendPatch())
+		var attemptEntries []model.Entry
 		if appendWhileArchived {
 			writtenEntries, err := s.Store.AppendEntriesBeforeUnarchive(txCtx, userID, convID, storeEntries, clientIDPtr, agentIDPtr, epoch)
 			if err != nil {
 				return nil, err
 			}
-			entries = writtenEntries
+			attemptEntries = writtenEntries
 		} else {
 			writtenEntries, err := s.Store.AppendEntries(txCtx, userID, convID, storeEntries, clientIDPtr, agentIDPtr, epoch)
 			if err != nil {
 				return nil, err
 			}
-			entries = writtenEntries
+			attemptEntries = writtenEntries
 		}
 		if storedPatch.Handled {
 			appendWhileArchived = false
@@ -2007,7 +2015,7 @@ func (s *EntriesServer) appendEntries(ctx context.Context, conversationID string
 			}
 			patchAfterAppend = patchAfterAppend.changesAgainst(current)
 		}
-		if err := linkGRPCAttachmentLinks(txCtx, s.Store, userID, entries, pendingLinks); err != nil {
+		if err := linkGRPCAttachmentLinks(txCtx, s.Store, userID, attemptEntries, pendingLinks); err != nil {
 			return nil, err
 		}
 		patchRes := grpcPatchResult{changed: storedPatch.Changed, archived: storedPatch.Archived}
@@ -2026,13 +2034,13 @@ func (s *EntriesServer) appendEntries(ctx context.Context, conversationID string
 			patchRes.changed = true
 			patchRes.archived = validatedPatch.archived
 		}
-		if s.EventBus != nil && len(entries) > 0 {
-			eventsToPublish, err = s.entryEventsForCreatedEntries(txCtx, convID, entries, !convExistedBefore, patchRes, convExistedBefore)
+		if s.EventBus != nil && len(attemptEntries) > 0 {
+			eventsToPublish, err = s.entryEventsForCreatedEntries(txCtx, convID, attemptEntries, !convExistedBefore, patchRes, convExistedBefore)
 			if err != nil {
 				return nil, err
 			}
 		}
-		return entries, nil
+		return attemptEntries, nil
 	})
 	if err != nil {
 		duplicateConflict := registrystore.IsDuplicateSequenceConflict(err)
@@ -2042,6 +2050,7 @@ func (s *EntriesServer) appendEntries(ctx context.Context, conversationID string
 			originalErr := err
 			eventsToPublish = nil
 			entries, err = withMemoryWrite(ctx, s.Store, func(txCtx context.Context) ([]model.Entry, error) {
+				eventsToPublish = nil
 				txCtx, storedPatch := registrystore.WithAppendConversationPatch(txCtx, validatedPatch.appendPatch())
 				normalizedRequest, normalizeErr := normalizeGRPCAppendRetry(txCtx, s.Store, userID, convID, retryRequest)
 				if normalizeErr != nil {
@@ -2156,6 +2165,7 @@ func (s *EntriesServer) SyncEntries(ctx context.Context, req *pb.SyncEntriesRequ
 
 	var eventsToPublish []registryeventbus.Event
 	result, err := withMemoryWrite(ctx, s.Store, func(txCtx context.Context) (*registrystore.SyncResult, error) {
+		eventsToPublish = nil
 		existing, _ := s.Store.GetConversation(txCtx, userID, convID)
 		convExistedBefore := existing != nil
 
@@ -2479,15 +2489,7 @@ func resolveGRPCAttachmentRefsWithMode(ctx context.Context, store registrystore.
 					modified = true
 					continue
 				}
-				newAttachment, err := store.CreateAttachment(ctx, userID, "", model.Attachment{
-					StorageKey:  attachment.StorageKey,
-					Filename:    attachment.Filename,
-					ContentType: attachment.ContentType,
-					Size:        attachment.Size,
-					SHA256:      attachment.SHA256,
-					Status:      "ready",
-					ExpiresAt:   attachment.ExpiresAt,
-				})
+				newAttachment, err := store.CloneAttachment(ctx, userID, attachment.ID)
 				if err != nil {
 					return nil, nil, nil, err
 				}
@@ -2719,6 +2721,7 @@ func (s *MembershipsServer) ShareConversation(ctx context.Context, req *pb.Share
 	level := protoToAccessLevel(req.GetAccessLevel())
 	var eventsToPublish []registryeventbus.Event
 	m, err := withMemoryWrite(ctx, s.Store, func(txCtx context.Context) (*model.ConversationMembership, error) {
+		eventsToPublish = nil
 		membership, err := s.Store.ShareConversation(txCtx, userID, convID, req.GetUserId(), level)
 		if err != nil {
 			return nil, err
@@ -2772,6 +2775,7 @@ func (s *MembershipsServer) UpdateMembership(ctx context.Context, req *pb.Update
 	level := protoToAccessLevel(req.GetAccessLevel())
 	var eventsToPublish []registryeventbus.Event
 	m, err := withMemoryWrite(ctx, s.Store, func(txCtx context.Context) (*model.ConversationMembership, error) {
+		eventsToPublish = nil
 		membership, err := s.Store.UpdateMembership(txCtx, userID, convID, req.GetMemberUserId(), level)
 		if err != nil {
 			return nil, err
@@ -2824,6 +2828,7 @@ func (s *MembershipsServer) DeleteMembership(ctx context.Context, req *pb.Delete
 
 	var eventsToPublish []registryeventbus.Event
 	if err := inMemoryWrite(ctx, s.Store, func(txCtx context.Context) error {
+		eventsToPublish = nil
 		conv, err := s.Store.GetConversation(txCtx, userID, convID)
 		if err != nil {
 			return err
@@ -3622,6 +3627,8 @@ func (s *MemoriesServer) PutMemory(ctx context.Context, req *pb.PutMemoryRequest
 	var writeResult *registryepisodic.MemoryWriteResult
 	var memoryEvents []registryeventbus.Event
 	if writeErr := inEpisodicWrite(ctx, s.Store, func(txCtx context.Context) error {
+		writeResult = nil
+		memoryEvents = nil
 		// 1. Load and authorize the active row before replacing it.
 		var predecessorExpectation *registryepisodic.MemoryPredecessorExpectation
 		if s.Policy != nil {
@@ -3746,6 +3753,7 @@ func (s *MemoriesServer) GetMemory(ctx context.Context, req *pb.GetMemoryRequest
 	// so the row we authorize matches the row we read.
 	var grpcGetItem *registryepisodic.MemoryItem
 	if err := inEpisodicWrite(ctx, s.Store, func(txCtx context.Context) error {
+		grpcGetItem = nil
 		// 1. Look up exact kind without loading/decrypting the value.
 		// If the row does not exist we still run authz with kind="" so that
 		// callers without access get PermissionDenied (not NotFound), preventing existence leakage.
@@ -3849,6 +3857,7 @@ func (s *MemoriesServer) UpdateMemory(ctx context.Context, req *pb.UpdateMemoryR
 	// Per Enhancement 115: run authz with kind="" when row absent; return NotFound only if authz passes.
 	var memoryEvents []registryeventbus.Event
 	if archiveErr := inEpisodicWrite(ctx, s.Store, func(txCtx context.Context) error {
+		memoryEvents = nil
 		if s.Policy != nil {
 			// 1. Look up exact kind without loading value. ArchiveFilterExclude: archived rows = absent.
 			rowKind, found, kindErr := s.Store.GetMemoryRowKind(txCtx, namespace, key, registryepisodic.ArchiveFilterExclude)
@@ -4670,6 +4679,7 @@ func (s *AdminMemoriesServer) DeleteMemory(ctx context.Context, req *pb.AdminDel
 	}
 	var memoryEvents []registryeventbus.Event
 	if err := inEpisodicWrite(ctx, s.Store, func(txCtx context.Context) error {
+		memoryEvents = nil
 		if err := s.Store.AdminForceDeleteMemory(txCtx, id); err != nil {
 			return err
 		}
@@ -4816,6 +4826,7 @@ func (s *AdminMemoriesServer) PutMemory(ctx context.Context, req *pb.AdminPutMem
 	kindSel := req.GetKind()
 	var memoryEvents []registryeventbus.Event
 	result, err := withEpisodicWrite(ctx, s.Store, func(txCtx context.Context) (*registryepisodic.MemoryWriteResult, error) {
+		memoryEvents = nil
 		policyAttrs, resolvedKind, err := grpcResolveKindProjection(txCtx, s.Store, kindSel, namespace, key, value, index)
 		if err != nil {
 			return nil, err
@@ -4897,6 +4908,7 @@ func (s *AdminMemoriesServer) UpdateMemory(ctx context.Context, req *pb.AdminUpd
 	// administrative operation across namespaces.
 	var memoryEvents []registryeventbus.Event
 	if err := inEpisodicWrite(ctx, s.Store, func(txCtx context.Context) error {
+		memoryEvents = nil
 		item, err := s.Store.GetMemory(txCtx, namespace, key, registryepisodic.ArchiveFilterExclude)
 		if err != nil {
 			return err
@@ -5792,7 +5804,7 @@ type AttachmentsServer struct {
 	SigningKeys [][]byte
 }
 
-func (s *AttachmentsServer) UploadAttachment(stream pb.AttachmentsService_UploadAttachmentServer) error {
+func (s *AttachmentsServer) UploadAttachment(stream pb.AttachmentsService_UploadAttachmentServer) (retErr error) {
 	if s.AttachStore == nil {
 		return status.Error(codes.FailedPrecondition, "attachment store is not configured")
 	}
@@ -5805,15 +5817,41 @@ func (s *AttachmentsServer) UploadAttachment(stream pb.AttachmentsService_Upload
 	}
 
 	var metadata *pb.UploadMetadata
-	var resultCh chan struct {
+	var expiresIn time.Duration
+	type storeResult struct {
 		res *registryattach.FileStoreResult
 		err error
 	}
+	var resultCh chan storeResult
+	var receivedResult *storeResult
+	blobAccountedFor := false
 	var writer *io.PipeWriter
 	defer func() {
 		if writer != nil {
 			// Ensure the background store goroutine unblocks if the handler returns early.
 			_ = writer.CloseWithError(io.ErrUnexpectedEOF)
+		}
+		if resultCh == nil || blobAccountedFor {
+			return
+		}
+		if receivedResult == nil {
+			out := <-resultCh
+			receivedResult = &out
+		}
+		if receivedResult.res == nil {
+			return
+		}
+		storageKey := receivedResult.res.StorageKey
+		if cleanupErr := registrystore.EnqueueAttachmentBlobDeleteAfterFinalizationFailure(stream.Context(), s.Store, storageKey); cleanupErr != nil {
+			log.Error("Failed to enqueue gRPC attachment cleanup after upload exit", "storageKey", storageKey, "err", cleanupErr, "cause", retErr)
+			cleanupErr = fmt.Errorf("enqueue stored attachment cleanup: %w", cleanupErr)
+			code := status.Code(retErr)
+			message := status.Convert(retErr).Message()
+			if retErr == nil {
+				code = codes.Internal
+				message = "internal server error"
+			}
+			retErr = grpcStatusWithCause(code, message, errors.Join(retErr, cleanupErr))
 		}
 	}()
 
@@ -5825,6 +5863,7 @@ func (s *AttachmentsServer) UploadAttachment(stream pb.AttachmentsService_Upload
 			}
 			_ = writer.Close()
 			out := <-resultCh
+			receivedResult = &out
 			if out.err != nil {
 				if errors.Is(out.err, operationevent.ErrRecoveredPanic) {
 					return grpcStatusWithCause(codes.Internal, "internal server error", out.err)
@@ -5845,10 +5884,6 @@ func (s *AttachmentsServer) UploadAttachment(stream pb.AttachmentsService_Upload
 				filename = &v
 			}
 
-			expiresIn, err := parseGRPCExpiresIn(metadata.GetExpiresIn(), s.Config)
-			if err != nil {
-				return grpcStatusWithCause(codes.InvalidArgument, err.Error(), err)
-			}
 			expiresAt := time.Now().Add(expiresIn)
 
 			attachment, err := withMemoryWrite(stream.Context(), s.Store, func(txCtx context.Context) (*model.Attachment, error) {
@@ -5866,6 +5901,7 @@ func (s *AttachmentsServer) UploadAttachment(stream pb.AttachmentsService_Upload
 				return mapError(err)
 			}
 
+			blobAccountedFor = true
 			return stream.SendAndClose(uploadAttachmentResponseToProto(attachment))
 		}
 		if err != nil {
@@ -5878,6 +5914,11 @@ func (s *AttachmentsServer) UploadAttachment(stream pb.AttachmentsService_Upload
 				return status.Error(codes.InvalidArgument, "metadata can only be sent once")
 			}
 			metadata = payload.Metadata
+			var err error
+			expiresIn, err = parseGRPCExpiresIn(metadata.GetExpiresIn(), s.Config)
+			if err != nil {
+				return grpcStatusWithCause(codes.InvalidArgument, err.Error(), err)
+			}
 
 			contentType := metadata.GetContentType()
 			if strings.TrimSpace(contentType) == "" {
@@ -5885,28 +5926,19 @@ func (s *AttachmentsServer) UploadAttachment(stream pb.AttachmentsService_Upload
 			}
 			reader, pipeWriter := io.Pipe()
 			writer = pipeWriter
-			resultCh = make(chan struct {
-				res *registryattach.FileStoreResult
-				err error
-			}, 1)
+			resultCh = make(chan storeResult, 1)
 			go func() {
 				defer func() {
 					if recovered := recover(); recovered != nil {
 						stack := debug.Stack()
 						err := operationevent.RecoveredPanicError(operationevent.FromContext(stream.Context()), "", recovered, stack)
 						_ = reader.CloseWithError(err)
-						resultCh <- struct {
-							res *registryattach.FileStoreResult
-							err error
-						}{err: err}
+						resultCh <- storeResult{err: err}
 					}
 				}()
 				res, err := s.AttachStore.Store(stream.Context(), reader, s.MaxBodySize, contentType)
 				_ = reader.Close()
-				resultCh <- struct {
-					res *registryattach.FileStoreResult
-					err error
-				}{res: res, err: err}
+				resultCh <- storeResult{res: res, err: err}
 			}()
 		case *pb.UploadAttachmentRequest_Chunk:
 			if metadata == nil || writer == nil {
@@ -6079,16 +6111,10 @@ func (s *AttachmentsServer) DeleteAttachment(ctx context.Context, req *pb.Delete
 		return nil, grpcStatusWithCause(codes.InvalidArgument, "invalid attachment id", err)
 	}
 	if err := inMemoryWrite(ctx, s.Store, func(txCtx context.Context) error {
-		attachment, err := s.Store.GetAttachment(txCtx, userID, "", attachmentID)
-		if err != nil {
+		if err := s.Store.DeleteAttachment(txCtx, userID, "", attachmentID); err != nil {
 			return err
 		}
-		if attachment.StorageKey != nil && s.AttachStore != nil {
-			if err := s.AttachStore.Delete(txCtx, *attachment.StorageKey); err != nil {
-				return err
-			}
-		}
-		return s.Store.DeleteAttachment(txCtx, userID, "", attachmentID)
+		return nil
 	}); err != nil {
 		return nil, mapError(err)
 	}
@@ -6326,6 +6352,7 @@ func (s *ResponseRecorderServer) publishResponseEvent(ctx context.Context, event
 
 	var eventsToPublish []registryeventbus.Event
 	err := inMemoryWrite(ctx, s.Store, func(txCtx context.Context) error {
+		eventsToPublish = nil
 		conv, err := s.Store.GetConversation(txCtx, userID, convUUID)
 		if err != nil {
 			return err
@@ -6800,6 +6827,7 @@ func (s *AdminCheckpointServer) PutCheckpoint(ctx context.Context, req *pb.PutCh
 	}
 	var checkpoint *registrystore.ClientCheckpoint
 	err = s.Store.InWriteTx(ctx, func(txCtx context.Context) error {
+		checkpoint = nil
 		var err error
 		value := registrystore.ClientCheckpoint{
 			ClientID:    clientID,
@@ -6843,6 +6871,7 @@ func (s *AdminCheckpointServer) AcquireLease(ctx context.Context, req *pb.Acquir
 	token := base64.RawURLEncoding.EncodeToString(tokenBytes)
 	var lease *registrystore.ClientCheckpointLease
 	err := s.Store.InWriteTx(ctx, func(txCtx context.Context) error {
+		lease = nil
 		var err error
 		lease, err = s.Store.(registrystore.AdminCheckpointLeaseStore).AdminAcquireCheckpointLease(txCtx, clientID, token, time.Duration(req.GetTtlSeconds())*time.Second)
 		return err
@@ -6866,6 +6895,7 @@ func (s *AdminCheckpointServer) RenewLease(ctx context.Context, req *pb.RenewChe
 	}
 	var lease *registrystore.ClientCheckpointLease
 	err := s.Store.InWriteTx(ctx, func(txCtx context.Context) error {
+		lease = nil
 		var err error
 		lease, err = s.Store.(registrystore.AdminCheckpointLeaseStore).AdminRenewCheckpointLease(txCtx, clientID, req.GetLeaseToken(), time.Duration(req.GetTtlSeconds())*time.Second)
 		return err

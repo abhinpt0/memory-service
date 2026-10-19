@@ -518,13 +518,18 @@ type MemoryStore interface {
 	AdminSearchEntries(ctx context.Context, query AdminSearchQuery) (*SearchResults, error)
 	AdminListAttachments(ctx context.Context, query AdminAttachmentQuery) ([]AdminAttachment, *string, error)
 	AdminGetAttachment(ctx context.Context, attachmentID uuid.UUID) (*AdminAttachment, error)
+	// AdminDeleteAttachment atomically deletes metadata and queues cleanup for
+	// the storage key from the exact row deleted.
 	AdminDeleteAttachment(ctx context.Context, attachmentID uuid.UUID) error
 
 	// Attachments
 	CreateAttachment(ctx context.Context, userID string, conversationID string, attachment model.Attachment) (*model.Attachment, error)
+	CloneAttachment(ctx context.Context, userID string, sourceAttachmentID uuid.UUID) (*model.Attachment, error)
 	UpdateAttachment(ctx context.Context, userID string, attachmentID uuid.UUID, update AttachmentUpdate) (*model.Attachment, error)
 	LinkAttachmentToEntry(ctx context.Context, userID string, attachmentID uuid.UUID, entryID uuid.UUID) (*model.Attachment, error)
 	GetAttachment(ctx context.Context, userID string, conversationID string, attachmentID uuid.UUID) (*model.Attachment, error)
+	// DeleteAttachment atomically deletes metadata and queues cleanup for the
+	// storage key from the exact row deleted.
 	DeleteAttachment(ctx context.Context, userID string, conversationID string, attachmentID uuid.UUID) error
 
 	// Eviction
@@ -541,6 +546,10 @@ type MemoryStore interface {
 	ClaimReadyTasks(ctx context.Context, limit int) ([]model.Task, error)
 	DeleteTask(ctx context.Context, taskID uuid.UUID) error
 	FailTask(ctx context.Context, taskID uuid.UUID, errMsg string, retryDelay time.Duration) error
+	RegisterAttachmentBlobReference(ctx context.Context, storageKey string) error
+	QueueAttachmentBlobDelete(ctx context.Context, storageKey string) error
+	PrepareAttachmentBlobDelete(ctx context.Context, taskID uuid.UUID, storageKey string) (referenced bool, err error)
+	CompleteAttachmentBlobDelete(ctx context.Context, taskID uuid.UUID) error
 
 	// Admin attachment lookup by storage key (for token-based downloads)
 	AdminGetAttachmentByStorageKey(ctx context.Context, storageKey string) (*AdminAttachment, error)

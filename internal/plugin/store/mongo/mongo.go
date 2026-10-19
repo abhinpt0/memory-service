@@ -402,8 +402,22 @@ type MongoStore struct {
 	appendBatchPatchBeforeApply  func() error              // test-only patch failure hook; nil in production
 	metadataPatchBeforeUpdate    func()                    // test-only synchronization hook; nil in production
 	materializeBeforeTransaction func(bson.ObjectID) error // test-only fault-injection hook; nil in production
+	afterConversationMissing     func() error              // test-only synchronization hook; nil in production
 	beforeConversationInsert     func() error              // test-only fault-injection hook; nil in production
 	beforeMembershipInsert       func() error              // test-only fault-injection hook; nil in production
+	afterAttachmentCloneRead     func() error              // test-only synchronization hook; nil in production
+	afterAttachmentDeleteCount   func() error              // test-only synchronization hook; nil in production
+}
+
+const mongoAfterCommitTimeout = 5 * time.Second
+
+func runMongoAfterCommitActions(ctx context.Context, scope *txscope.AfterCommitScope) {
+	if scope == nil {
+		return
+	}
+	actionCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), mongoAfterCommitTimeout)
+	defer cancel()
+	scope.Run(actionCtx)
 }
 
 func (s *MongoStore) OutboxEnabled() bool {
@@ -426,9 +440,18 @@ func (s *MongoStore) InWriteTx(ctx context.Context, fn func(context.Context) err
 		return fmt.Errorf("start MongoDB write transaction: %w", err)
 	}
 	defer session.EndSession(ctx)
+	var committedScope *txscope.AfterCommitScope
 	_, err = session.WithTransaction(ctx, func(txCtx context.Context) (any, error) {
-		return nil, fn(txscope.WithIntent(txCtx, txscope.IntentWrite))
+		txCtx, attemptScope := txscope.WithAfterCommitScope(txscope.WithIntent(txCtx, txscope.IntentWrite))
+		if err := fn(txCtx); err != nil {
+			return nil, err
+		}
+		committedScope = attemptScope
+		return nil, nil
 	})
+	if err == nil {
+		runMongoAfterCommitActions(ctx, committedScope)
+	}
 	return err
 }
 
@@ -1096,6 +1119,11 @@ func (s *MongoStore) createConversation(ctx context.Context, userID string, clie
 	}
 	if !errors.Is(findErr, mongo.ErrNoDocuments) {
 		return nil, fmt.Errorf("failed to check existing conversation: %w", findErr)
+	}
+	if s.afterConversationMissing != nil {
+		if err := s.afterConversationMissing(); err != nil {
+			return nil, err
+		}
 	}
 
 	encTitle, err := s.encryptConversationTitle(string(convID), title)
@@ -2826,18 +2854,6 @@ func (s *MongoStore) appendEntries(ctx context.Context, userID string, conversat
 
 	s.conversations().UpdateByID(ctx, string(conversationID), bson.M{"$set": bson.M{"updated_at": now}})
 
-	// Warm entries cache if any context channel entries were appended.
-	if clientID != nil {
-		for _, e := range result {
-			if e.Channel == model.ChannelContext {
-				if ancestry, err := s.buildAncestryStack(ctx, conv); err == nil {
-					s.warmEntriesCache(ctx, conv, ancestry, *clientID, valueOrEmpty(agentID))
-				}
-				break
-			}
-		}
-	}
-
 	if len(batchData) > 0 {
 		completed, err := s.finishAppendBatch(ctx, result[anchor], batch)
 		if err != nil {
@@ -2845,6 +2861,24 @@ func (s *MongoStore) appendEntries(ctx context.Context, userID string, conversat
 		}
 		if !completed {
 			return nil, registrystore.NewDuplicateSequenceConflict()
+		}
+	}
+
+	// Warm the cache only after the write attempt commits. MongoDB can replay a
+	// transaction callback, and cache state from an aborted attempt would make
+	// the retry observe entries that do not exist in its transaction snapshot.
+	if clientID != nil {
+		for _, e := range result {
+			if e.Channel == model.ChannelContext {
+				if ancestry, err := s.buildAncestryStack(ctx, conv); err == nil {
+					cacheClientID := *clientID
+					cacheAgentID := valueOrEmpty(agentID)
+					txscope.AfterCommit(ctx, func(commitCtx context.Context) {
+						s.warmEntriesCache(commitCtx, conv, ancestry, cacheClientID, cacheAgentID)
+					})
+				}
+				break
+			}
 		}
 	}
 
@@ -2894,9 +2928,12 @@ func (s *MongoStore) SyncAgentEntry(ctx context.Context, userID string, conversa
 		return nil, &registrystore.ForbiddenError{}
 	}
 	if autoCreated && s.entriesCache != nil {
-		if err := s.entriesCache.Remove(ctx, conversationID, scopedAgentCacheKey(clientID, valueOrEmpty(agentID))); err != nil {
-			return nil, err
-		}
+		cacheKey := scopedAgentCacheKey(clientID, valueOrEmpty(agentID))
+		txscope.AfterCommit(ctx, func(commitCtx context.Context) {
+			if err := s.entriesCache.Remove(commitCtx, conversationID, cacheKey); err != nil {
+				log.Warn("Failed to invalidate auto-created conversation cache", "conversationId", conversationID, "err", err)
+			}
+		})
 	}
 
 	ancestry, err := s.buildAncestryStack(ctx, conv)
@@ -3000,7 +3037,10 @@ func (s *MongoStore) SyncAgentEntry(ctx context.Context, userID string, conversa
 		}
 		return nil, fmt.Errorf("failed to sync entry: %w", err)
 	}
-	s.warmEntriesCache(ctx, conv, ancestry, clientID, valueOrEmpty(agentID))
+	cacheAgentID := valueOrEmpty(agentID)
+	txscope.AfterCommit(ctx, func(commitCtx context.Context) {
+		s.warmEntriesCache(commitCtx, conv, ancestry, clientID, cacheAgentID)
+	})
 	e := s.entryDocToModel(doc)
 	e.Content = appendContent
 	return &registrystore.SyncResult{Entry: &e, Epoch: &epochToUse, NoOp: false, EpochIncremented: epochIncremented}, nil
@@ -3914,12 +3954,16 @@ func (s *MongoStore) AdminGetAttachment(ctx context.Context, attachmentID uuid.U
 }
 
 func (s *MongoStore) AdminDeleteAttachment(ctx context.Context, attachmentID uuid.UUID) error {
-	result, err := s.attachments().DeleteOne(ctx, bson.M{"_id": uuidToStr(attachmentID)})
+	var deleted attachmentDoc
+	err := s.attachments().FindOneAndDelete(ctx, bson.M{"_id": uuidToStr(attachmentID)}).Decode(&deleted)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return &registrystore.NotFoundError{Resource: "attachment", ID: attachmentID.String()}
+	}
 	if err != nil {
 		return fmt.Errorf("admin delete attachment failed: %w", err)
 	}
-	if result.DeletedCount == 0 {
-		return &registrystore.NotFoundError{Resource: "attachment", ID: attachmentID.String()}
+	if deleted.StorageKey != nil {
+		return s.QueueAttachmentBlobDelete(ctx, *deleted.StorageKey)
 	}
 	return nil
 }
@@ -3937,6 +3981,11 @@ func (s *MongoStore) CreateAttachment(ctx context.Context, userID string, conver
 	attachment.UserID = userID
 	if strings.TrimSpace(attachment.Status) == "" {
 		attachment.Status = "ready"
+	}
+	if attachment.StorageKey != nil {
+		if err := s.RegisterAttachmentBlobReference(ctx, *attachment.StorageKey); err != nil {
+			return nil, err
+		}
 	}
 
 	doc := attachmentDoc{
@@ -3964,6 +4013,42 @@ func (s *MongoStore) CreateAttachment(ctx context.Context, userID string, conver
 	return &attachment, nil
 }
 
+func (s *MongoStore) CloneAttachment(ctx context.Context, userID string, sourceAttachmentID uuid.UUID) (*model.Attachment, error) {
+	source, err := s.GetAttachment(ctx, userID, "", sourceAttachmentID)
+	if err != nil {
+		return nil, err
+	}
+	if source.StorageKey == nil {
+		return nil, &registrystore.ConflictError{Message: "attachment content is not available"}
+	}
+	if s.afterAttachmentCloneRead != nil {
+		if err := s.afterAttachmentCloneRead(); err != nil {
+			return nil, err
+		}
+	}
+	storageKey := *source.StorageKey
+	if err := s.RegisterAttachmentBlobReference(ctx, storageKey); err != nil {
+		return nil, err
+	}
+	// Mongo transaction snapshots can retain a source read from before cleanup.
+	// Revalidate against committed state outside the session after acquiring the
+	// guard; subsequent deletes must then contend on that guard.
+	validationCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var current attachmentDoc
+	if err := s.attachments().FindOne(validationCtx, bson.M{
+		"_id":         uuidToStr(sourceAttachmentID),
+		"storage_key": storageKey,
+		"archived_at": bson.M{"$exists": false},
+	}).Decode(&current); err != nil {
+		return nil, &registrystore.NotFoundError{Resource: "attachment", ID: sourceAttachmentID.String()}
+	}
+	return s.CreateAttachment(ctx, userID, "", model.Attachment{
+		StorageKey: source.StorageKey, Filename: source.Filename, ContentType: source.ContentType,
+		Size: source.Size, SHA256: source.SHA256, Status: "ready", ExpiresAt: source.ExpiresAt,
+	})
+}
+
 func (s *MongoStore) UpdateAttachment(ctx context.Context, userID string, attachmentID uuid.UUID, update registrystore.AttachmentUpdate) (*model.Attachment, error) {
 	id := uuidToStr(attachmentID)
 	var current attachmentDoc
@@ -3972,6 +4057,11 @@ func (s *MongoStore) UpdateAttachment(ctx context.Context, userID string, attach
 	}
 	if current.UserID != userID {
 		return nil, &registrystore.ForbiddenError{}
+	}
+	if update.StorageKey != nil {
+		if err := s.RegisterAttachmentBlobReference(ctx, *update.StorageKey); err != nil {
+			return nil, err
+		}
 	}
 
 	set := bson.M{}
@@ -4093,12 +4183,23 @@ func (s *MongoStore) DeleteAttachment(ctx context.Context, userID string, conver
 		return &registrystore.ConflictError{Message: "linked attachments cannot be deleted"}
 	}
 
-	result, err := s.attachments().DeleteOne(ctx, bson.M{"_id": uuidToStr(attachmentID)})
+	var deleted attachmentDoc
+	err = s.attachments().FindOneAndDelete(ctx, bson.M{
+		"_id":     uuidToStr(attachmentID),
+		"user_id": userID,
+		"$or": []bson.M{
+			{"entry_id": bson.M{"$exists": false}},
+			{"entry_id": nil},
+		},
+	}).Decode(&deleted)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return &registrystore.NotFoundError{Resource: "attachment", ID: attachmentID.String()}
+	}
 	if err != nil {
 		return fmt.Errorf("delete attachment failed: %w", err)
 	}
-	if result.DeletedCount == 0 {
-		return &registrystore.NotFoundError{Resource: "attachment", ID: attachmentID.String()}
+	if deleted.StorageKey != nil {
+		return s.QueueAttachmentBlobDelete(ctx, *deleted.StorageKey)
 	}
 	return nil
 }
@@ -4294,21 +4395,29 @@ func (s *MongoStore) CreateTask(ctx context.Context, taskType string, taskBody m
 func (s *MongoStore) ClaimReadyTasks(ctx context.Context, limit int) ([]model.Task, error) {
 	var tasks []model.Task
 	now := time.Now()
-	staleClaimCutoff := now.Add(-5 * time.Minute)
+	staleClaimCutoff := now.Add(-registrystore.TaskClaimLease)
 
 	for i := 0; i < limit; i++ {
-		filter := bson.M{
-			"retry_at": bson.M{"$lte": now},
-			"$or": []bson.M{
+		filter := bson.M{"$and": []bson.M{
+			{"retry_at": bson.M{"$lte": now}},
+			{"$or": []bson.M{
 				{"processing_at": bson.M{"$exists": false}},
 				{"processing_at": nil},
 				{"processing_at": bson.M{"$lt": staleClaimCutoff}},
-			},
-		}
+			}},
+			{"$or": []bson.M{
+				{"task_type": bson.M{"$ne": registrystore.AttachmentBlobDeleteTaskType}},
+				{"task_body." + registrystore.AttachmentBlobDeleteStateField: bson.M{"$in": []any{
+					registrystore.AttachmentBlobDeleteStateQueued,
+					registrystore.AttachmentBlobDeleteStateClaimed,
+					nil,
+				}}},
+			}},
+		}}
 		update := bson.M{
 			"$set": bson.M{
 				"processing_at": now,
-				"retry_at":      now.Add(5 * time.Minute),
+				"retry_at":      now.Add(registrystore.TaskClaimLease),
 			},
 		}
 		opts := options.FindOneAndUpdate().
@@ -4326,6 +4435,13 @@ func (s *MongoStore) ClaimReadyTasks(ctx context.Context, limit int) ([]model.Ta
 
 		id, _ := doc["_id"].(string)
 		taskType, _ := doc["task_type"].(string)
+		if taskType == registrystore.AttachmentBlobDeleteTaskType {
+			if _, err := s.db.Collection("tasks").UpdateByID(ctx, id, bson.M{
+				"$set": bson.M{"task_body." + registrystore.AttachmentBlobDeleteStateField: registrystore.AttachmentBlobDeleteStateClaimed},
+			}); err != nil {
+				return nil, err
+			}
+		}
 		task := model.Task{
 			ID:       strToUUID(id),
 			TaskType: taskType,
@@ -4333,10 +4449,18 @@ func (s *MongoStore) ClaimReadyTasks(ctx context.Context, limit int) ([]model.Ta
 		switch tb := doc["task_body"].(type) {
 		case bson.M:
 			task.TaskBody = map[string]any(tb)
+		case bson.D:
+			task.TaskBody = make(map[string]any, len(tb))
+			for _, field := range tb {
+				task.TaskBody[field.Key] = field.Value
+			}
 		case map[string]any:
 			task.TaskBody = tb
 		default:
 			task.TaskBody = map[string]any{}
+		}
+		if taskType == registrystore.AttachmentBlobDeleteTaskType {
+			task.TaskBody[registrystore.AttachmentBlobDeleteStateField] = registrystore.AttachmentBlobDeleteStateClaimed
 		}
 		switch rc := doc["retry_count"].(type) {
 		case int32:
@@ -4382,6 +4506,156 @@ func (s *MongoStore) FailTask(ctx context.Context, taskID uuid.UUID, errMsg stri
 		},
 	})
 	return err
+}
+
+func mongoAttachmentBlobTaskDoc(storageKey, state string) bson.M {
+	taskName := registrystore.AttachmentBlobDeleteTaskName(storageKey)
+	return bson.M{
+		"_id":       uuidToStr(uuid.New()),
+		"task_name": taskName,
+		"task_type": registrystore.AttachmentBlobDeleteTaskType,
+		"task_body": bson.M{
+			"taskName": taskName,
+			registrystore.AttachmentBlobDeleteStorageKeyField: storageKey,
+			registrystore.AttachmentBlobDeleteStateField:      state,
+		},
+		"created_at":                 time.Now(),
+		"retry_at":                   time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC),
+		"processing_at":              nil,
+		"retry_count":                0,
+		"attachment_delete_revision": int64(1),
+	}
+}
+
+func (s *MongoStore) RegisterAttachmentBlobReference(ctx context.Context, storageKey string) error {
+	taskName := registrystore.AttachmentBlobDeleteTaskName(storageKey)
+	doc := mongoAttachmentBlobTaskDoc(storageKey, registrystore.AttachmentBlobDeleteStateReferenced)
+	result, err := s.db.Collection("tasks").UpdateOne(ctx, bson.M{
+		"task_name": taskName,
+		"$or": []bson.M{
+			{"task_body." + registrystore.AttachmentBlobDeleteStateField: registrystore.AttachmentBlobDeleteStateQueued},
+			{"task_body." + registrystore.AttachmentBlobDeleteStateField: registrystore.AttachmentBlobDeleteStateReferenced},
+			{"task_body." + registrystore.AttachmentBlobDeleteStateField: bson.M{"$exists": false}},
+		},
+	}, bson.M{
+		"$set": bson.M{
+			"task_body":     doc["task_body"],
+			"retry_at":      doc["retry_at"],
+			"last_error":    nil,
+			"processing_at": nil,
+		},
+		"$setOnInsert": bson.M{
+			"_id":         doc["_id"],
+			"task_name":   taskName,
+			"task_type":   registrystore.AttachmentBlobDeleteTaskType,
+			"created_at":  doc["created_at"],
+			"retry_count": 0,
+		},
+	}, options.UpdateOne().SetUpsert(true))
+	if mongo.IsDuplicateKeyError(err) {
+		return registrystore.NewAttachmentBlobDeleteConflict()
+	}
+	if err != nil {
+		return err
+	}
+	if result.MatchedCount == 0 && result.UpsertedCount == 0 {
+		return registrystore.NewAttachmentBlobDeleteConflict()
+	}
+	return nil
+}
+
+func (s *MongoStore) QueueAttachmentBlobDelete(ctx context.Context, storageKey string) error {
+	taskName := registrystore.AttachmentBlobDeleteTaskName(storageKey)
+	doc := mongoAttachmentBlobTaskDoc(storageKey, registrystore.AttachmentBlobDeleteStateQueued)
+	doc["retry_at"] = time.Now()
+	// Every delete request must write the guard document, including while it is
+	// claimed. That makes a concurrent prepare transaction conflict and retry
+	// its reference count instead of retiring cleanup from a stale count.
+	existing, err := s.db.Collection("tasks").UpdateOne(ctx, bson.M{"task_name": taskName}, bson.M{
+		"$inc": bson.M{"attachment_delete_revision": 1},
+	})
+	if err != nil {
+		return err
+	}
+	if existing.MatchedCount > 0 {
+		_, err = s.db.Collection("tasks").UpdateOne(ctx, bson.M{
+			"task_name": taskName,
+			"task_body." + registrystore.AttachmentBlobDeleteStateField: registrystore.AttachmentBlobDeleteStateReferenced,
+		}, bson.M{"$set": bson.M{
+			"task_body":     doc["task_body"],
+			"retry_at":      doc["retry_at"],
+			"last_error":    nil,
+			"processing_at": nil,
+		}})
+		return err
+	}
+	_, err = s.db.Collection("tasks").UpdateOne(ctx, bson.M{"task_name": taskName}, bson.M{
+		"$setOnInsert": doc,
+	}, options.UpdateOne().SetUpsert(true))
+	return err
+}
+
+func (s *MongoStore) PrepareAttachmentBlobDelete(ctx context.Context, taskID uuid.UUID, storageKey string) (bool, error) {
+	var task bson.M
+	if err := s.db.Collection("tasks").FindOne(ctx, bson.M{
+		"_id":       uuidToStr(taskID),
+		"task_type": registrystore.AttachmentBlobDeleteTaskType,
+	}).Decode(&task); err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return false, &registrystore.NotFoundError{Resource: "task", ID: taskID.String()}
+		}
+		return false, err
+	}
+	body := map[string]any{}
+	switch raw := task["task_body"].(type) {
+	case bson.M:
+		body = map[string]any(raw)
+	case bson.D:
+		for _, field := range raw {
+			body[field.Key] = field.Value
+		}
+	case map[string]any:
+		body = raw
+	}
+	if registrystore.AttachmentBlobDeleteTaskState(body) != registrystore.AttachmentBlobDeleteStateClaimed ||
+		body[registrystore.AttachmentBlobDeleteStorageKeyField] != storageKey {
+		return false, fmt.Errorf("attachment blob delete task is not claimed for its storage key")
+	}
+	count, err := s.attachments().CountDocuments(ctx, bson.M{
+		"storage_key": storageKey,
+		"archived_at": bson.M{"$exists": false},
+	})
+	if err != nil || count == 0 {
+		return false, err
+	}
+	if s.afterAttachmentDeleteCount != nil {
+		if err := s.afterAttachmentDeleteCount(); err != nil {
+			return false, err
+		}
+	}
+	if _, err := s.db.Collection("tasks").UpdateOne(ctx, bson.M{"_id": uuidToStr(taskID)}, bson.M{"$set": bson.M{
+		"task_body." + registrystore.AttachmentBlobDeleteStateField: registrystore.AttachmentBlobDeleteStateReferenced,
+		"retry_at":      time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC),
+		"last_error":    nil,
+		"processing_at": nil,
+	}}); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *MongoStore) CompleteAttachmentBlobDelete(ctx context.Context, taskID uuid.UUID) error {
+	result, err := s.db.Collection("tasks").DeleteOne(ctx, bson.M{
+		"_id":       uuidToStr(taskID),
+		"task_type": registrystore.AttachmentBlobDeleteTaskType,
+	})
+	if err != nil {
+		return err
+	}
+	if result.DeletedCount == 0 {
+		return &registrystore.NotFoundError{Resource: "task", ID: taskID.String()}
+	}
+	return nil
 }
 
 func (s *MongoStore) AdminGetAttachmentByStorageKey(ctx context.Context, storageKey string) (*registrystore.AdminAttachment, error) {

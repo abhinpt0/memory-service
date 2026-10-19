@@ -88,7 +88,9 @@ func upload(c *gin.Context, store registrystore.MemoryStore, attachStore registr
 			filename = &name
 		}
 		sourceURL := req.SourceURL
+		var attachmentID uuid.UUID
 		if err := routetx.MemoryWrite(c, store, func(ctx context.Context) error {
+			attachmentID = uuid.Nil
 			attachment, err := store.CreateAttachment(ctx, userID, "", model.Attachment{
 				Filename:    filename,
 				ContentType: fileContentType,
@@ -99,12 +101,14 @@ func upload(c *gin.Context, store registrystore.MemoryStore, attachStore registr
 			if err != nil {
 				return err
 			}
-			StartSourceURLAttachmentDownload(ctx, store, attachStore, cfg, attachment.ID, userID, sourceURL, fileContentType)
+			attachmentID = attachment.ID
 			c.JSON(http.StatusCreated, toUploadResponse(attachment))
 			return nil
 		}); err != nil {
 			handleError(c, err)
+			return
 		}
+		StartSourceURLAttachmentDownload(c.Request.Context(), store, attachStore, cfg, attachmentID, userID, sourceURL, fileContentType)
 		return
 	}
 
@@ -120,18 +124,18 @@ func upload(c *gin.Context, store registrystore.MemoryStore, attachStore registr
 		fileContentType = "application/octet-stream"
 	}
 
-	result, err := attachStore.Store(c.Request.Context(), file, cfg.AttachmentMaxSize, fileContentType)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
 	expiresIn, err := parseExpiresIn(c.DefaultQuery("expiresIn", ""), cfg)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 	expiresAt := time.Now().Add(expiresIn)
+
+	result, err := attachStore.Store(c.Request.Context(), file, cfg.AttachmentMaxSize, fileContentType)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 
 	if err := routetx.MemoryWrite(c, store, func(ctx context.Context) error {
 		attachment, err := store.CreateAttachment(ctx, userID, "", model.Attachment{
@@ -149,6 +153,10 @@ func upload(c *gin.Context, store registrystore.MemoryStore, attachStore registr
 		c.JSON(http.StatusCreated, toUploadResponse(attachment))
 		return nil
 	}); err != nil {
+		if cleanupErr := registrystore.EnqueueAttachmentBlobDeleteAfterFinalizationFailure(c.Request.Context(), store, result.StorageKey); cleanupErr != nil {
+			log.Error("Failed to enqueue attachment cleanup after metadata creation failure", "storageKey", result.StorageKey, "err", cleanupErr, "cause", err)
+			err = errors.Join(err, fmt.Errorf("enqueue stored attachment cleanup: %w", cleanupErr))
+		}
 		handleError(c, err)
 	}
 }
@@ -204,7 +212,7 @@ func getAttachment(c *gin.Context, store registrystore.MemoryStore, attachStore 
 	}
 }
 
-func deleteAttachment(c *gin.Context, store registrystore.MemoryStore, attachStore registryattach.AttachmentStore) {
+func deleteAttachment(c *gin.Context, store registrystore.MemoryStore, _ registryattach.AttachmentStore) {
 	userID := security.GetUserID(c)
 	attachID, err := parseAttachmentIDParam(c)
 	if err != nil {
@@ -213,18 +221,6 @@ func deleteAttachment(c *gin.Context, store registrystore.MemoryStore, attachSto
 	}
 
 	if err := routetx.MemoryWrite(c, store, func(ctx context.Context) error {
-		attachment, err := store.GetAttachment(ctx, userID, "", attachID)
-		if err != nil {
-			return err
-		}
-
-		if attachment.StorageKey != nil {
-			if err := attachStore.Delete(ctx, *attachment.StorageKey); err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete attachment content"})
-				return nil
-			}
-		}
-
 		if err := store.DeleteAttachment(ctx, userID, "", attachID); err != nil {
 			return err
 		}
@@ -232,6 +228,7 @@ func deleteAttachment(c *gin.Context, store registrystore.MemoryStore, attachSto
 		return nil
 	}); err != nil {
 		handleError(c, err)
+		return
 	}
 }
 
@@ -681,6 +678,10 @@ func completeSourceURLAttachment(ctx context.Context, store registrystore.Memory
 		}
 		return nil
 	}); err != nil {
+		if cleanupErr := registrystore.EnqueueAttachmentBlobDeleteAfterFinalizationFailure(ctx, store, storageKey); cleanupErr != nil {
+			log.Error("Failed to enqueue downloaded attachment cleanup", "attachmentId", attachmentID.String(), "storageKey", storageKey, "err", cleanupErr, "cause", err)
+			return errors.Join(err, fmt.Errorf("enqueue downloaded attachment cleanup: %w", cleanupErr))
+		}
 		log.Error("Failed to update downloaded attachment", "attachmentId", attachmentID.String(), "err", err)
 		return err
 	}
