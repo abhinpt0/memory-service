@@ -9,19 +9,19 @@
     "prettier": "prettier -w \"src/**/*.{ts,tsx,js}\""
   },
   "dependencies": {
-    "@ai-sdk/openai": "2.0.127",
-    "ai": "5.0.255",
-    "express": "^4.22.3"
+    "@ai-sdk/openai": "2.0.133",
+    "ai": "5.0.273",
+    "express": "^5.2.1"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",
-    "@types/node": "^22.20.1",
+    "@types/node": "^26.6.1",
     "prettier": "3.9.8",
-    "tsx": "4.23.2",
+    "tsx": "4.23.13",
     "typescript": "^5.9.3"
   },
   "overrides": {
-    "undici": "7.29.1",
+    "undici": "7.30.1",
     "qs": "6.16.0"
   }
 }

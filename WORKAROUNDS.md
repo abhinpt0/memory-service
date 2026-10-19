@@ -71,3 +71,9 @@
 - What: Keep the TypeScript memory client on Undici 7.x. Compatible 7.x security patches can still be applied after release-age checks.
 - Why: Undici 8.10.2 fails the Unix-domain-socket response-resumption tutorial with `InvalidArgumentError: invalid onRequestStart method` in the request-handler interface used by Node fetch.
 - Proper fix: Migrate the dispatcher integration to the Undici 8 handler API, then verify the complete Unix-domain-socket site scenarios before lifting the major-version hold.
+
+## AI SDK transitive Undici security override
+
+- What: Override the compatible AI SDK dependency graph to Undici 7.30.1 in the TypeScript library and examples.
+- Why: `@ai-sdk/provider-utils` 3.0.41 requests Undici 5.29.0, which retains known security vulnerabilities. The examples already override this dependency; the library now applies the same security constraint.
+- Proper fix: Adopt a compatible AI SDK release that requests a fixed Undici version, then remove the overrides after the TypeScript and site tests pass.

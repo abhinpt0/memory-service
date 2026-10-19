@@ -43,7 +43,9 @@ const selectedVersion = versions.find((v) => v.current) || versions[0];
 ---
 
 <div class="version-selector">
-  <label for="version-select" class="sr-only">Select documentation version</label>
+  <label for="version-select" class="sr-only">
+    Select documentation version
+  </label>
   <div class="relative">
     <select
       id="version-select"
@@ -53,13 +55,11 @@ const selectedVersion = versions.find((v) => v.current) || versions[0];
              focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent
              cursor-pointer"
     >
-      {
-        versions.map((v) => (
-          <option value={v.path} selected={v.current}>
-            {v.version === "latest" ? "Latest (main)" : v.version}
-          </option>
-        ))
-      }
+      {versions.map((v) => (
+        <option value={v.path} selected={v.current}>
+          {v.version === "latest" ? "Latest (main)" : v.version}
+        </option>
+      ))}
     </select>
     <div class="absolute inset-y-0 right-0 flex items-center pr-2 pointer-events-none">
       <svg class="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -68,16 +68,14 @@ const selectedVersion = versions.find((v) => v.current) || versions[0];
     </div>
   </div>
 
-  {
-    versions.length > 1 && (
-      <a
-        href={`${basePath}docs/versions/`}
-        class="block mt-2 text-xs text-gray-500 dark:text-gray-400 hover:text-primary-600 dark:hover:text-primary-400 transition-colors"
-      >
-        View all versions
-      </a>
-    )
-  }
+  {versions.length > 1 && (
+    <a
+      href={`${basePath}docs/versions/`}
+      class="block mt-2 text-xs text-gray-500 dark:text-gray-400 hover:text-primary-600 dark:hover:text-primary-400 transition-colors"
+    >
+      View all versions
+    </a>
+  )}
 </div>
 
 <script>

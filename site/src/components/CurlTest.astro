@@ -52,13 +52,11 @@ const renderedExampleOutput = hasExampleOutput ? prettyExampleOutput(exampleOutp
 
 <div class="curl-test">
   <slot />
-  {
-    hasExampleOutput && (
-      <div class="example-output">
-        <p>Example output:</p>
-        <Code code={renderedExampleOutput} lang={resolvedExampleOutputLang} />
-      </div>
-    )
-  }
+  {hasExampleOutput && (
+    <div class="example-output">
+      <p>Example output:</p>
+      <Code code={renderedExampleOutput} lang={resolvedExampleOutputLang} />
+    </div>
+  )}
   {steps && <div class="steps" hidden data-steps={steps} />}
 </div>
