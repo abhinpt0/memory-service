@@ -65,3 +65,9 @@
 - What: Invoke `wt add` from the canonical checkout after checking it has no tracked changes, and derive new worktree paths from the common Git directory.
 - Why: `wt add` creates siblings of the canonical checkout and copies tracked changes from its caller. Running it from a dirty linked worktree can contaminate a dependency validation batch.
 - Proper fix: Add an option to `wt add` that creates a clean worktree at an explicit base commit without copying caller changes.
+
+## Undici 8 dispatcher compatibility
+
+- What: Keep the TypeScript memory client on Undici 7.x. Compatible 7.x security patches can still be applied after release-age checks.
+- Why: Undici 8.10.2 fails the Unix-domain-socket response-resumption tutorial with `InvalidArgumentError: invalid onRequestStart method` in the request-handler interface used by Node fetch.
+- Proper fix: Migrate the dispatcher integration to the Undici 8 handler API, then verify the complete Unix-domain-socket site scenarios before lifting the major-version hold.

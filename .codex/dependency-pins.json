@@ -426,6 +426,19 @@
       "introducedBy": "dependency-update",
       "introducedAt": "2026-10-19",
       "reviewAfter": "next dependency update"
+    },
+    {
+      "ecosystem": "npm",
+      "name": "undici",
+      "pinnedVersion": "7.x (currently 7.30.0)",
+      "location": "typescript/vercelai/package.json",
+      "class": "user-defined",
+      "reason": "Undici 8.10.2 fails the Unix-domain-socket response-resumption tutorial with InvalidArgumentError: invalid onRequestStart method. Keep the 7.x dispatcher API; compatible 7.x security patches remain eligible after release-age checks.",
+      "introducedBy": "dependency-update",
+      "introducedAt": "2026-10-19",
+      "blockedVersion": "8.10.2",
+      "reviewAfter": "when the Undici 8 dispatcher migration passes the Unix-domain-socket site scenarios",
+      "verification": "task test:site"
     }
   ],
   "securityExceptions": [
