@@ -149,7 +149,9 @@ tasks:
       - |
         CGO_ENABLED=1 go run gotest.tools/gotestsum --format {{.GOTESTSUM_FMT | default .DEFAULT_GOTESTSUM_FMT}} -- -race -tags='sqlite_fts5 auth_testfixtures' -run 'TestFeaturesSQLiteMemoryKindRegressions$' ./internal/bdd/ {{.CLI_ARGS}}
       - |
-        CGO_ENABLED=1 go run gotest.tools/gotestsum --format {{.GOTESTSUM_FMT | default .DEFAULT_GOTESTSUM_FMT}} -- -race -tags='sqlite_fts5 auth_testfixtures' -run 'TestFeaturesSQLite/(conversations-rest|conversation-lineage-rest)$' ./internal/bdd/ {{.CLI_ARGS}}
+        CGO_ENABLED=1 go run gotest.tools/gotestsum --format {{.GOTESTSUM_FMT | default .DEFAULT_GOTESTSUM_FMT}} -- -race -tags='sqlite_fts5 auth_testfixtures' -run '^TestFeaturesSQLite$/(conversations-rest|conversation-lineage-rest|mcp-sqlite)$' ./internal/bdd/ {{.CLI_ARGS}}
+      - |
+        CGO_ENABLED=1 go run gotest.tools/gotestsum --format {{.GOTESTSUM_FMT | default .DEFAULT_GOTESTSUM_FMT}} -- -race -tags='sqlite_fts5 auth_testfixtures' -run '^TestFeaturesSQLiteVec$' ./internal/bdd/ {{.CLI_ARGS}}
       - |
         CGO_ENABLED=1 go run gotest.tools/gotestsum --format {{.GOTESTSUM_FMT | default .DEFAULT_GOTESTSUM_FMT}} -- -race -tags='sqlite_fts5 auth_testfixtures' -run 'TestFeaturesSQLiteOutbox$' ./internal/bdd/ {{.CLI_ARGS}}
       - |
