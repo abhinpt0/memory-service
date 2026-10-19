@@ -61,15 +61,13 @@ const fullTitle = title === siteTitle || !title ? siteTitle : `${title} | ${site
       </div>
 
       <!-- Table of Contents (right sidebar, desktop only) -->
-      {
-        headings.length > 0 && (
-          <aside class="hidden xl:block w-64 flex-shrink-0">
-            <div class="sticky top-20 max-h-[calc(100vh-5rem)] overflow-y-auto py-8 pr-4">
-              <TableOfContents headings={headings} />
-            </div>
-          </aside>
-        )
-      }
+      {headings.length > 0 && (
+        <aside class="hidden xl:block w-64 flex-shrink-0">
+          <div class="sticky top-20 max-h-[calc(100vh-5rem)] overflow-y-auto py-8 pr-4">
+            <TableOfContents headings={headings} />
+          </div>
+        </aside>
+      )}
     </div>
 
     <Footer />
@@ -181,7 +179,6 @@ const fullTitle = title === siteTitle || !title ? siteTitle : `${title} | ${site
         pre.appendChild(btn);
       });
     </script>
-
     <script type="module">
       const mermaidBlocks = document.querySelectorAll("pre.mermaid");
       if (mermaidBlocks.length > 0) {

@@ -201,73 +201,71 @@ function isSectionExpanded(section: NavSection) {
 ---
 
 <nav class="px-4 pb-8" aria-label="Documentation navigation">
-  {
-    navigation.map((section) => (
-      <div
-        class:list={[
-          "sidebar-section",
-          section.collapsible && "sidebar-section-collapsible",
-          section.collapsible && !isSectionExpanded(section) && "sidebar-section-collapsed",
-        ]}
-      >
-        {section.href ? (
-          <a
-            href={getFullHref(section.href)}
-            class:list={[
-              "sidebar-heading",
-              section.collapsible && "sidebar-heading-collapsible",
-              isExactActive(section.href) && "sidebar-heading-active",
-              isSectionExpanded(section) && "mb-2",
-            ]}
-          >
-            {section.collapsible && (
-              <svg
-                class:list={["sidebar-chevron", isSectionExpanded(section) && "sidebar-chevron-expanded"]}
-                viewBox="0 0 16 16"
-                fill="currentColor"
+  {navigation.map((section) => (
+    <div
+      class:list={[
+        "sidebar-section",
+        section.collapsible && "sidebar-section-collapsible",
+        section.collapsible && !isSectionExpanded(section) && "sidebar-section-collapsed",
+      ]}
+    >
+      {section.href ? (
+        <a
+          href={getFullHref(section.href)}
+          class:list={[
+            "sidebar-heading",
+            section.collapsible && "sidebar-heading-collapsible",
+            isExactActive(section.href) && "sidebar-heading-active",
+            isSectionExpanded(section) && "mb-2",
+          ]}
+        >
+          {section.collapsible && (
+            <svg
+              class:list={["sidebar-chevron", isSectionExpanded(section) && "sidebar-chevron-expanded"]}
+              viewBox="0 0 16 16"
+              fill="currentColor"
+            >
+              <path d="M6.22 4.22a.75.75 0 0 1 1.06 0l3.25 3.25a.75.75 0 0 1 0 1.06l-3.25 3.25a.75.75 0 0 1-1.06-1.06L8.94 8 6.22 5.28a.75.75 0 0 1 0-1.06Z" />
+            </svg>
+          )}
+          <h3>{section.title}</h3>
+        </a>
+      ) : (
+        <h3 class="sidebar-heading mb-2">{section.title}</h3>
+      )}
+      {isSectionExpanded(section) && section.items.length > 0 && (
+        <ul class:list={["space-y-1", section.collapsible && "sidebar-items-indented"]}>
+          {section.items.map((item) => (
+            <li>
+              <a
+                href={getFullHref(item.href)}
+                class:list={["sidebar-link", isActive(item.href) && "sidebar-link-active"]}
+                aria-current={isActive(item.href) ? "page" : undefined}
               >
-                <path d="M6.22 4.22a.75.75 0 0 1 1.06 0l3.25 3.25a.75.75 0 0 1 0 1.06l-3.25 3.25a.75.75 0 0 1-1.06-1.06L8.94 8 6.22 5.28a.75.75 0 0 1 0-1.06Z" />
-              </svg>
-            )}
-            <h3>{section.title}</h3>
-          </a>
-        ) : (
-          <h3 class="sidebar-heading mb-2">{section.title}</h3>
-        )}
-        {isSectionExpanded(section) && section.items.length > 0 && (
-          <ul class:list={["space-y-1", section.collapsible && "sidebar-items-indented"]}>
-            {section.items.map((item) => (
-              <li>
-                <a
-                  href={getFullHref(item.href)}
-                  class:list={["sidebar-link", isActive(item.href) && "sidebar-link-active"]}
-                  aria-current={isActive(item.href) ? "page" : undefined}
-                >
-                  {item.label}
-                </a>
-                {item.items && (
-                  <ul class="space-y-1 mt-1">
-                    {item.items.map((subItem) => (
-                      <li>
-                        <a
-                          href={getFullHref(subItem.href)}
-                          class:list={[
-                            "sidebar-link sidebar-link-nested",
-                            isActive(subItem.href) && "sidebar-link-active",
-                          ]}
-                          aria-current={isActive(subItem.href) ? "page" : undefined}
-                        >
-                          {subItem.label}
-                        </a>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-    ))
-  }
+                {item.label}
+              </a>
+              {item.items && (
+                <ul class="space-y-1 mt-1">
+                  {item.items.map((subItem) => (
+                    <li>
+                      <a
+                        href={getFullHref(subItem.href)}
+                        class:list={[
+                          "sidebar-link sidebar-link-nested",
+                          isActive(subItem.href) && "sidebar-link-active",
+                        ]}
+                        aria-current={isActive(subItem.href) ? "page" : undefined}
+                      >
+                        {subItem.label}
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  ))}
 </nav>
