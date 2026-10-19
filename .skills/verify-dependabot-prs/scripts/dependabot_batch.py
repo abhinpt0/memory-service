@@ -228,7 +228,8 @@ def common_git_dir(root: Path) -> Path:
 
 
 def worktree_path(root: Path, name: str) -> Path:
-    return root.parent / f"{root.name}@{name}"
+    main_checkout = common_git_dir(root).parent
+    return main_checkout.parent / f"{main_checkout.name}@{name}"
 
 
 def fetch_refs(
@@ -267,7 +268,11 @@ def prepare_worktree(
     path = worktree_path(root, name)
     if path.exists():
         raise BatchError(f"worktree path already exists: {path}")
-    command(["wt", "add", name], cwd=root, capture=False)
+    # wt copies tracked changes from its current checkout into the new worktree.
+    main_checkout = common_git_dir(root).parent
+    if command(["git", "status", "--porcelain", "--untracked-files=no"], cwd=main_checkout).stdout.strip():
+        raise BatchError("canonical checkout has tracked changes; cannot create a clean validation worktree")
+    command(["wt", "add", name], cwd=main_checkout, capture=False)
     command(["git", "switch", "-c", branch, base_ref], cwd=path)
     for pr in prs:
         ref = f"refs/dependabot-batch/{namespace}/pr-{pr['number']}"
@@ -498,6 +503,9 @@ def run_batch(args: argparse.Namespace) -> None:
     timestamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d")
     name = args.name or f"dependabot-{timestamp}-{batch_id[:8]}"
     branch = f"chore/dependabot-batch-{timestamp}-{batch_id[:8]}"
+    if args.name:
+        retry_id = hashlib.sha256(args.name.encode("utf-8")).hexdigest()[:6]
+        branch = f"{branch}-{retry_id}"
     if args.dry_run:
         dry_run(prs, default_branch, base, branch, report_path)
         return

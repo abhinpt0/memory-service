@@ -17,7 +17,7 @@
       "ecosystem": "python",
       "name": "uv exclude-newer",
       "pinnedVersion": "2026-10-07T13:08:05.687960Z",
-      "location": "python/uv.lock and Python doc-checkpoint uv.lock files",
+      "location": "python/uv.lock and Python doc-checkpoint uv.lock files except langchain/01-basic-agent",
       "class": "temporary cooldown",
       "reason": "Keep security lockfile resolution on releases published at least seven full days before the 2026-10-14 update.",
       "introducedBy": "dependency-update",
@@ -76,10 +76,12 @@
       "pinnedVersion": "9.8@sha256:5e68f09a652ac6627a83c57655e42e24575efb278b54336039c9308607fc6b21",
       "location": "Dockerfile",
       "class": "temporary cooldown",
-      "reason": "The replacement 9.8 digest was built 2026-09-23 and remains inside the seven-day cooldown. The prior cooldown has expired; this security PR batch preserves the existing Go, image, and CI tool versions.",
+      "reason": "The replacement 9.8 digest sha256:60fd6fb2998c40ad0d6561c34e83588b986a0cf7771f64e5e5c295ba87101f9b was built 2026-10-14T20:46:01Z and remains inside the seven-day cooldown.",
       "introducedBy": "dependency-update",
       "introducedAt": "2026-09-25",
-      "reviewAfter": "next general dependency update"
+      "reviewAfter": "2026-10-21T20:46:01Z",
+      "blockedVersion": "9.8@sha256:60fd6fb2998c40ad0d6561c34e83588b986a0cf7771f64e5e5c295ba87101f9b",
+      "blockedPublishedAt": "2026-10-14T20:46:01Z"
     },
     {
       "ecosystem": "docker",
@@ -87,23 +89,12 @@
       "pinnedVersion": "latest@sha256:7fbeae18dc9476399f565e68255f602a3374ea8614ba3d14843565131a13ff93",
       "location": "Dockerfile",
       "class": "temporary cooldown",
-      "reason": "The exact publication time of the replacement digest has not been verified for the seven-day gate; keep the known digest.",
+      "reason": "The replacement digest sha256:c4c285d42941ebb2bd4da878479008e1e4536bb599aad1dbe568f89de9053661 was built 2026-10-13T13:35:56Z and remains inside the seven-day cooldown.",
       "introducedBy": "dependency-update",
       "introducedAt": "2026-09-25",
-      "reviewAfter": "next dependency update"
-    },
-    {
-      "ecosystem": "go",
-      "name": "github.com/mark3labs/mcp-go",
-      "pinnedVersion": "v1.1.0",
-      "location": "go.mod",
-      "class": "temporary cooldown",
-      "reason": "v1.1.1 was published 2026-09-23 and remains inside the seven-day cooldown. The prior cooldown has expired; this security PR batch preserves the existing Go, image, and CI tool versions.",
-      "introducedBy": "dependency-update",
-      "introducedAt": "2026-09-25",
-      "blockedVersion": "v1.1.1",
-      "blockedPublishedAt": "2026-09-23T13:14:55Z",
-      "reviewAfter": "next general dependency update"
+      "reviewAfter": "2026-10-20T13:35:56Z",
+      "blockedVersion": "latest@sha256:c4c285d42941ebb2bd4da878479008e1e4536bb599aad1dbe568f89de9053661",
+      "blockedPublishedAt": "2026-10-13T13:35:56Z"
     },
     {
       "ecosystem": "go",
@@ -116,19 +107,6 @@
       "introducedAt": "2026-09-25",
       "blockedVersion": "v1.25.3",
       "blockedPublishedAt": "2026-09-25T17:14:49Z",
-      "reviewAfter": "next general dependency update"
-    },
-    {
-      "ecosystem": "go",
-      "name": "github.com/klauspost/compress",
-      "pinnedVersion": "v1.19.2",
-      "location": "go.mod (transitive, selected by go mod tidy)",
-      "class": "temporary cooldown",
-      "reason": "v1.20.1 was published 2026-09-25 and remains inside the seven-day cooldown. The prior cooldown has expired; this security PR batch preserves the existing Go, image, and CI tool versions.",
-      "introducedBy": "dependency-update",
-      "introducedAt": "2026-09-25",
-      "blockedVersion": "v1.20.1",
-      "blockedPublishedAt": "2026-09-25T08:00:35Z",
       "reviewAfter": "next general dependency update"
     },
     {
@@ -269,32 +247,6 @@
       "blockedVersion": "1.24-3.1789566911",
       "blockedPublishedAt": "2026-09-16",
       "reviewAfter": "next dependency update with Docker build verification"
-    },
-    {
-      "ecosystem": "go",
-      "name": "google.golang.org/grpc",
-      "pinnedVersion": "v1.83.2",
-      "location": "go.mod direct require",
-      "class": "user-defined",
-      "reason": "Verification hold: the Go vulnerability database flags gRPC v1.84.0 for GO-2026-6443 although the maintainer advisory lists it as fixed; google.golang.org/api v0.299.0 selects gRPC v1.84.0. See WORKAROUNDS.md.",
-      "introducedBy": "dependency-update",
-      "introducedAt": "2026-09-29",
-      "blockedVersion": "v1.84.0",
-      "reviewAfter": "when Go vulnerability database corrects the range or a newer stable gRPC passes govulncheck",
-      "verification": "go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./..."
-    },
-    {
-      "ecosystem": "go",
-      "name": "google.golang.org/api",
-      "pinnedVersion": "v0.298.0",
-      "location": "go.mod indirect require",
-      "class": "user-defined",
-      "reason": "Verification hold: the Go vulnerability database flags gRPC v1.84.0 for GO-2026-6443 although the maintainer advisory lists it as fixed; google.golang.org/api v0.299.0 selects gRPC v1.84.0. See WORKAROUNDS.md.",
-      "introducedBy": "dependency-update",
-      "introducedAt": "2026-09-29",
-      "blockedVersion": "v0.299.0",
-      "reviewAfter": "when Go vulnerability database corrects the range or a newer stable gRPC passes govulncheck",
-      "verification": "go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./..."
     },
     {
       "ecosystem": "npm",
@@ -463,6 +415,30 @@
       "reason": "Existing project override; retained during this security update.",
       "introducedBy": "project",
       "reviewAfter": "explicit project review"
+    },
+    {
+      "ecosystem": "python",
+      "name": "uv exclude-newer",
+      "pinnedVersion": "2026-10-12T13:00:00Z",
+      "location": "python/examples/langchain/doc-checkpoints/01-basic-agent/uv.lock",
+      "class": "temporary cooldown",
+      "reason": "Keep the HTTPX2 security lockfile update on releases at least seven full days old at the 2026-10-19 review.",
+      "introducedBy": "dependency-update",
+      "introducedAt": "2026-10-19",
+      "reviewAfter": "next dependency update"
+    },
+    {
+      "ecosystem": "npm",
+      "name": "undici",
+      "pinnedVersion": "7.x (currently 7.30.0)",
+      "location": "typescript/vercelai/package.json",
+      "class": "user-defined",
+      "reason": "Undici 8.10.2 fails the Unix-domain-socket response-resumption tutorial with InvalidArgumentError: invalid onRequestStart method. Keep the 7.x dispatcher API; compatible 7.x security patches remain eligible after release-age checks.",
+      "introducedBy": "dependency-update",
+      "introducedAt": "2026-10-19",
+      "blockedVersion": "8.10.2",
+      "reviewAfter": "when the Undici 8 dispatcher migration passes the Unix-domain-socket site scenarios",
+      "verification": "task test:site"
     }
   ],
   "securityExceptions": [
