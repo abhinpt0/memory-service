@@ -65,3 +65,9 @@
 - **What:** `indexEntries()` in `internal/loadtest/generator/seeder.go` sleeps 50ms between each batch of `POST /v1/conversations/index` requests.
 - **Why:** Seeding 2000+ conversations generates 200k+ index writes with up to 5000-char entry text content. Without pacing, the WAL write rate outpaces Postgres checkpoint flushes on a local dev instance, causing `PANIC: could not write to file "pg_wal/xlogtemp.*": No space left on device` and crashing Postgres into recovery mode. The 50ms sleep lets Postgres checkpoint between bursts and prevents the spike.
 - **Proper fix:** Run the large-scale seed against a Postgres instance with tuned WAL settings (`max_wal_size`, `wal_buffers`, `shared_buffers`) as noted in issue #598. A compose override for load testing would remove the need for this pacing entirely.
+
+## Dependabot batch worktree isolation
+
+- What: Invoke `wt add` from the canonical checkout after checking it has no tracked changes, and derive new worktree paths from the common Git directory.
+- Why: `wt add` creates siblings of the canonical checkout and copies tracked changes from its caller. Running it from a dirty linked worktree can contaminate a dependency validation batch.
+- Proper fix: Add an option to `wt add` that creates a clean worktree at an explicit base commit without copying caller changes.
