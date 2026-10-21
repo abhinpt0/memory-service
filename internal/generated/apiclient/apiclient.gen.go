@@ -794,6 +794,12 @@ type CreateConversationRequest struct {
 	// AgentId Optional logical agent associated with this conversation.
 	AgentId *string `json:"agentId,omitempty"`
 
+	// ForkedAtConversationId ID of the parent conversation to fork from. Required when creating a forked conversation. Must be an existing, non-archived conversation accessible to the authenticated user.
+	ForkedAtConversationId *string `json:"forkedAtConversationId,omitempty"`
+
+	// ForkedAtEntryId First parent entry excluded by this fork. When provided, the fork inherits all parent entries before this entry; this entry and any after it are excluded. Valid anchors are history and journal entries visible to the authenticated client; context entries cannot be fork anchors. Omit (or set to null) for a blank-slate fork that inherits no parent entries.
+	ForkedAtEntryId *openapi_types.UUID `json:"forkedAtEntryId,omitempty"`
+
 	// Id Optional client-supplied conversation ID. When provided, the server creates the conversation with exactly this ID instead of generating one. Useful for agents that need a deterministic conversation ID derived from an external thread identifier.
 	Id *string `json:"id,omitempty"`
 
@@ -837,7 +843,7 @@ type CreateEntryRequest struct {
 	// agent context entries.
 	ContentType string `json:"contentType"`
 
-	// ConversationPatch Optional inline conversation patch applied with the entry. PostgreSQL and SQLite commit both changes atomically in one transaction. MongoDB does the same when the outbox is enabled. Otherwise, MongoDB applies the entry and patch as separate operations. Supports `title`, `metadata` merge-patch (keys present are set, keys absent are left unchanged, keys explicitly set to `null` are removed), and `archived`. Setting `archived: false` allows the append on an archived conversation and unarchives it as part of the append; setting `archived: true` archives it after. Plain appends without this field are blocked on archived conversations — use `archived: false` here (or `PATCH /v1/conversations/{id}`) to unarchive first. Requires writer or higher access on the conversation (owner access for archive/unarchive). For batch requests (`entries[]`), this field is at the top level and applies once to the conversation, not per-entry.
+	// ConversationPatch Optional inline conversation patch applied atomically with the entry on every supported datastore. Supports `title`, `metadata` merge-patch (keys present are set, keys absent are left unchanged, keys explicitly set to `null` are removed), and `archived`. Setting `archived: false` allows the append on an archived conversation and unarchives it as part of the append; setting `archived: true` archives it after. Plain appends without this field are blocked on archived conversations — use `archived: false` here (or `PATCH /v1/conversations/{id}`) to unarchive first. Requires writer or higher access on the conversation (owner access for archive/unarchive). For batch requests (`entries[]`), this field is at the top level and applies once to the conversation, not per-entry.
 	ConversationPatch *UpdateConversationRequest `json:"conversationPatch,omitempty"`
 
 	// ForkedAtConversationId If the target conversation doesn't exist yet, auto-create it as a fork of this conversation. Ignored when the conversation already exists.
@@ -1962,6 +1968,18 @@ type ClientInterface interface {
 	//
 	// Creates a new conversation owned by the current user.
 	//
+	// **Idempotency**: When a conversation ID is provided in the request, this
+	// operation is idempotent. If the exact same conversation already exists,
+	// the operation returns 200 OK with the existing conversation. If a
+	// conversation with the same ID exists but differs in any compared field,
+	// the operation returns 409 Conflict with error code
+	// `conversation_already_exists`.
+	//
+	// The complete equivalence rule: all of `title`, `metadata`, `agentId`,
+	// `forkedAtConversationId`, `forkedAtEntryId` must match, and the
+	// authenticated user identity and client identity (derived from the
+	// authentication token) must also match.
+	//
 	// Takes any type of body and a specified content type.
 	//
 	// Corresponds with POST /v1/conversations (the `CreateConversation` operationId).
@@ -1970,6 +1988,18 @@ type ClientInterface interface {
 	// CreateConversation Create a conversation
 	//
 	// Creates a new conversation owned by the current user.
+	//
+	// **Idempotency**: When a conversation ID is provided in the request, this
+	// operation is idempotent. If the exact same conversation already exists,
+	// the operation returns 200 OK with the existing conversation. If a
+	// conversation with the same ID exists but differs in any compared field,
+	// the operation returns 409 Conflict with error code
+	// `conversation_already_exists`.
+	//
+	// The complete equivalence rule: all of `title`, `metadata`, `agentId`,
+	// `forkedAtConversationId`, `forkedAtEntryId` must match, and the
+	// authenticated user identity and client identity (derived from the
+	// authentication token) must also match.
 	//
 	// Takes a body of the `application/json` content type.
 	//
@@ -2123,13 +2153,11 @@ type ClientInterface interface {
 	// A batch containing a sequence number uses its first sequenced entry as a
 	// conversation-scoped retry anchor. An identical retry returns the original
 	// entries in request order, including their IDs and timestamps. Changed
-	// content, order, or batch length returns 409 Conflict. PostgreSQL and SQLite
-	// commit the entire batch atomically. MongoDB also commits atomically when
-	// the outbox is enabled. Otherwise, it can resume missing positions and finish
-	// the original inline conversation patch from the saved batch definition.
-	// Completed batch retries do not emit append
-	// events or reapply conversation patches. Fully unsequenced batches have no
-	// retry guarantee. History projections can keep their sequence unset.
+	// content, order, or batch length returns 409 Conflict. Every supported
+	// datastore commits the entire batch atomically. Completed batch retries do
+	// not emit append events or reapply conversation patches. Fully unsequenced
+	// batches have no retry guarantee. History projections can keep their sequence
+	// unset.
 	//
 	// This endpoint is used by both end-user clients and agents.
 	// The service determines whether the caller is a user or an agent
@@ -2149,13 +2177,11 @@ type ClientInterface interface {
 	// A batch containing a sequence number uses its first sequenced entry as a
 	// conversation-scoped retry anchor. An identical retry returns the original
 	// entries in request order, including their IDs and timestamps. Changed
-	// content, order, or batch length returns 409 Conflict. PostgreSQL and SQLite
-	// commit the entire batch atomically. MongoDB also commits atomically when
-	// the outbox is enabled. Otherwise, it can resume missing positions and finish
-	// the original inline conversation patch from the saved batch definition.
-	// Completed batch retries do not emit append
-	// events or reapply conversation patches. Fully unsequenced batches have no
-	// retry guarantee. History projections can keep their sequence unset.
+	// content, order, or batch length returns 409 Conflict. Every supported
+	// datastore commits the entire batch atomically. Completed batch retries do
+	// not emit append events or reapply conversation patches. Fully unsequenced
+	// batches have no retry guarantee. History projections can keep their sequence
+	// unset.
 	//
 	// This endpoint is used by both end-user clients and agents.
 	// The service determines whether the caller is a user or an agent
@@ -2649,6 +2675,18 @@ func (c *Client) ListConversations(ctx context.Context, params *ListConversation
 //
 // Creates a new conversation owned by the current user.
 //
+// **Idempotency**: When a conversation ID is provided in the request, this
+// operation is idempotent. If the exact same conversation already exists,
+// the operation returns 200 OK with the existing conversation. If a
+// conversation with the same ID exists but differs in any compared field,
+// the operation returns 409 Conflict with error code
+// `conversation_already_exists`.
+//
+// The complete equivalence rule: all of `title`, `metadata`, `agentId`,
+// `forkedAtConversationId`, `forkedAtEntryId` must match, and the
+// authenticated user identity and client identity (derived from the
+// authentication token) must also match.
+//
 // Takes any type of body and a specified content type.
 //
 // Corresponds with POST /v1/conversations (the `CreateConversation` operationId).
@@ -2667,6 +2705,18 @@ func (c *Client) CreateConversationWithBody(ctx context.Context, contentType str
 // CreateConversation Create a conversation
 //
 // Creates a new conversation owned by the current user.
+//
+// **Idempotency**: When a conversation ID is provided in the request, this
+// operation is idempotent. If the exact same conversation already exists,
+// the operation returns 200 OK with the existing conversation. If a
+// conversation with the same ID exists but differs in any compared field,
+// the operation returns 409 Conflict with error code
+// `conversation_already_exists`.
+//
+// The complete equivalence rule: all of `title`, `metadata`, `agentId`,
+// `forkedAtConversationId`, `forkedAtEntryId` must match, and the
+// authenticated user identity and client identity (derived from the
+// authentication token) must also match.
 //
 // Takes a body of the `application/json` content type.
 //
@@ -2930,13 +2980,11 @@ func (c *Client) ListConversationEntries(ctx context.Context, conversationId str
 // A batch containing a sequence number uses its first sequenced entry as a
 // conversation-scoped retry anchor. An identical retry returns the original
 // entries in request order, including their IDs and timestamps. Changed
-// content, order, or batch length returns 409 Conflict. PostgreSQL and SQLite
-// commit the entire batch atomically. MongoDB also commits atomically when
-// the outbox is enabled. Otherwise, it can resume missing positions and finish
-// the original inline conversation patch from the saved batch definition.
-// Completed batch retries do not emit append
-// events or reapply conversation patches. Fully unsequenced batches have no
-// retry guarantee. History projections can keep their sequence unset.
+// content, order, or batch length returns 409 Conflict. Every supported
+// datastore commits the entire batch atomically. Completed batch retries do
+// not emit append events or reapply conversation patches. Fully unsequenced
+// batches have no retry guarantee. History projections can keep their sequence
+// unset.
 //
 // This endpoint is used by both end-user clients and agents.
 // The service determines whether the caller is a user or an agent
@@ -2966,13 +3014,11 @@ func (c *Client) AppendConversationEntryWithBody(ctx context.Context, conversati
 // A batch containing a sequence number uses its first sequenced entry as a
 // conversation-scoped retry anchor. An identical retry returns the original
 // entries in request order, including their IDs and timestamps. Changed
-// content, order, or batch length returns 409 Conflict. PostgreSQL and SQLite
-// commit the entire batch atomically. MongoDB also commits atomically when
-// the outbox is enabled. Otherwise, it can resume missing positions and finish
-// the original inline conversation patch from the saved batch definition.
-// Completed batch retries do not emit append
-// events or reapply conversation patches. Fully unsequenced batches have no
-// retry guarantee. History projections can keep their sequence unset.
+// content, order, or batch length returns 409 Conflict. Every supported
+// datastore commits the entire batch atomically. Completed batch retries do
+// not emit append events or reapply conversation patches. Fully unsequenced
+// batches have no retry guarantee. History projections can keep their sequence
+// unset.
 //
 // This endpoint is used by both end-user clients and agents.
 // The service determines whether the caller is a user or an agent
@@ -5998,6 +6044,18 @@ type ClientWithResponsesInterface interface {
 	//
 	// Creates a new conversation owned by the current user.
 	//
+	// **Idempotency**: When a conversation ID is provided in the request, this
+	// operation is idempotent. If the exact same conversation already exists,
+	// the operation returns 200 OK with the existing conversation. If a
+	// conversation with the same ID exists but differs in any compared field,
+	// the operation returns 409 Conflict with error code
+	// `conversation_already_exists`.
+	//
+	// The complete equivalence rule: all of `title`, `metadata`, `agentId`,
+	// `forkedAtConversationId`, `forkedAtEntryId` must match, and the
+	// authenticated user identity and client identity (derived from the
+	// authentication token) must also match.
+	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 	//
 	// Corresponds with POST /v1/conversations (the `CreateConversation` operationId).
@@ -6006,6 +6064,18 @@ type ClientWithResponsesInterface interface {
 	// CreateConversationWithResponse Create a conversation
 	//
 	// Creates a new conversation owned by the current user.
+	//
+	// **Idempotency**: When a conversation ID is provided in the request, this
+	// operation is idempotent. If the exact same conversation already exists,
+	// the operation returns 200 OK with the existing conversation. If a
+	// conversation with the same ID exists but differs in any compared field,
+	// the operation returns 409 Conflict with error code
+	// `conversation_already_exists`.
+	//
+	// The complete equivalence rule: all of `title`, `metadata`, `agentId`,
+	// `forkedAtConversationId`, `forkedAtEntryId` must match, and the
+	// authenticated user identity and client identity (derived from the
+	// authentication token) must also match.
 	//
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -6167,13 +6237,11 @@ type ClientWithResponsesInterface interface {
 	// A batch containing a sequence number uses its first sequenced entry as a
 	// conversation-scoped retry anchor. An identical retry returns the original
 	// entries in request order, including their IDs and timestamps. Changed
-	// content, order, or batch length returns 409 Conflict. PostgreSQL and SQLite
-	// commit the entire batch atomically. MongoDB also commits atomically when
-	// the outbox is enabled. Otherwise, it can resume missing positions and finish
-	// the original inline conversation patch from the saved batch definition.
-	// Completed batch retries do not emit append
-	// events or reapply conversation patches. Fully unsequenced batches have no
-	// retry guarantee. History projections can keep their sequence unset.
+	// content, order, or batch length returns 409 Conflict. Every supported
+	// datastore commits the entire batch atomically. Completed batch retries do
+	// not emit append events or reapply conversation patches. Fully unsequenced
+	// batches have no retry guarantee. History projections can keep their sequence
+	// unset.
 	//
 	// This endpoint is used by both end-user clients and agents.
 	// The service determines whether the caller is a user or an agent
@@ -6193,13 +6261,11 @@ type ClientWithResponsesInterface interface {
 	// A batch containing a sequence number uses its first sequenced entry as a
 	// conversation-scoped retry anchor. An identical retry returns the original
 	// entries in request order, including their IDs and timestamps. Changed
-	// content, order, or batch length returns 409 Conflict. PostgreSQL and SQLite
-	// commit the entire batch atomically. MongoDB also commits atomically when
-	// the outbox is enabled. Otherwise, it can resume missing positions and finish
-	// the original inline conversation patch from the saved batch definition.
-	// Completed batch retries do not emit append
-	// events or reapply conversation patches. Fully unsequenced batches have no
-	// retry guarantee. History projections can keep their sequence unset.
+	// content, order, or batch length returns 409 Conflict. Every supported
+	// datastore commits the entire batch atomically. Completed batch retries do
+	// not emit append events or reapply conversation patches. Fully unsequenced
+	// batches have no retry guarantee. History projections can keep their sequence
+	// unset.
 	//
 	// This endpoint is used by both end-user clients and agents.
 	// The service determines whether the caller is a user or an agent
@@ -6949,15 +7015,36 @@ func (r ListConversationsResp) ContentType() string {
 type CreateConversationResp struct {
 	Body         []byte
 	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *Conversation
 	// JSON201 the response for an HTTP 201 `application/json` response
 	JSON201 *Conversation
+	// JSON404 the response for an HTTP 404 `application/json` response
+	JSON404 *ErrorResponse
+	// JSON409 the response for an HTTP 409 `application/json` response
+	JSON409 *ErrorResponse
 	// JSONDefault the response for an HTTP default `application/json` response
 	JSONDefault *Error
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r CreateConversationResp) GetJSON200() *Conversation {
+	return r.JSON200
 }
 
 // GetJSON201 returns the response for an HTTP 201 `application/json` response
 func (r CreateConversationResp) GetJSON201() *Conversation {
 	return r.JSON201
+}
+
+// GetJSON404 returns the response for an HTTP 404 `application/json` response
+func (r CreateConversationResp) GetJSON404() *ErrorResponse {
+	return r.JSON404
+}
+
+// GetJSON409 returns the response for an HTTP 409 `application/json` response
+func (r CreateConversationResp) GetJSON409() *ErrorResponse {
+	return r.JSON409
 }
 
 // GetJSONDefault returns the response for an HTTP default `application/json` response
@@ -8688,6 +8775,18 @@ func (c *ClientWithResponses) ListConversationsWithResponse(ctx context.Context,
 //
 // Creates a new conversation owned by the current user.
 //
+// **Idempotency**: When a conversation ID is provided in the request, this
+// operation is idempotent. If the exact same conversation already exists,
+// the operation returns 200 OK with the existing conversation. If a
+// conversation with the same ID exists but differs in any compared field,
+// the operation returns 409 Conflict with error code
+// `conversation_already_exists`.
+//
+// The complete equivalence rule: all of `title`, `metadata`, `agentId`,
+// `forkedAtConversationId`, `forkedAtEntryId` must match, and the
+// authenticated user identity and client identity (derived from the
+// authentication token) must also match.
+//
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 //
 // Corresponds with POST /v1/conversations (the `CreateConversation` operationId).
@@ -8702,6 +8801,18 @@ func (c *ClientWithResponses) CreateConversationWithBodyWithResponse(ctx context
 // CreateConversationWithResponse Create a conversation
 //
 // Creates a new conversation owned by the current user.
+//
+// **Idempotency**: When a conversation ID is provided in the request, this
+// operation is idempotent. If the exact same conversation already exists,
+// the operation returns 200 OK with the existing conversation. If a
+// conversation with the same ID exists but differs in any compared field,
+// the operation returns 409 Conflict with error code
+// `conversation_already_exists`.
+//
+// The complete equivalence rule: all of `title`, `metadata`, `agentId`,
+// `forkedAtConversationId`, `forkedAtEntryId` must match, and the
+// authenticated user identity and client identity (derived from the
+// authentication token) must also match.
 //
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 //
@@ -8929,13 +9040,11 @@ func (c *ClientWithResponses) ListConversationEntriesWithResponse(ctx context.Co
 // A batch containing a sequence number uses its first sequenced entry as a
 // conversation-scoped retry anchor. An identical retry returns the original
 // entries in request order, including their IDs and timestamps. Changed
-// content, order, or batch length returns 409 Conflict. PostgreSQL and SQLite
-// commit the entire batch atomically. MongoDB also commits atomically when
-// the outbox is enabled. Otherwise, it can resume missing positions and finish
-// the original inline conversation patch from the saved batch definition.
-// Completed batch retries do not emit append
-// events or reapply conversation patches. Fully unsequenced batches have no
-// retry guarantee. History projections can keep their sequence unset.
+// content, order, or batch length returns 409 Conflict. Every supported
+// datastore commits the entire batch atomically. Completed batch retries do
+// not emit append events or reapply conversation patches. Fully unsequenced
+// batches have no retry guarantee. History projections can keep their sequence
+// unset.
 //
 // This endpoint is used by both end-user clients and agents.
 // The service determines whether the caller is a user or an agent
@@ -8961,13 +9070,11 @@ func (c *ClientWithResponses) AppendConversationEntryWithBodyWithResponse(ctx co
 // A batch containing a sequence number uses its first sequenced entry as a
 // conversation-scoped retry anchor. An identical retry returns the original
 // entries in request order, including their IDs and timestamps. Changed
-// content, order, or batch length returns 409 Conflict. PostgreSQL and SQLite
-// commit the entire batch atomically. MongoDB also commits atomically when
-// the outbox is enabled. Otherwise, it can resume missing positions and finish
-// the original inline conversation patch from the saved batch definition.
-// Completed batch retries do not emit append
-// events or reapply conversation patches. Fully unsequenced batches have no
-// retry guarantee. History projections can keep their sequence unset.
+// content, order, or batch length returns 409 Conflict. Every supported
+// datastore commits the entire batch atomically. Completed batch retries do
+// not emit append events or reapply conversation patches. Fully unsequenced
+// batches have no retry guarantee. History projections can keep their sequence
+// unset.
 //
 // This endpoint is used by both end-user clients and agents.
 // The service determines whether the caller is a user or an agent
@@ -9793,12 +9900,33 @@ func ParseCreateConversationResp(rsp *http.Response) (*CreateConversationResp, e
 	}
 
 	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest Conversation
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
 		var dest Conversation
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
 		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON409 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest Error

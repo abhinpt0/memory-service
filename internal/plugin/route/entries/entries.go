@@ -376,8 +376,9 @@ func appendEntry(c *gin.Context, store registrystore.MemoryStore, eventBus regis
 	var result []model.Entry
 	var eventsToPublish []registryeventbus.Event
 	var retryCreatedAttachmentIDs []uuid.UUID
+	immutableEntries := cloneCreateEntryRequests(entries)
 	retryRequest := registrystore.SequencedAppendRequest{
-		Entries:  cloneCreateEntryRequests(entries),
+		Entries:  cloneCreateEntryRequests(immutableEntries),
 		UserID:   userID,
 		ClientID: clientID,
 		AgentID:  agentID,
@@ -386,6 +387,14 @@ func appendEntry(c *gin.Context, store registrystore.MemoryStore, eventBus regis
 	// Insert first, then recover through the first conversation-scoped sequence.
 	retryEligible := retryRequest.Anchor() >= 0
 	writeErr := routetx.MemoryWrite(c, store, func(ctx context.Context) error {
+		// MongoDB may replay this callback. Start each attempt from the parsed
+		// request, never from attachment IDs produced by an aborted attempt.
+		attemptEntries := cloneCreateEntryRequests(immutableEntries)
+		convExistedBefore = false
+		groupID = uuid.Nil
+		result = nil
+		eventsToPublish = nil
+
 		// Check if conversation exists before append — if not, AppendEntries will auto-create it
 		// and we need to publish a conversation/created event. Must be inside the transaction
 		// scope for SQLite which requires InReadTx/InWriteTx.
@@ -427,7 +436,7 @@ func appendEntry(c *gin.Context, store registrystore.MemoryStore, eventBus regis
 			entryIndex   int
 		}
 		var pendingLinks []pendingLink
-		for i, entry := range entries {
+		for i, entry := range attemptEntries {
 			ch := model.Channel(strings.ToLower(entry.Channel))
 			if ch != model.ChannelHistory {
 				continue
@@ -438,7 +447,7 @@ func appendEntry(c *gin.Context, store registrystore.MemoryStore, eventBus regis
 			}
 			retryCreatedAttachmentIDs = append(retryCreatedAttachmentIDs, createdIDs...)
 			if modified != nil {
-				entries[i].Content = modified
+				attemptEntries[i].Content = modified
 			}
 			for _, id := range links {
 				pendingLinks = append(pendingLinks, pendingLink{attachmentID: id, entryIndex: i})
@@ -448,9 +457,9 @@ func appendEntry(c *gin.Context, store registrystore.MemoryStore, eventBus regis
 		ctx, storedPatch := registrystore.WithAppendConversationPatch(ctx, validatedPatch.appendPatch())
 		var err error
 		if appendWhileArchived {
-			result, err = store.AppendEntriesBeforeUnarchive(ctx, userID, convID, entries, clientID, agentID, req.Epoch)
+			result, err = store.AppendEntriesBeforeUnarchive(ctx, userID, convID, attemptEntries, clientID, agentID, req.Epoch)
 		} else {
-			result, err = store.AppendEntries(ctx, userID, convID, entries, clientID, agentID, req.Epoch)
+			result, err = store.AppendEntries(ctx, userID, convID, attemptEntries, clientID, agentID, req.Epoch)
 		}
 		if err != nil {
 			return err
@@ -592,6 +601,8 @@ func appendEntry(c *gin.Context, store registrystore.MemoryStore, eventBus regis
 			originalErr := writeErr
 			eventsToPublish = nil
 			recoveryErr := routetx.MemoryWrite(c, store, func(ctx context.Context) error {
+				eventsToPublish = nil
+				result = nil
 				ctx, storedPatch := registrystore.WithAppendConversationPatch(ctx, validatedPatch.appendPatch())
 				normalizedRequest, err := normalizeRESTAppendRetry(ctx, store, userID, convID, retryRequest)
 				if err != nil {
@@ -948,15 +959,7 @@ func resolveAttachmentRefsWithMode(ctx context.Context, store registrystore.Memo
 				}
 
 				// Same group — create a new attachment record sharing the same storage key.
-				newAttachment, err := store.CreateAttachment(ctx, userID, "", model.Attachment{
-					StorageKey:  attachment.StorageKey,
-					Filename:    attachment.Filename,
-					ContentType: attachment.ContentType,
-					Size:        attachment.Size,
-					SHA256:      attachment.SHA256,
-					Status:      "ready",
-					ExpiresAt:   attachment.ExpiresAt,
-				})
+				newAttachment, err := store.CloneAttachment(ctx, userID, attachment.ID)
 				if err != nil {
 					return nil, nil, nil, err
 				}
@@ -1093,6 +1096,7 @@ func syncMemory(c *gin.Context, store registrystore.MemoryStore, eventBus regist
 
 	var eventsToPublish []registryeventbus.Event
 	if err := routetx.MemoryWrite(c, store, func(ctx context.Context) error {
+		eventsToPublish = nil
 		existingConv, _ := store.GetConversation(ctx, userID, convID)
 		convExistedBefore := existingConv != nil
 

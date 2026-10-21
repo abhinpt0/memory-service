@@ -20,6 +20,7 @@ import (
 	"github.com/chirino/memory-service/internal/testutil/testmongo"
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
 )
 
 func TestPartialAppendBatchFinishesOriginalPatchAfterFailure(t *testing.T) {
@@ -413,4 +414,92 @@ func TestPartialAppendBatchRefreshesContextCache(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, result.NoOp, "recovered epoch 2 must replace the cached epoch 1")
 	require.EqualValues(t, 3, *result.Epoch)
+}
+
+func TestSyncAgentEntryDoesNotCacheAbortedTransactionAttempt(t *testing.T) {
+	ctx, store := newMongoOutboxTestStore(t)
+	store.cfg.OutboxEnabled = false
+	require.NoError(t, registrymigrate.RunAll(ctx))
+	loader, err := registrycache.Select("local")
+	require.NoError(t, err)
+	cache, err := loader(ctx)
+	require.NoError(t, err)
+	store.entriesCache = cache
+
+	client := "client1"
+	conv, err := store.CreateConversation(ctx, "user1", client, "Retry cache", nil, nil, nil, nil)
+	require.NoError(t, err)
+	request := registrystore.CreateEntryRequest{
+		Channel: "context", ContentType: "test", Content: []byte(`["new"]`),
+	}
+
+	attempts := 0
+	err = store.InWriteTx(ctx, func(txCtx context.Context) error {
+		attempts++
+		result, syncErr := store.SyncAgentEntry(txCtx, "user1", conv.ID, request, client, nil)
+		if syncErr != nil {
+			return syncErr
+		}
+		if attempts == 1 {
+			require.False(t, result.NoOp)
+			return mongo.CommandError{
+				Message: "retry transaction after entry write",
+				Labels:  []string{"TransientTransactionError"},
+			}
+		}
+		require.False(t, result.NoOp, "an aborted attempt must not make its retry a false no-op")
+		return nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, 2, attempts)
+
+	count, err := store.entries().CountDocuments(ctx, bson.M{
+		"conversation_id": conv.ID,
+		"channel":         string(model.ChannelContext),
+	})
+	require.NoError(t, err)
+	require.EqualValues(t, 1, count)
+}
+
+func TestAppendEntriesDoesNotCacheAbortedTransactionAttempt(t *testing.T) {
+	ctx, store := newMongoOutboxTestStore(t)
+	store.cfg.OutboxEnabled = false
+	require.NoError(t, registrymigrate.RunAll(ctx))
+	loader, err := registrycache.Select("local")
+	require.NoError(t, err)
+	cache, err := loader(ctx)
+	require.NoError(t, err)
+	store.entriesCache = cache
+
+	client := "client1"
+	conv, err := store.CreateConversation(ctx, "user1", client, "Abort cache", nil, nil, nil, nil)
+	require.NoError(t, err)
+	first, err := store.SyncAgentEntry(ctx, "user1", conv.ID, registrystore.CreateEntryRequest{
+		Channel: "context", ContentType: "test", Content: []byte(`["old"]`),
+	}, client, nil)
+	require.NoError(t, err)
+	require.NotNil(t, first.Epoch)
+
+	abortErr := errors.New("abort transaction after append")
+	err = store.InWriteTx(ctx, func(txCtx context.Context) error {
+		_, appendErr := store.AppendEntries(txCtx, "user1", conv.ID, []registrystore.CreateEntryRequest{{
+			Channel: "context", ContentType: "test", Content: []byte(`["new"]`),
+		}}, &client, nil, first.Epoch)
+		if appendErr != nil {
+			return appendErr
+		}
+		return abortErr
+	})
+	require.ErrorIs(t, err, abortErr)
+
+	cached, err := cache.Get(ctx, conv.ID, scopedAgentCacheKey(client, ""))
+	require.NoError(t, err)
+	require.NotNil(t, cached)
+	require.Len(t, cached.Entries, 1, "an aborted append must not replace committed cache state")
+	count, err := store.entries().CountDocuments(ctx, bson.M{
+		"conversation_id": conv.ID,
+		"channel":         string(model.ChannelContext),
+	})
+	require.NoError(t, err)
+	require.EqualValues(t, 1, count)
 }

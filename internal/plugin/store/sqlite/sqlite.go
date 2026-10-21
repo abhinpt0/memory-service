@@ -310,14 +310,18 @@ func (s *SQLiteStore) decryptEntryContent(entryID uuid.UUID, data []byte) ([]byt
 
 func (s *SQLiteStore) CreateConversation(ctx context.Context, userID string, clientID string, title string, metadata map[string]interface{}, agentID *string, forkedAtConversationID *string, forkedAtEntryID *uuid.UUID) (*registrystore.ConversationDetail, error) {
 	convID := string(uuid.NewString())
+	result, err := s.createConversationWithID(ctx, userID, clientID, convID, title, metadata, agentID, forkedAtConversationID, forkedAtEntryID, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	return result.Conversation, nil
+}
+
+func (s *SQLiteStore) CreateConversationWithID(ctx context.Context, userID string, clientID string, convID string, title string, metadata map[string]interface{}, agentID *string, forkedAtConversationID *string, forkedAtEntryID *uuid.UUID) (*registrystore.CreateConversationResult, error) {
 	return s.createConversationWithID(ctx, userID, clientID, convID, title, metadata, agentID, forkedAtConversationID, forkedAtEntryID, nil, nil)
 }
 
-func (s *SQLiteStore) CreateConversationWithID(ctx context.Context, userID string, clientID string, convID string, title string, metadata map[string]interface{}, agentID *string, forkedAtConversationID *string, forkedAtEntryID *uuid.UUID) (*registrystore.ConversationDetail, error) {
-	return s.createConversationWithID(ctx, userID, clientID, convID, title, metadata, agentID, forkedAtConversationID, forkedAtEntryID, nil, nil)
-}
-
-func (s *SQLiteStore) createConversationWithID(ctx context.Context, userID string, clientID string, convID string, title string, metadata map[string]interface{}, agentID *string, forkedAtConversationID *string, forkedAtEntryID *uuid.UUID, startedByConversationID *string, startedByEntryID *uuid.UUID) (*registrystore.ConversationDetail, error) {
+func (s *SQLiteStore) createConversationWithID(ctx context.Context, userID string, clientID string, convID string, title string, metadata map[string]interface{}, agentID *string, forkedAtConversationID *string, forkedAtEntryID *uuid.UUID, startedByConversationID *string, startedByEntryID *uuid.UUID) (*registrystore.CreateConversationResult, error) {
 	db := s.writeDBFor(ctx, "sqlite store create conversation")
 	groupID := uuid.New()
 	now := time.Now()
@@ -333,6 +337,7 @@ func (s *SQLiteStore) createConversationWithID(ctx context.Context, userID strin
 	// If forking, look up the source conversation's group
 	var actualGroupID uuid.UUID
 	ownerUserID := userID
+	callerAccessLevel := model.AccessLevelOwner
 	var membershipsToCopy []model.ConversationMembership
 	var sourceConv *model.Conversation
 	var anchorOwnerDepth *int
@@ -386,9 +391,11 @@ func (s *SQLiteStore) createConversationWithID(ctx context.Context, userID strin
 		if findResult.RowsAffected == 0 {
 			return nil, &registrystore.NotFoundError{Resource: "conversation", ID: string(*startedByConversationID)}
 		}
-		if _, err := s.requireAccess(ctx, userID, parentConv.ConversationGroupID, model.AccessLevelWriter); err != nil {
-			return nil, err
+		accessLevel, accessErr := s.requireAccess(ctx, userID, parentConv.ConversationGroupID, model.AccessLevelWriter)
+		if accessErr != nil {
+			return nil, accessErr
 		}
+		callerAccessLevel = accessLevel
 		if startedByEntryID != nil {
 			visible, err := s.entryVisibleInConversationAncestry(ctx, parentConv, *startedByEntryID)
 			if err != nil {
@@ -400,30 +407,92 @@ func (s *SQLiteStore) createConversationWithID(ctx context.Context, userID strin
 		}
 		actualGroupID = groupID
 		ownerUserID = parentConv.OwnerUserID
-		group := model.ConversationGroup{ID: actualGroupID, CreatedAt: now}
-		if err := db.Create(&group).Error; err != nil {
-			logDuplicateKey("createConversationWithID:createStartedGroup", err,
-				"userID", userID,
-				"conversationID", string(convID),
-				"conversationGroupID", actualGroupID.String(),
-				"startedByConversationID", conversationIDPtrString(startedByConversationID),
-				"startedByEntryID", uuidPtrString(startedByEntryID),
-			)
-			return nil, fmt.Errorf("failed to create conversation group: %w", err)
-		}
 		if err := db.Where("conversation_group_id = ?", parentConv.ConversationGroupID).Order("created_at ASC, created_at_ns ASC").Find(&membershipsToCopy).Error; err != nil {
 			return nil, fmt.Errorf("failed to load parent memberships: %w", err)
 		}
 	} else {
 		actualGroupID = groupID
+	}
+
+	// Check if conversation already exists before creating group (Issue #3 fix)
+	var existing model.Conversation
+	existingResult := db.Where("id = ?", convID).Limit(1).Find(&existing)
+	if existingResult.Error != nil {
+		return nil, fmt.Errorf("failed to check existing conversation: %w", existingResult.Error)
+	}
+
+	if existingResult.RowsAffected > 0 {
+		// Conversation exists - validate and return without creating orphan group
+
+		// 1. Archived conversation - treat as unavailable
+		if existing.ArchivedAt != nil {
+			return nil, &registrystore.NotFoundError{Resource: "conversation", ID: convID}
+		}
+
+		// 2. User isolation - another user owns this ID
+		if startedByConversationID == nil && existing.OwnerUserID != userID {
+			return nil, &registrystore.NotFoundError{Resource: "conversation", ID: convID}
+		}
+
+		// Decrypt title for comparison
+		decryptedTitle, err := s.decryptConversationTitle(existing.ID, existing.Title)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decrypt conversation title: %w", err)
+		}
+
+		persistedStartedByConversationID := existing.StartedByConversationID
+		persistedStartedByEntryID := existing.StartedByEntryID
+
+		// Hydrate logical lineage for the response, but compare the started-by
+		// fields stored on this branch with the original creation request.
+		if err := s.hydrateConversationFork(ctx, &existing); err != nil {
+			return nil, err
+		}
+		existingForMatch := existing
+		existingForMatch.StartedByConversationID = persistedStartedByConversationID
+		existingForMatch.StartedByEntryID = persistedStartedByEntryID
+
+		// 3. Compare complete creation request
+		if !registrystore.ConversationsMatch(&existingForMatch, ownerUserID, clientID, title, decryptedTitle, metadata, agentID,
+			forkedAtConversationID, forkedAtEntryID, startedByConversationID, startedByEntryID) {
+			// Conflicting retry
+			return nil, registrystore.NewConversationIDConflictError(convID)
+		}
+
+		// Exact retry - return existing conversation
+		return &registrystore.CreateConversationResult{
+			Conversation: &registrystore.ConversationDetail{
+				ConversationSummary: registrystore.ConversationSummary{
+					ID:                      existing.ID,
+					Title:                   decryptedTitle,
+					OwnerUserID:             existing.OwnerUserID,
+					ClientID:                existing.ClientID,
+					AgentID:                 existing.AgentID,
+					Metadata:                existing.Metadata,
+					ConversationGroupID:     existing.ConversationGroupID,
+					ForkedAtConversationID:  existing.ForkedAtConversationID,
+					ForkedAtEntryID:         existing.ForkedAtEntryID,
+					StartedByConversationID: existing.StartedByConversationID,
+					StartedByEntryID:        existing.StartedByEntryID,
+					CreatedAt:               existing.CreatedAt,
+					UpdatedAt:               existing.UpdatedAt,
+					AccessLevel:             callerAccessLevel,
+				},
+			},
+			ExactRetry: true,
+		}, nil
+	}
+
+	// Conversation doesn't exist - create group for root and started-by conversations
+	if forkedAtConversationID == nil {
 		group := model.ConversationGroup{ID: actualGroupID, CreatedAt: now}
 		if err := db.Create(&group).Error; err != nil {
 			logDuplicateKey("createConversationWithID:createGroup", err,
 				"userID", userID,
 				"conversationID", string(convID),
 				"conversationGroupID", actualGroupID.String(),
-				"forkedAtConversationID", conversationIDPtrString(forkedAtConversationID),
-				"forkedAtEntryID", uuidPtrString(forkedAtEntryID),
+				"startedByConversationID", conversationIDPtrString(startedByConversationID),
+				"startedByEntryID", uuidPtrString(startedByEntryID),
 			)
 			return nil, fmt.Errorf("failed to create conversation group: %w", err)
 		}
@@ -447,15 +516,98 @@ func (s *SQLiteStore) createConversationWithID(ctx context.Context, userID strin
 		UpdatedAt:               now,
 	}
 
-	if err := db.Create(&conv).Error; err != nil {
-		logDuplicateKey("createConversationWithID:createConversation", err,
+	createErr := db.Create(&conv).Error
+	if createErr != nil {
+		// Concurrent race: another request created the conversation between our existence check and insert
+		if _, ok := sqliteUniqueViolation(createErr); ok {
+			// Re-fetch and validate as exact retry
+			var existing model.Conversation
+			existingResult := db.Where("id = ?", convID).Limit(1).Find(&existing)
+			if existingResult.Error != nil {
+				return nil, fmt.Errorf("conversation insert conflict but record not found: %w", existingResult.Error)
+			}
+			if existingResult.RowsAffected == 0 {
+				return nil, fmt.Errorf("conversation insert returned duplicate key but record not found")
+			}
+			// The request allocated this group before losing the conversation-ID
+			// race. Remove it before any return, including errors that append auto-
+			// creation intentionally recovers from.
+			if forkedAtConversationID == nil {
+				cleanup := db.Where("id = ?", actualGroupID).Delete(&model.ConversationGroup{})
+				if cleanup.Error != nil {
+					return nil, fmt.Errorf("failed to remove unused conversation group: %w", cleanup.Error)
+				}
+				if cleanup.RowsAffected != 1 {
+					return nil, fmt.Errorf("failed to remove unused conversation group %s", actualGroupID)
+				}
+			}
+
+			// 1. Archived conversation - treat as unavailable
+			if existing.ArchivedAt != nil {
+				return nil, &registrystore.NotFoundError{Resource: "conversation", ID: convID}
+			}
+
+			// 2. User isolation - another user owns this ID
+			if startedByConversationID == nil && existing.OwnerUserID != userID {
+				return nil, &registrystore.NotFoundError{Resource: "conversation", ID: convID}
+			}
+
+			// Decrypt title for comparison
+			decryptedTitle, err := s.decryptConversationTitle(existing.ID, existing.Title)
+			if err != nil {
+				return nil, fmt.Errorf("failed to decrypt conversation title: %w", err)
+			}
+
+			persistedStartedByConversationID := existing.StartedByConversationID
+			persistedStartedByEntryID := existing.StartedByEntryID
+
+			// Hydrate logical lineage for the response, but compare the started-by
+			// fields stored on this branch with the original creation request.
+			if err := s.hydrateConversationFork(ctx, &existing); err != nil {
+				return nil, err
+			}
+			existingForMatch := existing
+			existingForMatch.StartedByConversationID = persistedStartedByConversationID
+			existingForMatch.StartedByEntryID = persistedStartedByEntryID
+
+			// 3. Compare complete creation request
+			if !registrystore.ConversationsMatch(&existingForMatch, ownerUserID, clientID, title, decryptedTitle, metadata, agentID,
+				forkedAtConversationID, forkedAtEntryID, startedByConversationID, startedByEntryID) {
+				// Conflicting retry
+				return nil, registrystore.NewConversationIDConflictError(convID)
+			}
+
+			// Return the conversation created by the winning request.
+			return &registrystore.CreateConversationResult{
+				Conversation: &registrystore.ConversationDetail{
+					ConversationSummary: registrystore.ConversationSummary{
+						ID:                      existing.ID,
+						Title:                   decryptedTitle,
+						OwnerUserID:             existing.OwnerUserID,
+						ClientID:                existing.ClientID,
+						AgentID:                 existing.AgentID,
+						Metadata:                existing.Metadata,
+						ConversationGroupID:     existing.ConversationGroupID,
+						ForkedAtConversationID:  existing.ForkedAtConversationID,
+						ForkedAtEntryID:         existing.ForkedAtEntryID,
+						StartedByConversationID: existing.StartedByConversationID,
+						StartedByEntryID:        existing.StartedByEntryID,
+						CreatedAt:               existing.CreatedAt,
+						UpdatedAt:               existing.UpdatedAt,
+						AccessLevel:             callerAccessLevel,
+					},
+				},
+				ExactRetry: true,
+			}, nil
+		}
+		logDuplicateKey("createConversationWithID:createConversation", createErr,
 			"userID", userID,
 			"conversationID", string(convID),
 			"conversationGroupID", actualGroupID.String(),
 			"forkedAtConversationID", conversationIDPtrString(forkedAtConversationID),
 			"forkedAtEntryID", uuidPtrString(forkedAtEntryID),
 		)
-		return nil, fmt.Errorf("failed to create conversation: %w", err)
+		return nil, fmt.Errorf("failed to create conversation: %w", createErr)
 	}
 
 	if err := s.createConversationAncestry(ctx, db, actualGroupID, convID, sourceConv, forkedAtEntryID, anchorOwnerDepth); err != nil {
@@ -487,23 +639,26 @@ func (s *SQLiteStore) createConversationWithID(ctx context.Context, userID strin
 		}
 	}
 
-	return &registrystore.ConversationDetail{
-		ConversationSummary: registrystore.ConversationSummary{
-			ID:                      convID,
-			Title:                   title,
-			OwnerUserID:             ownerUserID,
-			ClientID:                clientID,
-			AgentID:                 agentID,
-			Metadata:                metadata,
-			ConversationGroupID:     actualGroupID,
-			ForkedAtConversationID:  forkedAtConversationID,
-			ForkedAtEntryID:         forkedAtEntryID,
-			StartedByConversationID: logicalStartedByConversationID,
-			StartedByEntryID:        logicalStartedByEntryID,
-			CreatedAt:               now,
-			UpdatedAt:               now,
-			AccessLevel:             model.AccessLevelOwner,
+	return &registrystore.CreateConversationResult{
+		Conversation: &registrystore.ConversationDetail{
+			ConversationSummary: registrystore.ConversationSummary{
+				ID:                      convID,
+				Title:                   title,
+				OwnerUserID:             ownerUserID,
+				ClientID:                clientID,
+				AgentID:                 agentID,
+				Metadata:                metadata,
+				ConversationGroupID:     actualGroupID,
+				ForkedAtConversationID:  forkedAtConversationID,
+				ForkedAtEntryID:         forkedAtEntryID,
+				StartedByConversationID: logicalStartedByConversationID,
+				StartedByEntryID:        logicalStartedByEntryID,
+				CreatedAt:               now,
+				UpdatedAt:               now,
+				AccessLevel:             callerAccessLevel,
+			},
 		},
+		ExactRetry: false,
 	}, nil
 }
 
@@ -1747,21 +1902,27 @@ func (s *SQLiteStore) appendEntries(ctx context.Context, userID string, conversa
 		if err != nil {
 			// Concurrent writers can race to auto-create the same root conversation.
 			// If another request won the insert, load the conversation and continue.
-			sqliteErr, ok := sqliteUniqueViolation(err)
-			if !ok {
+			// createConversationWithID now handles the raw PK violation internally and
+			// returns ConversationIDConflictError when fields differ. In the auto-create
+			// path that simply means the conversation already exists — load it and go on.
+			sqliteErr, isSQLiteViolation := sqliteUniqueViolation(err)
+			var convIDConflict *registrystore.ConversationIDConflictError
+			if !isSQLiteViolation && !errors.As(err, &convIDConflict) {
 				return nil, err
 			}
-			log.Warn("append auto-create race detected",
-				"userID", userID,
-				"conversationID", string(conversationID),
-				"sqliteCode", sqliteErr.Code,
-				"sqliteExtendedCode", sqliteErr.ExtendedCode,
-				"detail", sqliteErr.Error(),
-				"forkedAtConversationID", conversationIDPtrString(forkedAtConvID),
-				"forkedAtEntryID", uuidPtrString(forkedAtEntryID),
-				"startedByConversationID", conversationIDPtrString(startedByConversationID),
-				"startedByEntryID", uuidPtrString(startedByEntryID),
-			)
+			if isSQLiteViolation {
+				log.Warn("append auto-create race detected",
+					"userID", userID,
+					"conversationID", string(conversationID),
+					"sqliteCode", sqliteErr.Code,
+					"sqliteExtendedCode", sqliteErr.ExtendedCode,
+					"detail", sqliteErr.Error(),
+					"forkedAtConversationID", conversationIDPtrString(forkedAtConvID),
+					"forkedAtEntryID", uuidPtrString(forkedAtEntryID),
+					"startedByConversationID", conversationIDPtrString(startedByConversationID),
+					"startedByEntryID", uuidPtrString(startedByEntryID),
+				)
+			}
 			loaded := false
 			for attempt := 0; attempt < 10; attempt++ {
 				convResult = db.
@@ -1781,19 +1942,19 @@ func (s *SQLiteStore) appendEntries(ctx context.Context, userID string, conversa
 				return nil, err
 			}
 		} else {
-			encTitle, err := s.encryptConversationTitle(detail.ID, detail.Title)
+			encTitle, err := s.encryptConversationTitle(detail.Conversation.ID, detail.Conversation.Title)
 			if err != nil {
 				return nil, fmt.Errorf("failed to encrypt title: %w", err)
 			}
 			conv = model.Conversation{
-				ID:                      detail.ID,
-				ConversationGroupID:     detail.ConversationGroupID,
-				OwnerUserID:             detail.OwnerUserID,
+				ID:                      detail.Conversation.ID,
+				ConversationGroupID:     detail.Conversation.ConversationGroupID,
+				OwnerUserID:             detail.Conversation.OwnerUserID,
 				Title:                   encTitle,
-				StartedByConversationID: detail.StartedByConversationID,
-				StartedByEntryID:        detail.StartedByEntryID,
-				CreatedAt:               detail.CreatedAt,
-				UpdatedAt:               detail.UpdatedAt,
+				StartedByConversationID: detail.Conversation.StartedByConversationID,
+				StartedByEntryID:        detail.Conversation.StartedByEntryID,
+				CreatedAt:               detail.Conversation.CreatedAt,
+				UpdatedAt:               detail.Conversation.UpdatedAt,
 			}
 		}
 	}
@@ -3063,12 +3224,24 @@ func (s *SQLiteStore) AdminGetAttachment(ctx context.Context, attachmentID uuid.
 }
 
 func (s *SQLiteStore) AdminDeleteAttachment(ctx context.Context, attachmentID uuid.UUID) error {
-	result := s.writeDBFor(ctx, "sqlite store admin delete attachment").Where("id = ?", attachmentID).Delete(&model.Attachment{})
+	db := s.writeDBFor(ctx, "sqlite store admin delete attachment")
+	var attachment model.Attachment
+	result := db.Where("id = ?", attachmentID).Limit(1).Find(&attachment)
+	if result.Error != nil {
+		return fmt.Errorf("admin get attachment for delete failed: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return &registrystore.NotFoundError{Resource: "attachment", ID: attachmentID.String()}
+	}
+	result = db.Where("id = ?", attachmentID).Delete(&model.Attachment{})
 	if result.Error != nil {
 		return fmt.Errorf("admin delete attachment failed: %w", result.Error)
 	}
 	if result.RowsAffected == 0 {
 		return &registrystore.NotFoundError{Resource: "attachment", ID: attachmentID.String()}
+	}
+	if attachment.StorageKey != nil {
+		return s.QueueAttachmentBlobDelete(ctx, *attachment.StorageKey)
 	}
 	return nil
 }
@@ -3190,10 +3363,15 @@ func (s *SQLiteStore) CreateTask(ctx context.Context, taskType string, taskBody 
 func (s *SQLiteStore) ClaimReadyTasks(ctx context.Context, limit int) ([]model.Task, error) {
 	tx := s.writeDBFor(ctx, "sqlite store claim ready tasks")
 	now := time.Now().UTC()
-	retryAt := now.Add(5 * time.Minute)
+	retryAt := now.Add(registrystore.TaskClaimLease)
 
 	var tasks []model.Task
 	if err := tx.
+		Where("task_type <> ? OR COALESCE(json_extract(task_body, '$.state'), ?) IN (?, ?)",
+			registrystore.AttachmentBlobDeleteTaskType,
+			registrystore.AttachmentBlobDeleteStateQueued,
+			registrystore.AttachmentBlobDeleteStateQueued,
+			registrystore.AttachmentBlobDeleteStateClaimed).
 		Where("(retry_at, retry_at_ns) <= (?, ?)", now).
 		Order("retry_at ASC, retry_at_ns ASC, created_at ASC, created_at_ns ASC").
 		Limit(limit).
@@ -3207,6 +3385,16 @@ func (s *SQLiteStore) ClaimReadyTasks(ctx context.Context, limit int) ([]model.T
 	ids := make([]uuid.UUID, len(tasks))
 	for i, task := range tasks {
 		ids[i] = task.ID
+		if task.TaskType == registrystore.AttachmentBlobDeleteTaskType {
+			tasks[i].TaskBody[registrystore.AttachmentBlobDeleteStateField] = registrystore.AttachmentBlobDeleteStateClaimed
+			body, err := json.Marshal(tasks[i].TaskBody)
+			if err != nil {
+				return nil, err
+			}
+			if err := tx.Model(&model.Task{}).Where("id = ?", task.ID).Update("task_body", string(body)).Error; err != nil {
+				return nil, err
+			}
+		}
 	}
 	if err := tx.Model(&model.Task{}).
 		Where("id IN ?", ids).
@@ -3226,6 +3414,129 @@ func (s *SQLiteStore) FailTask(ctx context.Context, taskID uuid.UUID, errMsg str
 		"retry_at":    time.Now().Add(retryDelay),
 		"last_error":  errMsg,
 	}).Error
+}
+
+func attachmentBlobTask(storageKey, state string) model.Task {
+	taskName := registrystore.AttachmentBlobDeleteTaskName(storageKey)
+	return model.Task{
+		ID:       uuid.New(),
+		TaskName: &taskName,
+		TaskType: registrystore.AttachmentBlobDeleteTaskType,
+		TaskBody: map[string]any{
+			"taskName": taskName,
+			registrystore.AttachmentBlobDeleteStorageKeyField: storageKey,
+			registrystore.AttachmentBlobDeleteStateField:      state,
+		},
+	}
+}
+
+func (s *SQLiteStore) RegisterAttachmentBlobReference(ctx context.Context, storageKey string) error {
+	db := s.writeDBFor(ctx, "sqlite store register attachment blob reference")
+	taskName := registrystore.AttachmentBlobDeleteTaskName(storageKey)
+	var task model.Task
+	result := db.Where("task_name = ?", taskName).Limit(1).Find(&task)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		task = attachmentBlobTask(storageKey, registrystore.AttachmentBlobDeleteStateReferenced)
+		task.RetryAt = time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
+		return db.Create(&task).Error
+	}
+	switch registrystore.AttachmentBlobDeleteTaskState(task.TaskBody) {
+	case registrystore.AttachmentBlobDeleteStateReferenced:
+		return nil
+	case registrystore.AttachmentBlobDeleteStateQueued:
+		task.TaskBody[registrystore.AttachmentBlobDeleteStateField] = registrystore.AttachmentBlobDeleteStateReferenced
+		body, err := json.Marshal(task.TaskBody)
+		if err != nil {
+			return err
+		}
+		return db.Model(&model.Task{}).Where("id = ?", task.ID).Updates(map[string]any{
+			"task_body":  string(body),
+			"retry_at":   time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC),
+			"last_error": nil,
+		}).Error
+	default:
+		return registrystore.NewAttachmentBlobDeleteConflict()
+	}
+}
+
+func (s *SQLiteStore) QueueAttachmentBlobDelete(ctx context.Context, storageKey string) error {
+	db := s.writeDBFor(ctx, "sqlite store queue attachment blob delete")
+	taskName := registrystore.AttachmentBlobDeleteTaskName(storageKey)
+	var task model.Task
+	result := db.Where("task_name = ?", taskName).Limit(1).Find(&task)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		task = attachmentBlobTask(storageKey, registrystore.AttachmentBlobDeleteStateQueued)
+		return db.Create(&task).Error
+	}
+	if registrystore.AttachmentBlobDeleteTaskState(task.TaskBody) != registrystore.AttachmentBlobDeleteStateReferenced {
+		return nil
+	}
+	task.TaskBody[registrystore.AttachmentBlobDeleteStateField] = registrystore.AttachmentBlobDeleteStateQueued
+	body, err := json.Marshal(task.TaskBody)
+	if err != nil {
+		return err
+	}
+	return db.Model(&model.Task{}).Where("id = ?", task.ID).Updates(map[string]any{
+		"task_body":  string(body),
+		"retry_at":   time.Now(),
+		"last_error": nil,
+	}).Error
+}
+
+func (s *SQLiteStore) PrepareAttachmentBlobDelete(ctx context.Context, taskID uuid.UUID, storageKey string) (bool, error) {
+	db := s.writeDBFor(ctx, "sqlite store prepare attachment blob delete")
+	var task model.Task
+	result := db.Where("id = ? AND task_type = ?", taskID, registrystore.AttachmentBlobDeleteTaskType).Limit(1).Find(&task)
+	if result.Error != nil {
+		return false, result.Error
+	}
+	if result.RowsAffected == 0 {
+		return false, &registrystore.NotFoundError{Resource: "task", ID: taskID.String()}
+	}
+	if registrystore.AttachmentBlobDeleteTaskState(task.TaskBody) != registrystore.AttachmentBlobDeleteStateClaimed ||
+		task.TaskBody[registrystore.AttachmentBlobDeleteStorageKeyField] != storageKey {
+		return false, fmt.Errorf("attachment blob delete task is not claimed for its storage key")
+	}
+	var count int64
+	if err := db.Model(&model.Attachment{}).
+		Where("storage_key = ? AND archived_at IS NULL", storageKey).
+		Count(&count).Error; err != nil {
+		return false, err
+	}
+	if count == 0 {
+		return false, nil
+	}
+	task.TaskBody[registrystore.AttachmentBlobDeleteStateField] = registrystore.AttachmentBlobDeleteStateReferenced
+	body, err := json.Marshal(task.TaskBody)
+	if err != nil {
+		return false, err
+	}
+	if err := db.Model(&model.Task{}).Where("id = ?", taskID).Updates(map[string]any{
+		"task_body":  string(body),
+		"retry_at":   time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC),
+		"last_error": nil,
+	}).Error; err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *SQLiteStore) CompleteAttachmentBlobDelete(ctx context.Context, taskID uuid.UUID) error {
+	db := s.writeDBFor(ctx, "sqlite store complete attachment blob delete")
+	result := db.Where("id = ? AND task_type = ?", taskID, registrystore.AttachmentBlobDeleteTaskType).Delete(&model.Task{})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return &registrystore.NotFoundError{Resource: "task", ID: taskID.String()}
+	}
+	return nil
 }
 
 func (s *SQLiteStore) AdminGetAttachmentByStorageKey(ctx context.Context, storageKey string) (*registrystore.AdminAttachment, error) {
@@ -4327,10 +4638,38 @@ func (s *SQLiteStore) CreateAttachment(ctx context.Context, userID string, conve
 	if strings.TrimSpace(attachment.Status) == "" {
 		attachment.Status = "ready"
 	}
+	if attachment.StorageKey != nil {
+		if err := s.RegisterAttachmentBlobReference(ctx, *attachment.StorageKey); err != nil {
+			return nil, err
+		}
+	}
 	if err := db.Create(&attachment).Error; err != nil {
 		return nil, fmt.Errorf("create attachment failed: %w", err)
 	}
 	return &attachment, nil
+}
+
+func (s *SQLiteStore) CloneAttachment(ctx context.Context, userID string, sourceAttachmentID uuid.UUID) (*model.Attachment, error) {
+	source, err := s.GetAttachment(ctx, userID, "", sourceAttachmentID)
+	if err != nil {
+		return nil, err
+	}
+	if source.StorageKey == nil {
+		return nil, &registrystore.ConflictError{Message: "attachment content is not available"}
+	}
+	if err := s.RegisterAttachmentBlobReference(ctx, *source.StorageKey); err != nil {
+		return nil, err
+	}
+	// Revalidate after acquiring the per-key guard so a source deleted before
+	// guard acquisition cannot be resurrected by a stale clone operation.
+	source, err = s.GetAttachment(ctx, userID, "", sourceAttachmentID)
+	if err != nil {
+		return nil, err
+	}
+	return s.CreateAttachment(ctx, userID, "", model.Attachment{
+		StorageKey: source.StorageKey, Filename: source.Filename, ContentType: source.ContentType,
+		Size: source.Size, SHA256: source.SHA256, Status: "ready", ExpiresAt: source.ExpiresAt,
+	})
 }
 
 func (s *SQLiteStore) UpdateAttachment(ctx context.Context, userID string, attachmentID uuid.UUID, update registrystore.AttachmentUpdate) (*model.Attachment, error) {
@@ -4341,6 +4680,11 @@ func (s *SQLiteStore) UpdateAttachment(ctx context.Context, userID string, attac
 	}
 	if attachment.UserID != userID {
 		return nil, &registrystore.ForbiddenError{}
+	}
+	if update.StorageKey != nil {
+		if err := s.RegisterAttachmentBlobReference(ctx, *update.StorageKey); err != nil {
+			return nil, err
+		}
 	}
 
 	values := map[string]any{}
@@ -4470,13 +4814,25 @@ func (s *SQLiteStore) DeleteAttachment(ctx context.Context, userID string, conve
 	if attachment.EntryID != nil {
 		return &registrystore.ConflictError{Message: "linked attachments cannot be deleted"}
 	}
+	// SQLite serializes write transactions, but re-read from the writer so the
+	// cleanup key is the exact state removed by this transaction.
+	result := db.Where("id = ? AND archived_at IS NULL", attachmentID).Limit(1).Find(attachment)
+	if result.Error != nil {
+		return fmt.Errorf("get attachment for delete failed: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return &registrystore.NotFoundError{Resource: "attachment", ID: attachmentID.String()}
+	}
 
-	result := db.Where("id = ?", attachmentID).Delete(&model.Attachment{})
+	result = db.Where("id = ?", attachmentID).Delete(&model.Attachment{})
 	if result.Error != nil {
 		return fmt.Errorf("delete attachment failed: %w", result.Error)
 	}
 	if result.RowsAffected == 0 {
 		return &registrystore.NotFoundError{Resource: "attachment", ID: attachmentID.String()}
+	}
+	if attachment.StorageKey != nil {
+		return s.QueueAttachmentBlobDelete(ctx, *attachment.StorageKey)
 	}
 	return nil
 }

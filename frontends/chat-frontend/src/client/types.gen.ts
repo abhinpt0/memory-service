@@ -196,6 +196,14 @@ export type CreateConversationRequest = ConversationInput & {
    * Optional client-supplied conversation ID. When provided, the server creates the conversation with exactly this ID instead of generating one. Useful for agents that need a deterministic conversation ID derived from an external thread identifier.
    */
   id?: string;
+  /**
+   * ID of the parent conversation to fork from. Required when creating a forked conversation. Must be an existing, non-archived conversation accessible to the authenticated user.
+   */
+  forkedAtConversationId?: string;
+  /**
+   * First parent entry excluded by this fork. When provided, the fork inherits all parent entries before this entry; this entry and any after it are excluded. Valid anchors are history and journal entries visible to the authenticated client; context entries cannot be fork anchors. Omit (or set to null) for a blank-slate fork that inherits no parent entries.
+   */
+  forkedAtEntryId?: string;
 };
 
 export type UpdateConversationRequest = {
@@ -715,7 +723,7 @@ export type CreateEntryRequest = {
    */
   seq?: number;
   /**
-   * Optional inline conversation patch applied with the entry. PostgreSQL and SQLite commit both changes atomically in one transaction. MongoDB does the same when the outbox is enabled. Otherwise, MongoDB applies the entry and patch as separate operations. Supports `title`, `metadata` merge-patch (keys present are set, keys absent are left unchanged, keys explicitly set to `null` are removed), and `archived`. Setting `archived: false` allows the append on an archived conversation and unarchives it as part of the append; setting `archived: true` archives it after. Plain appends without this field are blocked on archived conversations — use `archived: false` here (or `PATCH /v1/conversations/{id}`) to unarchive first. Requires writer or higher access on the conversation (owner access for archive/unarchive). For batch requests (`entries[]`), this field is at the top level and applies once to the conversation, not per-entry.
+   * Optional inline conversation patch applied atomically with the entry on every supported datastore. Supports `title`, `metadata` merge-patch (keys present are set, keys absent are left unchanged, keys explicitly set to `null` are removed), and `archived`. Setting `archived: false` allows the append on an archived conversation and unarchives it as part of the append; setting `archived: true` archives it after. Plain appends without this field are blocked on archived conversations — use `archived: false` here (or `PATCH /v1/conversations/{id}`) to unarchive first. Requires writer or higher access on the conversation (owner access for archive/unarchive). For batch requests (`entries[]`), this field is at the top level and applies once to the conversation, not per-entry.
    */
   conversationPatch?: UpdateConversationRequest;
 };
@@ -1019,6 +1027,18 @@ export type CreateConversationData = {
 
 export type CreateConversationErrors = {
   /**
+   * A conversation with the provided ID exists but is archived or belongs
+   * to a different user.
+   */
+  404: ErrorResponse;
+  /**
+   * A conversation with the provided ID already exists but differs in at
+   * least one compared field (title, metadata, agentId,
+   * forkedAtConversationId, forkedAtEntryId, or the authenticated user
+   * or client identity). Error code will be `conversation_already_exists`.
+   */
+  409: ErrorResponse;
+  /**
    * Error response
    */
   default: ErrorResponse;
@@ -1027,6 +1047,14 @@ export type CreateConversationErrors = {
 export type CreateConversationError = CreateConversationErrors[keyof CreateConversationErrors];
 
 export type CreateConversationResponses = {
+  /**
+   * Exact retry: a conversation with the provided ID already exists and
+   * matches all compared fields (title, metadata, agentId,
+   * forkedAtConversationId, forkedAtEntryId, and the authenticated user
+   * and client identity). Returns the existing conversation without
+   * creating a duplicate.
+   */
+  200: Conversation;
   /**
    * The created conversation.
    */

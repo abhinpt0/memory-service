@@ -1,12 +1,58 @@
 package search
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	registrystore "github.com/chirino/memory-service/internal/registry/store"
+	"github.com/chirino/memory-service/internal/security"
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
+
+type retryingIndexStore struct {
+	registrystore.MemoryStore
+	indexed [][]registrystore.IndexEntryRequest
+}
+
+func (s *retryingIndexStore) InWriteTx(ctx context.Context, fn func(context.Context) error) error {
+	if err := fn(ctx); err != nil {
+		return err
+	}
+	return fn(ctx)
+}
+
+func (s *retryingIndexStore) IndexEntries(_ context.Context, entries []registrystore.IndexEntryRequest) (*registrystore.IndexConversationsResponse, error) {
+	s.indexed = append(s.indexed, append([]registrystore.IndexEntryRequest(nil), entries...))
+	return &registrystore.IndexConversationsResponse{Indexed: len(entries)}, nil
+}
+
+func TestIndexConversationsRetryReusesParsedRequest(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	entryID := uuid.New()
+	body, err := json.Marshal([]registrystore.IndexEntryRequest{{
+		EntryID: entryID, ConversationID: "conversation-1", IndexedContent: "same on every attempt",
+	}})
+	require.NoError(t, err)
+	store := &retryingIndexStore{}
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/index", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set(security.ContextKeyRoles, map[string]bool{security.RoleIndexer: true})
+
+	indexConversations(c, store)
+
+	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+	require.Len(t, store.indexed, 2)
+	require.Equal(t, store.indexed[0], store.indexed[1])
+	require.Equal(t, entryID, store.indexed[1][0].EntryID)
+}
 
 func TestNormalizeSearchTypes(t *testing.T) {
 	t.Run("nil defaults to auto", func(t *testing.T) {

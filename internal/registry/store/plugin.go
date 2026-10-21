@@ -112,6 +112,58 @@ type ConversationDetail struct {
 	HasResponseInProgress bool `json:"hasResponseInProgress,omitempty"`
 }
 
+// CreateConversationResult distinguishes new conversation creation from exact retry.
+type CreateConversationResult struct {
+	Conversation *ConversationDetail
+	ExactRetry   bool // true when a client-supplied ID matched an existing conversation
+}
+
+// ConversationsMatch compares all semantically significant creation fields.
+// Server-assigned fields (createdAt, updatedAt, conversationGroupID) are excluded.
+// Identity fields (expectedOwnerUserID, clientID) come from the resolved creation request.
+// Started-by conversations inherit expectedOwnerUserID from their parent.
+// The existingDecryptedTitle parameter should be the decrypted title from existing.Title.
+func ConversationsMatch(existing *model.Conversation,
+	expectedOwnerUserID, clientID, title string,
+	existingDecryptedTitle string,
+	metadata map[string]interface{},
+	agentID *string,
+	forkedAtConversationID *string,
+	forkedAtEntryID *uuid.UUID,
+	startedByConversationID *string,
+	startedByEntryID *uuid.UUID) bool {
+	if existing.OwnerUserID != expectedOwnerUserID {
+		return false
+	}
+	if existing.ClientID != clientID {
+		return false
+	}
+	// Request payload fields
+	if existingDecryptedTitle != title {
+		return false
+	}
+	if !metadataEqual(existing.Metadata, metadata) {
+		return false
+	}
+	if !stringPointersEqual(existing.AgentID, agentID) {
+		return false
+	}
+	// All lineage fields — forked-at and started-by
+	if !stringPointersEqual(existing.ForkedAtConversationID, forkedAtConversationID) {
+		return false
+	}
+	if !uuidPointersEqual(existing.ForkedAtEntryID, forkedAtEntryID) {
+		return false
+	}
+	if !stringPointersEqual(existing.StartedByConversationID, startedByConversationID) {
+		return false
+	}
+	if !uuidPointersEqual(existing.StartedByEntryID, startedByEntryID) {
+		return false
+	}
+	return true
+}
+
 // UnarchiveConversationResult reports an unarchive attempt. Changed is true only
 // for the caller that performed the transition; an already-active conversation is
 // a successful no-op, and only the transition winner emits the update event.
@@ -397,7 +449,8 @@ type MemoryStore interface {
 	// Conversations
 	CreateConversation(ctx context.Context, userID string, clientID string, title string, metadata map[string]interface{}, agentID *string, forkedAtConversationID *string, forkedAtEntryID *uuid.UUID) (*ConversationDetail, error)
 	// CreateConversationWithID creates a conversation with the given ID. Used by gRPC AppendEntry for fork-on-append.
-	CreateConversationWithID(ctx context.Context, userID string, clientID string, convID string, title string, metadata map[string]interface{}, agentID *string, forkedAtConversationID *string, forkedAtEntryID *uuid.UUID) (*ConversationDetail, error)
+	// Returns CreateConversationResult to distinguish new creation from exact retry (following #528 pattern).
+	CreateConversationWithID(ctx context.Context, userID string, clientID string, convID string, title string, metadata map[string]interface{}, agentID *string, forkedAtConversationID *string, forkedAtEntryID *uuid.UUID) (*CreateConversationResult, error)
 	ListConversations(ctx context.Context, userID string, query *string, afterCursor *string, limit int, mode model.ConversationListMode, ancestry model.ConversationAncestryFilter, archived ArchiveFilter, metadataFilters []ConversationMetadataPredicate, sort ...ConversationSort) ([]ConversationSummary, *string, error)
 	GetConversation(ctx context.Context, userID string, conversationID string) (*ConversationDetail, error)
 	UpdateConversation(ctx context.Context, userID string, conversationID string, title *string, metadataPatch MetadataPatch) (*ConversationDetail, error)
@@ -465,13 +518,18 @@ type MemoryStore interface {
 	AdminSearchEntries(ctx context.Context, query AdminSearchQuery) (*SearchResults, error)
 	AdminListAttachments(ctx context.Context, query AdminAttachmentQuery) ([]AdminAttachment, *string, error)
 	AdminGetAttachment(ctx context.Context, attachmentID uuid.UUID) (*AdminAttachment, error)
+	// AdminDeleteAttachment atomically deletes metadata and queues cleanup for
+	// the storage key from the exact row deleted.
 	AdminDeleteAttachment(ctx context.Context, attachmentID uuid.UUID) error
 
 	// Attachments
 	CreateAttachment(ctx context.Context, userID string, conversationID string, attachment model.Attachment) (*model.Attachment, error)
+	CloneAttachment(ctx context.Context, userID string, sourceAttachmentID uuid.UUID) (*model.Attachment, error)
 	UpdateAttachment(ctx context.Context, userID string, attachmentID uuid.UUID, update AttachmentUpdate) (*model.Attachment, error)
 	LinkAttachmentToEntry(ctx context.Context, userID string, attachmentID uuid.UUID, entryID uuid.UUID) (*model.Attachment, error)
 	GetAttachment(ctx context.Context, userID string, conversationID string, attachmentID uuid.UUID) (*model.Attachment, error)
+	// DeleteAttachment atomically deletes metadata and queues cleanup for the
+	// storage key from the exact row deleted.
 	DeleteAttachment(ctx context.Context, userID string, conversationID string, attachmentID uuid.UUID) error
 
 	// Eviction
@@ -488,6 +546,10 @@ type MemoryStore interface {
 	ClaimReadyTasks(ctx context.Context, limit int) ([]model.Task, error)
 	DeleteTask(ctx context.Context, taskID uuid.UUID) error
 	FailTask(ctx context.Context, taskID uuid.UUID, errMsg string, retryDelay time.Duration) error
+	RegisterAttachmentBlobReference(ctx context.Context, storageKey string) error
+	QueueAttachmentBlobDelete(ctx context.Context, storageKey string) error
+	PrepareAttachmentBlobDelete(ctx context.Context, taskID uuid.UUID, storageKey string) (referenced bool, err error)
+	CompleteAttachmentBlobDelete(ctx context.Context, taskID uuid.UUID) error
 
 	// Admin attachment lookup by storage key (for token-based downloads)
 	AdminGetAttachmentByStorageKey(ctx context.Context, storageKey string) (*AdminAttachment, error)

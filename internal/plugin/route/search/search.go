@@ -538,57 +538,57 @@ func paginateSearchResults(results []registrystore.SearchResult, afterCursor *st
 }
 
 func indexConversations(c *gin.Context, store registrystore.MemoryStore) {
+	// Role check: indexer or admin required.
+	if !security.HasRole(c, security.RoleIndexer) && !security.HasRole(c, security.RoleAdmin) {
+		c.JSON(http.StatusForbidden, gin.H{"code": "forbidden", "error": "indexer or admin role required"})
+		return
+	}
+
+	// Parse and validate once before entering a callback MongoDB may replay.
+	// Accept both bare array [{...}] and wrapped {"entries": [{...}]} formats.
+	bodyBytes, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to read request body"})
+		return
+	}
+
+	var entries []registrystore.IndexEntryRequest
+	if err := json.Unmarshal(bodyBytes, &entries); err != nil {
+		var wrapped struct {
+			Entries []registrystore.IndexEntryRequest `json:"entries"`
+		}
+		if err2 := json.Unmarshal(bodyBytes, &wrapped); err2 != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+			return
+		}
+		entries = wrapped.Entries
+	}
+
+	if len(entries) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "at least one entry required"})
+		return
+	}
+
+	for _, entry := range entries {
+		if entry.EntryID == uuid.Nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "entryId is required"})
+			return
+		}
+		if entry.ConversationID == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "conversationId is required"})
+			return
+		}
+		if entry.IndexedContent == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "indexedContent is required"})
+			return
+		}
+	}
+
+	immutableEntries := append([]registrystore.IndexEntryRequest(nil), entries...)
 	if err := routetx.MemoryWrite(c, store, func(ctx context.Context) error {
-		// Role check: indexer or admin required.
-		if !security.HasRole(c, security.RoleIndexer) && !security.HasRole(c, security.RoleAdmin) {
-			c.JSON(http.StatusForbidden, gin.H{"code": "forbidden", "error": "indexer or admin role required"})
-			return nil
-		}
+		attemptEntries := append([]registrystore.IndexEntryRequest(nil), immutableEntries...)
 
-		// Accept both bare array [{...}] and wrapped {"entries": [{...}]} formats.
-		bodyBytes, err := io.ReadAll(c.Request.Body)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "failed to read request body"})
-			return nil
-		}
-
-		var entries []registrystore.IndexEntryRequest
-
-		// Try bare array first.
-		if err := json.Unmarshal(bodyBytes, &entries); err != nil {
-			// Try wrapped format.
-			var wrapped struct {
-				Entries []registrystore.IndexEntryRequest `json:"entries"`
-			}
-			if err2 := json.Unmarshal(bodyBytes, &wrapped); err2 != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
-				return nil
-			}
-			entries = wrapped.Entries
-		}
-
-		if len(entries) == 0 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "at least one entry required"})
-			return nil
-		}
-
-		// Validate required fields.
-		for _, entry := range entries {
-			if entry.EntryID == uuid.Nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "entryId is required"})
-				return nil
-			}
-			if entry.ConversationID == "" {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "conversationId is required"})
-				return nil
-			}
-			if entry.IndexedContent == "" {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "indexedContent is required"})
-				return nil
-			}
-		}
-
-		result, err := store.IndexEntries(ctx, entries)
+		result, err := store.IndexEntries(ctx, attemptEntries)
 		if err != nil {
 			return err
 		}

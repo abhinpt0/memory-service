@@ -11,16 +11,14 @@ import (
 )
 
 type AttachmentCleanupService struct {
-	store       registrystore.MemoryStore
-	attachStore registryattach.AttachmentStore
-	interval    time.Duration
+	store    registrystore.MemoryStore
+	interval time.Duration
 }
 
-func NewAttachmentCleanupService(store registrystore.MemoryStore, attachStore registryattach.AttachmentStore, interval time.Duration) *AttachmentCleanupService {
+func NewAttachmentCleanupService(store registrystore.MemoryStore, _ registryattach.AttachmentStore, interval time.Duration) *AttachmentCleanupService {
 	return &AttachmentCleanupService{
-		store:       store,
-		attachStore: attachStore,
-		interval:    interval,
+		store:    store,
+		interval: interval,
 	}
 }
 
@@ -96,17 +94,6 @@ func (s *AttachmentCleanupService) cleanupOnce(ctx context.Context) {
 				continue
 			}
 			work++
-			if s.attachStore != nil && attachment.StorageKey != nil && attachment.RefCount <= 1 {
-				if err := s.attachStore.Delete(ctx, *attachment.StorageKey); err != nil {
-					if markJobInterrupted(event, ctx, err) {
-						return
-					}
-					log.Warn("Attachment cleanup blob delete failed", "attachmentId", attachment.ID.String(), "err", err)
-					event.SetReason("blob_delete_failed")
-					event.EnrichError(err)
-					failures++
-				}
-			}
 		}
 		if cursor == nil {
 			return

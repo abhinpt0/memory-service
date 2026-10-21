@@ -129,7 +129,12 @@ func (s *PgAttachmentStore) retrieveLargeObject(ctx context.Context, storageKey 
 }
 
 func (s *PgAttachmentStore) Delete(ctx context.Context, storageKey string) error {
-	return s.db.WithContext(ctx).Exec("SELECT lo_unlink(?)", storageKey).Error
+	// A completed provider delete can be replayed when persisting the terminal
+	// task tombstone fails. Guard lo_unlink so an already-removed object remains
+	// a successful idempotent delete.
+	return s.db.WithContext(ctx).
+		Exec("SELECT lo_unlink(oid) FROM pg_largeobject_metadata WHERE oid = CAST(? AS oid)", storageKey).
+		Error
 }
 
 func (s *PgAttachmentStore) GetSignedURL(_ context.Context, _ string, _ time.Duration, _ *registryattach.SignedURLOptions) (*url.URL, error) {

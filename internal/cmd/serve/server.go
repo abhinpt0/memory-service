@@ -433,6 +433,7 @@ func BuildServer(ctx context.Context, cfg *config.Config) (*Server, error) {
 
 	taskProc := service.NewTaskProcessor(store, vectorStore)
 	taskProc.SetEpisodicStore(episodicStore, encSvc)
+	taskProc.SetAttachmentStore(attachStore)
 	go taskProc.Start(ctx)
 
 	attachmentCleanup := service.NewAttachmentCleanupService(store, attachStore, cfg.AttachmentCleanupInterval)

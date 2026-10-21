@@ -103,6 +103,8 @@ func shareConversation(c *gin.Context, store registrystore.MemoryStore, eventBus
 	var createdMembership *model.ConversationMembership
 	var eventsToPublish []registryeventbus.Event
 	if err := routetx.MemoryWrite(c, store, func(ctx context.Context) error {
+		createdMembership = nil
+		eventsToPublish = nil
 		membership, err := store.ShareConversation(ctx, userID, convID, req.UserID, req.AccessLevel)
 		if err != nil {
 			return err
@@ -163,6 +165,8 @@ func updateMembership(c *gin.Context, store registrystore.MemoryStore, eventBus 
 	var updatedMembership *model.ConversationMembership
 	var eventsToPublish []registryeventbus.Event
 	if err := routetx.MemoryWrite(c, store, func(ctx context.Context) error {
+		updatedMembership = nil
+		eventsToPublish = nil
 		membership, err := store.UpdateMembership(ctx, userID, convID, memberUserID, req.AccessLevel)
 		if err != nil {
 			return err
@@ -216,6 +220,8 @@ func deleteMembership(c *gin.Context, store registrystore.MemoryStore, eventBus 
 	var groupID uuid.UUID
 	var eventsToPublish []registryeventbus.Event
 	if err := routetx.MemoryWrite(c, store, func(ctx context.Context) error {
+		groupID = uuid.Nil
+		eventsToPublish = nil
 		conv, err := store.GetConversation(ctx, userID, convID)
 		if err != nil {
 			return err

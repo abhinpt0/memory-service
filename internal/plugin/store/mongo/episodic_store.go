@@ -132,15 +132,13 @@ func (s *mongoEpisodicStore) InWriteTx(ctx context.Context, fn func(context.Cont
 	if session := mongo.SessionFromContext(ctx); session != nil && session.TransactionRunning() {
 		return fn(txscope.WithIntent(ctx, txscope.IntentWrite))
 	}
-	session, err := s.col.Database().Client().StartSession()
-	if err != nil {
-		return fmt.Errorf("start MongoDB write transaction: %w", err)
-	}
-	defer session.EndSession(ctx)
-	_, err = session.WithTransaction(ctx, func(txCtx context.Context) (any, error) {
-		return nil, fn(txscope.WithIntent(txCtx, txscope.IntentWrite))
+	err := runMongoTransactionOnce(ctx, s.col.Database().Client(), func(txCtx context.Context) error {
+		return fn(txscope.WithIntent(txCtx, txscope.IntentWrite))
 	})
-	return err
+	if err != nil {
+		return fmt.Errorf("MongoDB episodic write transaction: %w", err)
+	}
+	return nil
 }
 
 // memoryDoc is the BSON document representation of a memory row.

@@ -268,6 +268,11 @@ CREATE TABLE IF NOT EXISTS tasks (
 CREATE INDEX IF NOT EXISTS idx_tasks_ready
     ON tasks (task_type, retry_at);
 
+-- Keep ready scans bounded by the number of currently ready rows. Attachment
+-- reference guards share this table but have retry_at far in the future.
+CREATE INDEX IF NOT EXISTS idx_tasks_ready_v2
+    ON tasks (retry_at, created_at);
+
 -- Unique partial index for singleton tasks (allows multiple NULL task_name values)
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_name
     ON tasks (task_name) WHERE task_name IS NOT NULL;

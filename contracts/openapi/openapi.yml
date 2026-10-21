@@ -202,6 +202,18 @@ paths:
       summary: Create a conversation
       description: |-
         Creates a new conversation owned by the current user.
+
+        **Idempotency**: When a conversation ID is provided in the request, this
+        operation is idempotent. If the exact same conversation already exists,
+        the operation returns 200 OK with the existing conversation. If a
+        conversation with the same ID exists but differs in any compared field,
+        the operation returns 409 Conflict with error code
+        `conversation_already_exists`.
+
+        The complete equivalence rule: all of `title`, `metadata`, `agentId`,
+        `forkedAtConversationId`, `forkedAtEntryId` must match, and the
+        authenticated user identity and client identity (derived from the
+        authentication token) must also match.
       operationId: createConversation
       requestBody:
         required: true
@@ -210,12 +222,47 @@ paths:
             schema:
               $ref: '#/components/schemas/CreateConversationRequest'
       responses:
+        '200':
+          description: |-
+            Exact retry: a conversation with the provided ID already exists and
+            matches all compared fields (title, metadata, agentId,
+            forkedAtConversationId, forkedAtEntryId, and the authenticated user
+            and client identity). Returns the existing conversation without
+            creating a duplicate.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Conversation'
         '201':
           description: The created conversation.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Conversation'
+        '404':
+          description: |-
+            A conversation with the provided ID exists but is archived or belongs
+            to a different user.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: |-
+            A conversation with the provided ID already exists but differs in at
+            least one compared field (title, metadata, agentId,
+            forkedAtConversationId, forkedAtEntryId, or the authenticated user
+            or client identity). Error code will be `conversation_already_exists`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: "conversation_already_exists"
+                error: "conversation with id 550e8400-e29b-41d4-a716-446655440000 exists but the request differs"
+                requestId: "req_abc123"
+                details:
+                  conversationId: "550e8400-e29b-41d4-a716-446655440000"
         default:
           $ref: '#/components/responses/Error'
       security:
@@ -469,13 +516,11 @@ paths:
         A batch containing a sequence number uses its first sequenced entry as a
         conversation-scoped retry anchor. An identical retry returns the original
         entries in request order, including their IDs and timestamps. Changed
-        content, order, or batch length returns 409 Conflict. PostgreSQL and SQLite
-        commit the entire batch atomically. MongoDB also commits atomically when
-        the outbox is enabled. Otherwise, it can resume missing positions and finish
-        the original inline conversation patch from the saved batch definition.
-        Completed batch retries do not emit append
-        events or reapply conversation patches. Fully unsequenced batches have no
-        retry guarantee. History projections can keep their sequence unset.
+        content, order, or batch length returns 409 Conflict. Every supported
+        datastore commits the entire batch atomically. Completed batch retries do
+        not emit append events or reapply conversation patches. Fully unsequenced
+        batches have no retry guarantee. History projections can keep their sequence
+        unset.
 
         This endpoint is used by both end-user clients and agents.
         The service determines whether the caller is a user or an agent
@@ -2185,6 +2230,17 @@ components:
               nullable: true
               description: >-
                 Optional client-supplied conversation ID. When provided, the server creates the conversation with exactly this ID instead of generating one. Useful for agents that need a deterministic conversation ID derived from an external thread identifier.
+            forkedAtConversationId:
+              type: string
+              nullable: true
+              description: >-
+                ID of the parent conversation to fork from. Required when creating a forked conversation. Must be an existing, non-archived conversation accessible to the authenticated user.
+            forkedAtEntryId:
+              type: string
+              format: uuid
+              nullable: true
+              description: >-
+                First parent entry excluded by this fork. When provided, the fork inherits all parent entries before this entry; this entry and any after it are excluded. Valid anchors are history and journal entries visible to the authenticated client; context entries cannot be fork anchors. Omit (or set to null) for a blank-slate fork that inherits no parent entries.
       example:
         title: "Chat with support bot"
         metadata:
@@ -2897,10 +2953,8 @@ components:
             - $ref: '#/components/schemas/UpdateConversationRequest'
           nullable: true
           description: >-
-            Optional inline conversation patch applied with the entry. PostgreSQL and
-            SQLite commit both changes atomically in one transaction. MongoDB does
-            the same when the outbox is enabled. Otherwise, MongoDB applies the entry
-            and patch as separate operations. Supports `title`,
+            Optional inline conversation patch applied atomically with the entry on
+            every supported datastore. Supports `title`,
             `metadata` merge-patch
             (keys present are set, keys absent are left unchanged, keys explicitly
             set to `null` are removed), and `archived`. Setting `archived: false`

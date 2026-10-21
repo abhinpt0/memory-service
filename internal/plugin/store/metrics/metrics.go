@@ -65,7 +65,7 @@ func (m *metricsStore) CreateConversation(ctx context.Context, userID string, cl
 	return m.inner.CreateConversation(ctx, userID, clientID, title, metadata, agentID, forkedAtConversationID, forkedAtEntryID)
 }
 
-func (m *metricsStore) CreateConversationWithID(ctx context.Context, userID string, clientID string, convID string, title string, metadata map[string]interface{}, agentID *string, forkedAtConversationID *string, forkedAtEntryID *uuid.UUID) (*store.ConversationDetail, error) {
+func (m *metricsStore) CreateConversationWithID(ctx context.Context, userID string, clientID string, convID string, title string, metadata map[string]interface{}, agentID *string, forkedAtConversationID *string, forkedAtEntryID *uuid.UUID) (*store.CreateConversationResult, error) {
 	defer observe("create_conversation", time.Now())
 	return m.inner.CreateConversationWithID(ctx, userID, clientID, convID, title, metadata, agentID, forkedAtConversationID, forkedAtEntryID)
 }
@@ -304,6 +304,11 @@ func (m *metricsStore) CreateAttachment(ctx context.Context, userID string, conv
 	return m.inner.CreateAttachment(ctx, userID, conversationID, attachment)
 }
 
+func (m *metricsStore) CloneAttachment(ctx context.Context, userID string, sourceAttachmentID uuid.UUID) (*model.Attachment, error) {
+	defer observe("clone_attachment", time.Now())
+	return m.inner.CloneAttachment(ctx, userID, sourceAttachmentID)
+}
+
 func (m *metricsStore) UpdateAttachment(ctx context.Context, userID string, attachmentID uuid.UUID, update store.AttachmentUpdate) (*model.Attachment, error) {
 	defer observe("update_attachment", time.Now())
 	return m.inner.UpdateAttachment(ctx, userID, attachmentID, update)
@@ -362,6 +367,26 @@ func (m *metricsStore) DeleteTask(ctx context.Context, taskID uuid.UUID) error {
 func (m *metricsStore) FailTask(ctx context.Context, taskID uuid.UUID, errMsg string, retryDelay time.Duration) error {
 	defer observe("fail_task", time.Now())
 	return m.inner.FailTask(ctx, taskID, errMsg, retryDelay)
+}
+
+func (m *metricsStore) RegisterAttachmentBlobReference(ctx context.Context, storageKey string) error {
+	defer observe("register_attachment_blob_reference", time.Now())
+	return m.inner.RegisterAttachmentBlobReference(ctx, storageKey)
+}
+
+func (m *metricsStore) QueueAttachmentBlobDelete(ctx context.Context, storageKey string) error {
+	defer observe("queue_attachment_blob_delete", time.Now())
+	return m.inner.QueueAttachmentBlobDelete(ctx, storageKey)
+}
+
+func (m *metricsStore) PrepareAttachmentBlobDelete(ctx context.Context, taskID uuid.UUID, storageKey string) (bool, error) {
+	defer observe("prepare_attachment_blob_delete", time.Now())
+	return m.inner.PrepareAttachmentBlobDelete(ctx, taskID, storageKey)
+}
+
+func (m *metricsStore) CompleteAttachmentBlobDelete(ctx context.Context, taskID uuid.UUID) error {
+	defer observe("complete_attachment_blob_delete", time.Now())
+	return m.inner.CompleteAttachmentBlobDelete(ctx, taskID)
 }
 
 func (m *metricsStore) AdminGetCheckpoint(ctx context.Context, clientID string) (*store.ClientCheckpoint, error) {
